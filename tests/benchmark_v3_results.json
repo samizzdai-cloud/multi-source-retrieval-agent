@@ -1,0 +1,1137 @@
+[
+  {
+    "id": "Q01",
+    "query": "nubia 英国店铺3月份的店铺表现以及热卖产品的表现，和去年同期相比的变化趋势",
+    "origin": "v2-id1",
+    "v3_focus": "data→两阶段 (doc+table)",
+    "query_type_expected": "data",
+    "query_type_actual": "data",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 2,
+    "num_sub_queries": 6,
+    "sub_queries_detail": [
+      {
+        "q": "nubia UK 3月 表现",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia UK 热卖产品",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 在 UK/英国/United Kingdom 2026年3月份的店铺销售表现、GMV及各项运营指标",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "2026_Q1"
+        ]
+      },
+      {
+        "q": "nubia 在 UK/英国/United Kingdom 2026年3月份的热卖产品清单及其销售表现",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Sales_Tracking__Inventory",
+          "2026_Q1"
+        ]
+      },
+      {
+        "q": "nubia UK 2025 3月",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 在 UK/英国/United Kingdom 2025年3月份的店铺表现和热卖产品数据，用于同比变化分析",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "2025_Q1"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 3565,
+      "retrieve_ms": 11814,
+      "rerank_ms": 418,
+      "total_ms": 15798
+    },
+    "retrieval": {
+      "raw_chunks": 16,
+      "source_stats": {
+        "bailian": 15,
+        "feishu": 1
+      }
+    },
+    "rerank": {
+      "final_chunks": 3
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 1,
+      "table_chunk_sources": [
+        "网站页面 + 插件"
+      ],
+      "wiki_chunks_in_final": 1
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "网站页面 + 插件",
+        "tool": "feishu",
+        "heading": "Bitable: 网站页面 + 插件 > 数据表",
+        "doc_type": "BITABLE",
+        "text_preview": "| 页面链接 | 项目 | 页面简述 | 域名 | 状态 | 更新时间 | | --- | --- | --- | --- | --- | --- | | --- | --- | --- | --- | --- | --- | | http"
+      },
+      {
+        "score": 0.016,
+        "source": "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21)",
+        "tool": "bailian",
+        "heading": "NUBIA业务总结报告(2026-01-15~2026-01-21)\n 2.2各产品销售|2.3产品净销量对比(截至2026-01-21相同开售天数)",
+        "doc_type": "",
+        "text_preview": "| 产品 | 净销量 | 净销售额 | 优惠金额 | 毛销量 | 毛销售额 | | --- | --- | --- | --- | --- | --- | | Nubia Z80Ultra | 10(-61.5%) | $9,465.06("
+      },
+      {
+        "score": 0.016,
+        "source": "nubia Z70SU首销复盘数据",
+        "tool": "bailian",
+        "heading": "",
+        "doc_type": "",
+        "text_preview": "  Store:UK 2025-05-13:#NBUK1508 2025-05-14:danwilde3@gmail.com [链接](mailto:danwilde3@gmail.com) 2025-05-15:paid 2025-05-"
+      }
+    ]
+  },
+  {
+    "id": "Q02",
+    "query": "nubia各站点近期的流量表现，近三个月，环比25年和对比前一段时间",
+    "origin": "v2-id2",
+    "v3_focus": "data→table搜索触发",
+    "query_type_expected": "data",
+    "query_type_actual": "data",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 4,
+    "sub_queries_detail": [
+      {
+        "q": "nubia 站点 流量",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 2025 流量 环比",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 各站点近三个月（2026年1月至4月）的流量表现及与2025年同期的对比数据",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "2026_Q1"
+        ]
+      },
+      {
+        "q": "nubia 各站点 2025年流量表现及环比增长数据汇总",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "DTC",
+          "2025_Q4"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 3276,
+      "retrieve_ms": 3724,
+      "rerank_ms": 580,
+      "total_ms": 7581
+    },
+    "retrieval": {
+      "raw_chunks": 6,
+      "source_stats": {
+        "bailian": 6
+      }
+    },
+    "rerank": {
+      "final_chunks": 3
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "ZTE 业务总结报告 (2025-12-29 ~ 2026-01-04)",
+        "tool": "bailian",
+        "heading": "ZTE业务总结报告(2025-12-29~~2026-01-04)\n>1.核心表现\n>2.核心业务数据\n>2.2产品库存天数(按区域)>|2.3流量分析|2.3",
+        "doc_type": "",
+        "text_preview": "| 产品 | 区域 | 近2周净销量 | DOS | 风险提示 | 总库存数量 | 可用库存数量 |  |  |  |  |  |  |  |  | | --- | --- | --- | --- | --- | --- | --- | -"
+      },
+      {
+        "score": 0.016,
+        "source": "Weekly meeting 11",
+        "tool": "bailian",
+        "heading": "Meta Ads Performance   李梦佳",
+        "doc_type": "",
+        "text_preview": "| nubia | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Traffic流量数据 | Traffic流量数据 "
+      },
+      {
+        "score": 0.016,
+        "source": "Weekly meeting 12",
+        "tool": "bailian",
+        "heading": "Sales & Traffic Overview马曦乐 Meta Ads Performance李梦佳",
+        "doc_type": "",
+        "text_preview": "| nubia | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Traffic流量数据 | Traffic流量数据 "
+      }
+    ]
+  },
+  {
+    "id": "Q03",
+    "query": "nubia 日本市场的营销计划、博主合作名单或相关的社交媒体推广文档",
+    "origin": "v2-id3",
+    "v3_focus": "concept→仅文档路径",
+    "query_type_expected": "concept",
+    "query_type_actual": "mixed",
+    "type_match": false,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 5,
+    "sub_queries_detail": [
+      {
+        "q": "nubia 日本 营销",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 日本 合作名单",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 日本 社交媒体",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 在 JP/日本/Japan 市场的营销计划、推广策略及社交媒体执行方案",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Market_Intelligence",
+          "Social_Media__Subscriptions"
+        ]
+      },
+      {
+        "q": "nubia 在 JP/日本/Japan 市场的 KOL/博主合作名单、达人联系清单及合作进度",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "KOL",
+          "Affiliate_Marketing"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 2860,
+      "retrieve_ms": 4664,
+      "rerank_ms": 552,
+      "total_ms": 8077
+    },
+    "retrieval": {
+      "raw_chunks": 8,
+      "source_stats": {
+        "bailian": 8
+      }
+    },
+    "rerank": {
+      "final_chunks": 2
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "ZTE项目概况",
+        "tool": "bailian",
+        "heading": "ZTE项目概况\n 2.营销计划|(含大事件路线图)",
+        "doc_type": "",
+        "text_preview": "  nubia Z70S Ultra PLC Management April May June July Aug Sep Oct Z70S Ultra Launch Tablet Launch Social Media Campaigns"
+      },
+      {
+        "score": 0.016,
+        "source": "ZTE项目概况",
+        "tool": "bailian",
+        "heading": "ZTE项目概况\n>四,上市方案&计划\n>2.营销计划|(含大事件路线图)\n>Z70U GTM>>",
+        "doc_type": "",
+        "text_preview": "| nubia Pad Pro | DTC | 271 | | --- | --- | --- | |  | DTC-EU | 145 | |  | DTC-UK | 28 | |  | DTC-GL | 64 | |  | DTC-MX "
+      }
+    ]
+  },
+  {
+    "id": "Q04",
+    "query": "nubia 产品线在全球市场的定价策略和竞品对比分析",
+    "origin": "v2-id5",
+    "v3_focus": "concept→Wiki doc检索",
+    "query_type_expected": "concept",
+    "query_type_actual": "concept",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 2,
+    "num_sub_queries": 4,
+    "sub_queries_detail": [
+      {
+        "q": "nubia 定价 策略",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 全球/GL/Global 市场的定价策略、价格体系以及产品市场定位分析",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "last_long"
+        ]
+      },
+      {
+        "q": "nubia 竞品 对比",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 与全球市场主要竞品的对比分析，包括价格竞争力、产品差异化和市场表现",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Market_Intelligence",
+          "last_long"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 3014,
+      "retrieve_ms": 17802,
+      "rerank_ms": 1077,
+      "total_ms": 21895
+    },
+    "retrieval": {
+      "raw_chunks": 43,
+      "source_stats": {
+        "bailian": 13,
+        "feishu": 30
+      }
+    },
+    "rerank": {
+      "final_chunks": 4
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "2024年全球高端智能手机市场竞争格局与 nubia Z60 Ultra 运营全链路战略分析报告AI",
+        "tool": "feishu",
+        "heading": "第二部分：2024年全球高端智能手机市场化调研与竞品分析 > 2.6 核心竞品参数与市场定位横向对比矩阵",
+        "doc_type": "",
+        "text_preview": "# 第二部分：2024年全球高端智能手机市场化调研与竞品分析  为了将 nubia Z60 Ultra 的内部运营表现置于更宏观的行业坐标系中，本节对2024年第一季度全球智能手机市场的核心趋势及主要竞品进行深度的横向剖析。  ## 2.1"
+      },
+      {
+        "score": 0.016,
+        "source": "nubia Z80 Ultra",
+        "tool": "bailian",
+        "heading": "",
+        "doc_type": "",
+        "text_preview": "  Z80U:16+1TB Black  MSRP:$899.00 MSRP:$899.00 MSRP:$799.00 MSRP:$20,199.00 DTC EBO（11/6 - 12/2）:$869.00 DTC EBO（11/6 - "
+      },
+      {
+        "score": 0.016,
+        "source": "NUBIA 业务总结报告 (2025-12-22 ~ 2025-12-28)",
+        "tool": "feishu",
+        "heading": "",
+        "doc_type": "",
+        "text_preview": "### 一、核心结论  #### 1.1 周期概况  本周处于高投入低产出的调整期，虽广告支出增加 32.3%，但受Global站点支付阻断及高转化邮件流量缺失影响，营收下滑 8.3%，亟需修复技术漏斗。  #### 1.2 业务亮点  l"
+      }
+    ]
+  },
+  {
+    "id": "Q05",
+    "query": "nubia Amazon渠道的运营管理策略和12月工作总结",
+    "origin": "v2-id6",
+    "v3_focus": "mixed→doc+table双路",
+    "query_type_expected": "mixed",
+    "query_type_actual": "mixed",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 4,
+    "sub_queries_detail": [
+      {
+        "q": "nubia Amazon 策略",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia Amazon 12月总结",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia Amazon 渠道的运营管理策略、方案设计及长期规划",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "last_long"
+        ]
+      },
+      {
+        "q": "nubia Amazon 渠道 2025 年 12 月的工作总结、销售数据及运营表现分析",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "2025_Q4"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 2671,
+      "retrieve_ms": 3440,
+      "rerank_ms": 672,
+      "total_ms": 6784
+    },
+    "retrieval": {
+      "raw_chunks": 16,
+      "source_stats": {
+        "bailian": 16
+      }
+    },
+    "rerank": {
+      "final_chunks": 3
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "Weekly meeting 12",
+        "tool": "bailian",
+        "heading": "Weekly meeting 12.18>|Weekly meeting 12.18\n>Project Update符译兰|Weekly meeting 12.",
+        "doc_type": "",
+        "text_preview": "  5375551119762 Weekly meeting 12.18 Review Timeline: 12.10-12.16 Project Update符译兰 Holiday Sale: 2025/12/18-2026/01/12 "
+      },
+      {
+        "score": 0.016,
+        "source": "Weekly meeting 12",
+        "tool": "bailian",
+        "heading": "Weekly meeting12.11|Weekly meeting12.11\n>全渠道销售进度::画nubia销售进度追踪>|Weekly meeting12",
+        "doc_type": "",
+        "text_preview": "  Weekly meeting12.11Review Timeline: 12.03-12.09 全渠道销售进度::画nubia销售进度追踪 Project Update符译兰1. Holiday Sale (圣诞+新年):2025.12"
+      },
+      {
+        "score": 0.015,
+        "source": "nubia自动化运营复盘",
+        "tool": "bailian",
+        "heading": "nubia自动化运营复盘\n>二,待优化事项>|三，其他",
+        "doc_type": "",
+        "text_preview": "|  |  |  |  |  |  |  |  |  |  |  | | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | | 数据\t复盘与分析(店铺流量&订"
+      }
+    ]
+  },
+  {
+    "id": "Q06",
+    "query": "请从业务和财务角度介绍hypershell项目的特点，包括运行到目前为止好的点以及存在的痛点",
+    "origin": "v2-id10",
+    "v3_focus": "concept→仅文档+Wiki",
+    "query_type_expected": "concept",
+    "query_type_actual": "concept",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 2,
+    "num_sub_queries": 6,
+    "sub_queries_detail": [
+      {
+        "q": "hypershell 业务 特点",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "hypershell 业务 痛点",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "介绍 hypershell 项目在业务层面的特点、运行至今的优点以及存在的业务痛点",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Product_Launch_Management",
+          "last_long"
+        ]
+      },
+      {
+        "q": "hypershell 财务 特点",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "hypershell 财务 痛点",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "从财务角度分析 hypershell 项目的特点，包括财务运行的亮点、盈利情况以及存在的财务痛点或风险",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Procurement__Planning",
+          "last_long"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 3593,
+      "retrieve_ms": 5660,
+      "rerank_ms": 985,
+      "total_ms": 10239
+    },
+    "retrieval": {
+      "raw_chunks": 8,
+      "source_stats": {
+        "bailian": 8
+      }
+    },
+    "rerank": {
+      "final_chunks": 3
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "Hypershell项目复盘",
+        "tool": "bailian",
+        "heading": "国家营销洞察\n>5.品牌2026GTM策略\n>5.4解决核心增长困境>|(Experience as a Service & Trust)>",
+        "doc_type": "",
+        "text_preview": "消费级外骨骼是一个全新的品类,其市场认知很大程度上仍被工业和医疗复健应用所定义。因此,激进的营销对于建立品类认知和获取声量(Share of Voice,SOV)是必要的。然而, Hypershell是一款复杂的、高客单价的\"体验型\"硬件。"
+      },
+      {
+        "score": 0.016,
+        "source": "Hypershell DTC 2025年度复盘 V0203",
+        "tool": "bailian",
+        "heading": "Hypershell DTC 2025年度复盘 V0203\n>3.竞争分析\n>3.1竞争概况>|3.1竞争概况\n>增长机会点(Opportunities)\n>1",
+        "doc_type": "",
+        "text_preview": "3.1竞争概况| 维度|Hypershell (HS)|DNSYS|Ascentiz|  | 营销声量 | 行业领跑者:\t热度:DNSYS的5倍以上,已成行业代名词。<br>趋势:曲线呈锯齿状(高爆发) | 平缓跟随者:<br>热度:全年曲"
+      },
+      {
+        "score": 0.015,
+        "source": "HYPERSHELL 业务总结报告 (2026-03-13 ~ 2026-03-19)",
+        "tool": "bailian",
+        "heading": "HYPERSHELL业务总结报告(2026-03-13~2026-03-19)|HYPERSHELL业务总结报告(2026-03-13~2026-03-19)\n",
+        "doc_type": "",
+        "text_preview": "  HYPERSHELL业务总结报告(2026-03-13~2026-03-19)报告周期:2026-03-13~2026-03-19 vs. 2026-03-06~2026-03-12温馨提醒:本报告由 Fastlane Data Age"
+      }
+    ]
+  },
+  {
+    "id": "Q07",
+    "query": "Hypershell 在消费级外骨骼市场的竞品格局和差异化定位",
+    "origin": "v2-id12",
+    "v3_focus": "concept→Wiki doc召回",
+    "query_type_expected": "concept",
+    "query_type_actual": "concept",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 4,
+    "sub_queries_detail": [
+      {
+        "q": "Hypershell 竞品 格局",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "Hypershell 差异化 定位",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "Hypershell 在消费级外骨骼市场的竞品格局、主要竞争对手以及产品的差异化竞争定位分析",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Market_Intelligence",
+          "last_long"
+        ]
+      },
+      {
+        "q": "Hypershell 消费级外骨骼产品的核心卖点、技术优势以及相对于市场同类产品的定位差异",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Marketplace",
+          "last_long"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 4774,
+      "retrieve_ms": 2900,
+      "rerank_ms": 854,
+      "total_ms": 8529
+    },
+    "retrieval": {
+      "raw_chunks": 8,
+      "source_stats": {
+        "bailian": 8
+      }
+    },
+    "rerank": {
+      "final_chunks": 2
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "Jan Brief",
+        "tool": "bailian",
+        "heading": "Jan Brief\n>退货数据\n>2.1营销声量|2.2产品反馈",
+        "doc_type": "",
+        "text_preview": "  根据过去12个月(2025.1-2026.1)谷歌全球搜索热度、Semrush品牌站流量、消费者公开评论(youtube、reddit),目前Hypershell的平均搜索热度约为DNSYS的5倍以上。这意味着在品牌认知度(Brand "
+      },
+      {
+        "score": 0.016,
+        "source": "Hypershell DTC 2025年度复盘V",
+        "tool": "bailian",
+        "heading": "Hypershell DTC 2025年度复盘V.0118\n>6.竞争分析\n>*Semrush Traffic Trends",
+        "doc_type": "",
+        "text_preview": "  根据过去12个月(2025.1-2026.1)谷歌全球搜索热度、Semrush品牌站流量、消费者公开评论(youtube、reddit), 目前Hypershell的平均搜索热度约为DNSYS的5倍以上。这意味着在品牌认知度 (Bran"
+      }
+    ]
+  },
+  {
+    "id": "Q08",
+    "query": "按照渠道分类对比nubia和hypershell的总体渠道表现数据",
+    "origin": "v2-id21",
+    "v3_focus": "多实体+data→多FocusGroup+table",
+    "query_type_expected": "data",
+    "query_type_actual": "data",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 2,
+    "num_sub_queries": 6,
+    "sub_queries_detail": [
+      {
+        "q": "nubia 渠道 数据",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 渠道 表现",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 各渠道（DTC、Marketplace、Affiliate）的总体销售表现、流量及转化率数据汇总",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Sales_Tracking__Inventory",
+          "Marketplace"
+        ]
+      },
+      {
+        "q": "hypershell 渠道 数据",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "hypershell 渠道 表现",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "hypershell 各渠道（DTC、Marketplace、Affiliate）的总体销售表现、流量及转化率数据汇总",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Sales_Tracking__Inventory",
+          "Marketplace"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 4591,
+      "retrieve_ms": 6653,
+      "rerank_ms": 2052,
+      "total_ms": 13298
+    },
+    "retrieval": {
+      "raw_chunks": 12,
+      "source_stats": {
+        "bailian": 12
+      }
+    },
+    "rerank": {
+      "final_chunks": 6
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "Hypershell Q3 Review & Q4 Plan",
+        "tool": "bailian",
+        "heading": "Hypershell Q3 Review & Q4 Plan\n>国家转化详细分析\n>GL>",
+        "doc_type": "",
+        "text_preview": "| Region/Country | Core Traffic Channel | Next-Move Suggestions | | --- | --- | --- | | EU-CH/NL | 瑞士转化主要依靠KOL渠道(22%)和Di"
+      },
+      {
+        "score": 0.016,
+        "source": "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21)",
+        "tool": "bailian",
+        "heading": "NUBIA业务总结报告(2026-01-15~2026-01-21)\n>一、各领域分析\n>1.2清库期产品区域分化明显\n>1.3流量分析\n>1.核心业务数据\n>",
+        "doc_type": "",
+        "text_preview": "|  |  |  | 时长 |  |  |  |  |  |  |  |  |  | | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | ---"
+      },
+      {
+        "score": 0.016,
+        "source": "Weekly meeting 11",
+        "tool": "bailian",
+        "heading": "Meta Ads Performance   李梦佳",
+        "doc_type": "",
+        "text_preview": "| nubia | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Sales销售数据 | Traffic流量数据 | Traffic流量数据 "
+      }
+    ]
+  },
+  {
+    "id": "Q09",
+    "query": "知识库检索Agent的产品架构设计和技术方案",
+    "origin": "v2-id23",
+    "v3_focus": "concept→内部文档",
+    "query_type_expected": "concept",
+    "query_type_actual": "concept",
+    "type_match": true,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 3,
+    "sub_queries_detail": [
+      {
+        "q": "知识库Agent 架构",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "知识库Agent 技术方案",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "请提供关于知识库检索Agent的产品架构设计、技术方案以及核心技术组件的详细说明。",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Product_Launch_Management",
+          "last_long"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 2427,
+      "retrieve_ms": 12462,
+      "rerank_ms": 2415,
+      "total_ms": 17305
+    },
+    "retrieval": {
+      "raw_chunks": 30,
+      "source_stats": {
+        "bailian": 0,
+        "feishu": 30
+      }
+    },
+    "rerank": {
+      "final_chunks": 2
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 1
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "Agentic Fastlane: Agent 工程化建设规划",
+        "tool": "feishu",
+        "heading": "实现路径/计划 > 资源需求",
+        "doc_type": "",
+        "text_preview": "## 实现路径/计划  #### 阶段0：2025年12月  seq{1. 开发框架测试：Langchain v1.0; 2. Agent 开发手册 V0.5：流程、经验初步梳理，作为导入手册; 3. 通用功能初步梳理与沉淀：数据类、报告类"
+      },
+      {
+        "score": 0.015,
+        "source": "feishu 云文档检索Agent_demo 技术方案",
+        "tool": "feishu",
+        "heading": "二、系统架构设计 > 2.4 技术栈清单",
+        "doc_type": "",
+        "text_preview": "## 二、系统架构设计  ### 2.1 Agent执行框架选型  经过对主流Agent开发框架的评估，本方案选定**Google Agent SDK（Google ADK）**作为核心编排框架，选型理由如下：  从工具集成角度，Googl"
+      }
+    ]
+  },
+  {
+    "id": "Q10",
+    "query": "nubia 各项目营销预算和KOL费用 #feishu",
+    "origin": "v3-new",
+    "v3_focus": "#feishu hashtag → required_targets=['feishu'] + table搜索",
+    "query_type_expected": "data",
+    "query_type_actual": "data",
+    "type_match": true,
+    "required_targets_set": true,
+    "required_targets_values": [
+      [
+        "feishu"
+      ]
+    ],
+    "num_focus_groups": 1,
+    "num_sub_queries": 3,
+    "sub_queries_detail": [
+      {
+        "q": "nubia 营销预算",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia KOL 费用",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "nubia 各个项目的营销预算投入和具体 KOL 合作费用清单",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Ads",
+          "KOL"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 2425,
+      "retrieve_ms": 29194,
+      "rerank_ms": 799,
+      "total_ms": 32419
+    },
+    "retrieval": {
+      "raw_chunks": 40,
+      "source_stats": {
+        "bailian": 6,
+        "feishu": 34
+      }
+    },
+    "rerank": {
+      "final_chunks": 2
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 1,
+      "table_chunk_sources": [
+        "nubia Z60S Pro, Z60 Ultra Leading Version Project Master Sheet"
+      ],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "nubia Z60S Pro, Z60 Ultra Leading Version Project ",
+        "tool": "feishu",
+        "heading": "Sheet: nubia Z60S Pro, Z60 Ultra Leading Version Project Master Sheet > KOL Targ",
+        "doc_type": "SHEET",
+        "text_preview": "|  | Product type | 博主名 Influencer's Handle | 博主类型 Tag | 平台 Channel | 平台链接 Channel link | 粉丝数量 Followers | 平均观看量 Average"
+      },
+      {
+        "score": 0.016,
+        "source": "A",
+        "tool": "bailian",
+        "heading": "",
+        "doc_type": "",
+        "text_preview": "  项目:Nubia_2028年02月营销决算费用_营销费用_USD17,835.81_INVFL2803300001 ZTE应付:$17,635.81"
+      }
+    ]
+  },
+  {
+    "id": "Q11",
+    "query": "数据团队月会记录",
+    "origin": "v3-new",
+    "v3_focus": "Wiki doc去重验证（MCP∩Wiki 9个重叠，应只出现一次）",
+    "query_type_expected": "concept",
+    "query_type_actual": "mixed",
+    "type_match": false,
+    "required_targets_set": false,
+    "required_targets_values": [],
+    "num_focus_groups": 1,
+    "num_sub_queries": 3,
+    "sub_queries_detail": [
+      {
+        "q": "数据团队 月会",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "数据团队 2026年4月/本月 月度会议记录及工作总结",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Meeting__Collaboration",
+          "2026_Q2"
+        ]
+      },
+      {
+        "q": "数据团队 2026年3月/上月 月度会议记录及数据汇总",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Meeting__Collaboration",
+          "2026_Q1"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 3211,
+      "retrieve_ms": 3063,
+      "rerank_ms": 629,
+      "total_ms": 6904
+    },
+    "retrieval": {
+      "raw_chunks": 12,
+      "source_stats": {
+        "feishu": 0,
+        "bailian": 12
+      }
+    },
+    "rerank": {
+      "final_chunks": 2
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 0,
+      "table_chunk_sources": [],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "202602数据复盘&月会",
+        "tool": "bailian",
+        "heading": "202602数据复盘&月会",
+        "doc_type": "",
+        "text_preview": "| 国家 | 净销量 | 净销售额 | 优惠金额 | 成功订单数 | 成功订单数 | 客单价 | 毛销量 | 毛销售额 | | --- | --- | --- | --- | --- | --- | --- | --- | --- | | "
+      },
+      {
+        "score": 0.016,
+        "source": "202602数据复盘&月会",
+        "tool": "bailian",
+        "heading": "202602数据复盘&月会\n>4.预决算管理>",
+        "doc_type": "",
+        "text_preview": "由于1月2月业绩达成率不及预期,目前销售费用累计超支20325美金,计划在3月、4月找平。||GMV(当期出库结算)|GMV(当期出库结算)||2,008,918.51|1,114,645.46|894,273.05|  |  |  |  "
+      }
+    ]
+  },
+  {
+    "id": "Q12",
+    "query": "项目任务进展和状态 #feishu",
+    "origin": "v3-new",
+    "v3_focus": "#feishu + data → bitable reader触发",
+    "query_type_expected": "data",
+    "query_type_actual": "data",
+    "type_match": true,
+    "required_targets_set": true,
+    "required_targets_values": [
+      [
+        "feishu"
+      ]
+    ],
+    "num_focus_groups": 1,
+    "num_sub_queries": 3,
+    "sub_queries_detail": [
+      {
+        "q": "项目任务 进展",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "任务状态 追踪",
+        "targets": [
+          "feishu"
+        ],
+        "tags": []
+      },
+      {
+        "q": "当前项目各项任务的具体进展、完成百分比以及最新的执行状态是什么？",
+        "targets": [
+          "bailian"
+        ],
+        "tags": [
+          "Meeting__Collaboration"
+        ]
+      }
+    ],
+    "timing": {
+      "plan_ms": 2426,
+      "retrieve_ms": 34272,
+      "rerank_ms": 1220,
+      "total_ms": 37919
+    },
+    "retrieval": {
+      "raw_chunks": 46,
+      "source_stats": {
+        "bailian": 0,
+        "feishu": 46
+      }
+    },
+    "rerank": {
+      "final_chunks": 3
+    },
+    "v3_signals": {
+      "table_chunks_in_final": 2,
+      "table_chunk_sources": [
+        "项目甘特图（含任务依赖管理）",
+        "任务管理"
+      ],
+      "wiki_chunks_in_final": 0
+    },
+    "top3_chunks": [
+      {
+        "score": 0.016,
+        "source": "季度规划会议",
+        "tool": "feishu",
+        "heading": "六、会议结论",
+        "doc_type": "",
+        "text_preview": "# 六、会议结论  会议结束后，在此处记录会议结论及后续的待办事项。待相关负责人完成任务后，标记任务清单，实时同步工作进度。也可将该模块放到文档前面，方便同步进展  list{- 会议结论; - 项目任务一因研发资源问题，暂时不做; - ."
+      },
+      {
+        "score": 0.016,
+        "source": "项目甘特图（含任务依赖管理）",
+        "tool": "feishu",
+        "heading": "Sheet: 项目甘特图（含任务依赖管理） > 项目进展汇报",
+        "doc_type": "SHEET",
+        "text_preview": "|  | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | 项目进展汇报 | | --- | --- | --- | --- | --- | --"
+      },
+      {
+        "score": 0.015,
+        "source": "任务管理",
+        "tool": "feishu",
+        "heading": "Bitable: 任务管理 > 任务拆解",
+        "doc_type": "BITABLE",
+        "text_preview": "| 任务描述 | 重要程度 | 进展 | 任务执行人 | 每周进展记录 | 开始日期 | 截止日期 | 相关部门 | | --- | --- | --- | --- | --- | --- | --- | --- | | --- | ---"
+      }
+    ]
+  }
+]

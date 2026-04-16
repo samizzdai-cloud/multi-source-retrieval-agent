@@ -1,0 +1,223 @@
+[
+  {
+    "idx": 1,
+    "heading_path": "Sheet: DTC项目运营表 > 服务点位",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "服务点位",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_kIzqsD_s0",
+      "row_start": 0,
+      "row_end": 17,
+      "table_rows": 17,
+      "header_coverage": 0.994,
+      "is_llm_filtered": false
+    },
+    "text_len": 814,
+    "text": "| DTC托管服务 | DTC托管服务 | 收费标准 | 结算周期 |\n| --- | --- | --- | --- |\n| 平台成本 | 平台成本 | GMV*13.8% | 月度 |\n| 基础托管服务 | 基础托管服务 | GMV*13.8% | 月度 |\n| 二线客服 | 二线客服 | GMV*13.8% | 月度 |\n| 物流仓储 | 按区域，按产品类型，固定头程单价 | 按实际发货数量 | 月度 |\n| 物流仓储 | 按区域，按产品类型，固定尾程单价 | 按销售出库数量 | 月度 |\n| IT基建 | 基建软件工具 | $5,500.00 | 月度 |\n| IT基建 | 站点技术维护 | $4,000.00 | 月度 |\n| 增长运营 | 增长运营 | 收费 | 结算周期 |\n| 营销投放 | PR媒体公关 | 按实际发生 | 月度 |\n| 营销投放 | KOL网红营销 | 按实际发生 | 月度 |\n| 营销投放 | - Ads渠道（Meta ads, Google ads, Tiktok Ads, 及其他平台）广告费用及工具费用 - Referral工具费用，相关开发成本，及Referral激励费用 - Affiliate工具及平台拓展费用 -EDM/Blog内容策划 -社媒平台运营 | 按实际发生 | 月度 |\n| 营销服务 | 营销代付服务 | 3% of MKT payment | 月度 |\n| 营销服务 | 营销方案策划 | 15% of MKT payment | 月度 |\n| 其他说明 |  | 收费 | 结算周期 |\n| 促销转化（成本参考） | 如零售折扣，促销活动复杂落地页搭建等 | 按实际需求评估（按增值服务另行报价） | 按实际 |\n| 其他技术服务 |  | 按实际需求评估（按增值服务另行报价） | 按实际 |\n| 售后 | 售后 | 按实际售后订单 | 季度 |"
+  },
+  {
+    "idx": 2,
+    "heading_path": "Sheet: DTC项目运营表 > 工作汇总",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "工作汇总",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_12e766_s0",
+      "row_start": 0,
+      "row_end": 20,
+      "table_rows": 20,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 1480,
+    "text": "| DTC托管运营服务 | DTC托管运营服务 | DTC托管运营服务 | DTC托管运营服务 | DTC托管运营服务 | DTC托管运营服务 |\n| --- | --- | --- | --- | --- | --- |\n| 域 | 类型 | 工作描述（GL/EU/UK/MX 4个站点） | Fastlane | ZTE | 备注 |\n| 电商运营 | 常规页面维护 | 店铺首页图文配置：店铺顶部横幅，导航栏（含页头页尾），资源展示位 |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| 电商运营 | 新页面发布 | Teasing KV, Teasing落地页，新品PDP，产品购买页（含预售，开售，日常店铺活动配置） |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| 电商运营 | 销售产品信息 | 产品信息创建：Title，描述，橱窗图，变体，SKU, 价格，库存，仓库，发货时间，其他特殊说明，Coupon创建 |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| 电商运营 | 日常维护 | 根据销售预测进行各站点备货和调拨计划，店铺库存配置 |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| 电商运营 | 日常维护 | 用户评论内容监控：差评处理 |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| 电商运营 | 日常维护 | 运输规则配置：主要指配件单独购买的运费 |  | Y | ZTE团队在FL指定系统上提交页面配置需求，FL接收需求后完成页面配置和库存调拨 |\n| OPS | 库存管理 | 香港，墨西哥，欧洲，英国4个仓库的出入库记录，库存明细（商品机，售后机，翻新机），上新库存同步，低库存风险提示 | Y |  |  |\n| OPS | 库存管理 | 根据品牌方备货和调拨计划，执行各仓库间库存调拨，主要是香港库存往海外仓库的调拨 | Y |  |  |\n| OPS | 订单履约 | 配置交运规则 | Y | Y | ZTE团队在FL指定系统提交活动/上新配置规则，FL物流团队完成配置 |\n| OPS | 订单履约 | 推单异常订单反馈与处理 | Y |  |  |\n| OPS | 订单履约 | 核实各区域清关时间，确定商城发货时间，反馈物流时效，物流轨迹和上架确认 | Y |  |  |\n| OPS | 订单履约 | 货损索赔，物流申诉 | Y |  |  |\n| OPS | 订单履约 | 物流账单核对 | Y |  |  |\n| 二线客服 | 订单 | 风险订单人工审核 | Y |  |  |\n| 二线客服 | 订单 | 订单退款，补发，换货执行（老品+Z70U之后新品） | Y |  |  |\n| 二线客服 | 订单 | 地址异常用户沟通和处理 | Y | Y | FL反馈地址异常订单，交由ZTE一线客服跟进处理（当前呼叫云有对应沟通和推单权限） |\n| 二线客服 | 申诉 | 拒付（chargeback）及欺诈订单申诉：对用户沟通+对银行网关举证申诉 | Y |  |  |\n| 二线客服 | 申诉 | 订单交付异常的跟进和索赔 | Y |  |  |\n| 二线客服 | 对账 | 售后订单对账 | Y |  |  |"
+  },
+  {
+    "idx": 3,
+    "heading_path": "Sheet: DTC项目运营表 > PDP",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "PDP",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_LlKoIH_s0",
+      "row_start": 0,
+      "row_end": 10,
+      "table_rows": 10,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 3454,
+    "text": "| 上线站点 | 多选项：GL/EU/UK/MX | 多选项：GL/EU/UK/MX | 多选项：GL/EU/UK/MX | 多选项：GL/EU/UK/MX | 多选项：GL/EU/UK/MX |\n| --- | --- | --- | --- | --- | --- |\n| 页面需求 | 位置 | 标准模板参考 | 点击上传素材 | 文案(下载标准模板填写后上传) | 上线时间（（*以上线发布时间要求素材和文案上传时间：如<15个工作日，该页面发布需求无法提交。）） |\n| Launch & Pre-order KV | Homepage & PDP KV | {'fileToken': 'F3OUbAHhio8r1MxhVLac09qunAc', 'height': 295, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/F3OUbAHhio8r1MxhVLac09qunAc/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 823} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| Open sales KV | Homepage & PDP KV | {'fileToken': 'KTLEbhoknozigqxHVp2cJW2rnNg', 'height': 749, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/KTLEbhoknozigqxHVp2cJW2rnNg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1569} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | KSP集合 | {'fileToken': 'OD4abTOgFoBcRMx8clic2xG3ndg', 'height': 692, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/OD4abTOgFoBcRMx8clic2xG3ndg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 963} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | 展开卖点图1 | {'fileToken': 'DwE7bMui7oltDVx65QMcwMacnOd', 'height': 507, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/DwE7bMui7oltDVx65QMcwMacnOd/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 988} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | 展开卖点图2 | {'fileToken': 'NhEhb5fm5o9zHrxxSKPctxIan5c', 'height': 673, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/NhEhb5fm5o9zHrxxSKPctxIan5c/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 935} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | ...(规定数量) |  |  |  |  |\n| PDP | 颜色展示 | {'fileToken': 'F0Cubw8BLoSuwjxTSsVcJtrkn7e', 'height': 813, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/F0Cubw8BLoSuwjxTSsVcJtrkn7e/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1313} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | 样张展示 | {'fileToken': 'P753b7pMeomzH9xol9WcE2Jdnab', 'height': 518, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/P753b7pMeomzH9xol9WcE2Jdnab/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1016} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |\n| PDP | Specifications | {'fileToken': 'Dlsmb1wkeosgosxbZC4cHriDnBg', 'height': 726, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/Dlsmb1wkeosgosxbZC4cHriDnBg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 850} | 说明素材尺寸像素要求： PC端： Pad端 移动端： |  |  |"
+  },
+  {
+    "idx": 4,
+    "heading_path": "Sheet: DTC项目运营表 > PDP",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "PDP",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_LlKoIH_s1",
+      "row_start": 24,
+      "row_end": 24,
+      "table_rows": 0,
+      "header_coverage": 0.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 88,
+    "text": "| 预售购买页 | 橱窗图 |  | 说明素材尺寸像素数量要求： PC端： 移动端： |  |  |\n| --- | --- | --- | --- | --- | --- |"
+  },
+  {
+    "idx": 5,
+    "heading_path": "Sheet: DTC项目运营表 > PDP",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "PDP",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_LlKoIH_s2",
+      "row_start": 26,
+      "row_end": 38,
+      "table_rows": 12,
+      "header_coverage": 0.997,
+      "is_llm_filtered": false
+    },
+    "text_len": 4224,
+    "text": "| KV | Homepage & PDP KV | {'fileToken': 'Ho8bbWvMmoFGFpx2l1Tcvulvnoc', 'height': 321, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/Ho8bbWvMmoFGFpx2l1Tcvulvnoc/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 779} | 说明素材尺寸像素要求： PC端： 移动端： |  |  |\n| --- | --- | --- | --- | --- | --- |\n| PDP | KSP集合 | {'fileToken': 'OD4abTOgFoBcRMx8clic2xG3ndg', 'height': 692, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/OD4abTOgFoBcRMx8clic2xG3ndg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 963} | 卖点图数量/尺寸/像素要求 PC端： 移动端： |  | PDP需规定模块数量 |\n| PDP | 展开卖点图1 | {'fileToken': 'DwE7bMui7oltDVx65QMcwMacnOd', 'height': 507, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/DwE7bMui7oltDVx65QMcwMacnOd/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 988} |  |  |  |\n| PDP | 展开卖点图2 | {'fileToken': 'NhEhb5fm5o9zHrxxSKPctxIan5c', 'height': 673, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/NhEhb5fm5o9zHrxxSKPctxIan5c/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 935} |  |  |  |\n| PDP | ... |  |  |  |  |\n| PDP | 样张展示 | {'fileToken': 'P753b7pMeomzH9xol9WcE2Jdnab', 'height': 518, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/P753b7pMeomzH9xol9WcE2Jdnab/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1016} |  |  |  |\n| PDP | Specifications | {'fileToken': 'Dlsmb1wkeosgosxbZC4cHriDnBg', 'height': 726, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/Dlsmb1wkeosgosxbZC4cHriDnBg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 850} |  |  |  |\n| PDP | What’s in the box? | {'fileToken': 'NmLGb5v9PoK7QFxINAKcun4znhb', 'height': 258, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/NmLGb5v9PoK7QFxINAKcun4znhb/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1001} |  |  |  |\n| 购买页 | 橱窗图 |  | 说明素材尺寸像素数量要求： PC端： 移动端： |  |  |\n| 购买页 | KSP集合 | {'fileToken': 'RKE9bDUHtotPDAxLtp7c4nZinMG', 'height': 726, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/RKE9bDUHtotPDAxLtp7c4nZinMG/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 975} | 说明素材尺寸像素数量要求： PC端： 移动端： |  |  |\n| 购买页 | Specifications | {'fileToken': 'Dlsmb1wkeosgosxbZC4cHriDnBg', 'height': 726, 'link': 'https://fastbase.feishu.cn/space/api/box/stream/download/v2/cover/Dlsmb1wkeosgosxbZC4cHriDnBg/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 850} | / |  |  |\n| 购买页 | What’s in the box? | {'fileToken': 'NmLGb5v9PoK7QFxINAKcun4znhb', 'height': 258, 'link': 'https://fastbase.feishu.cn/space/api/box/stream/download/v2/cover/NmLGb5v9PoK7QFxINAKcun4znhb/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1001} | / |  |  |\n| 购买页 | 媒体测评内容展示 | {'fileToken': 'T4GEbgrmTo5utGx2DDVctz4unub', 'height': 319, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/T4GEbgrmTo5utGx2DDVctz4unub/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1077} |  |  |  |"
+  },
+  {
+    "idx": 6,
+    "heading_path": "Sheet: DTC项目运营表 > by Abraham",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "by Abraham",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_NiBeyO_s0",
+      "row_start": 0,
+      "row_end": 3,
+      "table_rows": 3,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 1265,
+    "text": "| 商号 | 商业板块 | 服务 | 工作项 | 服务主体(拟) | 收费模式 | 币别 | 结算项目（待确认） | 疑问点 | 备注 |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| Fastgrowth | A04.01 | 平台开店 | Fastgrowth DTC+ 数字化平台及客服 交易记录处理及合规运营 | Fastlane 美国、荷兰、墨西哥、香港等主体 | GMV * 10% | 本地币种 | 收单金额 平台服务费 | 本地主体和销售区域的对应关系是标准的，还是看情况？ | GMV = ∑(销售量 * 销售价格)  1. 销售量：合作期内DTC商城累计实际售出（总销售数扣除退货数[非Fastlane原因产生的退货退款除外]）的商品总量。  2. 销售价格：消费者购买商品所付出的实际金额（包括履约费用、包装费用及其他附加费用，不包括增值税及/或销售税；扣除因Fastlane原因返还消费者的退款），以本币列示。 |\n| Fastgrowth | A04.02 | Fulfilled by Fastgrowth | 本地订单履约及货物管理 (不含产品售后) | Fastlane 美国、荷兰、墨西哥、香港等主体 | 按件、按地区单独计价 | 本地币种 | 尾程配送费 汇总到平台服务费？ |  |  |\n| Fastgrowth | A06 | 全球统一结算 | 收付款、多币种转换及统一结算 | Fastlane Limited | 货币转换费用：本币收款金额 * 汇率中间价 * 2% 预付资金成本：0.05% / 日 | 美元 | 汇总到平台服务费？ | 1.若跟平台开店不一样，那订单的对账单就有 2 份了，这份单独 2% 汇率 2.不是所有币别我们成本都在 2%，有的小币别会去到 3.5% 及以上 | [{'text': '1. 汇率：指 ', 'type': 'text'}, {'cellPosition': None, 'link': 'http://XE.com', 'text': 'XE.com', 'type': 'url'}, {'text': ' (', 'type': 'text'}, {'cellPosition': None, 'link': 'https://www.xe.com/)', 'text': 'https://www.xe.com/)', 'type': 'url'}, {'text': ' 的 每日 GMT+8 00:00 各币种间兑换汇率。\\n', 'type': 'text'}, {'text': '2. 兑换规则：以订单下达时点当日对应的汇率转换为美元。\\n', 'type': 'text'}, {'text': '3. 对账：双方以月度为单位对账，确认后，Fastlane向客户的离岸主体账户支付/收取对应款项。', 'type': 'text'}] |"
+  },
+  {
+    "idx": 7,
+    "heading_path": "Sheet: DTC项目运营表 > by Abraham",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "by Abraham",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_NiBeyO_s1",
+      "row_start": 5,
+      "row_end": 17,
+      "table_rows": 12,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 2613,
+    "text": "| Fastgrowth | A05.01 | 商业管理 | 商品策略 生命周期损益管理 价格管理 PSI 进销存管理 S&OP 销售与运营计划 | Fastlane Limited | GMV * 3% | 本地币种 | 商业管理费 汇总到平台服务费？ | 库存损失赔偿金额怎么算？ |  |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n| Fastgrowth | A05.02 | 头程履约管理 | 委任第三方执行： 货物头程履约 各仓库间库存调拨 | Gamegeek Limited | 按件、按地区单独计价 | 美元 | 头程服务费 | 待确认： 头程计算方式：by销售订单 or by头程实际发生 |  |\n| Fastgrowth | A05.03 | 商业运营咨询服务 | 针对产品销售的促进，提供管理服务  - 促销折扣  - 售后及货损的补贴  - 其他业务管理 | Fastlane Limited | 按件、按地区单独计价 | 美元 | 库存损失赔偿 仅退款损失 | 待确认：具体的事项，是否均摊到每个产品 |  |\n| Fastgrowth | A06 | 全球统一结算 | 收付款、多币种转换及统一结算 | Fastlane Limited | 货币转换费用：本币收款金额 * 汇率中间价 * 2% 预付资金成本：0.05% / 日 | 美元 | 汇总到平台服务费？ | 1.若跟平台开店不一样，那订单的对账单就有 2 份了，这份单独 2% 汇率 2.不是所有币别我们成本都在 2%，有的小币别会去到 3.5% 及以上 | [{'text': '1. 汇率：指 ', 'type': 'text'}, {'cellPosition': None, 'link': 'http://XE.com', 'text': 'XE.com', 'type': 'url'}, {'text': ' (', 'type': 'text'}, {'cellPosition': None, 'link': 'https://www.xe.com/)', 'text': 'https://www.xe.com/)', 'type': 'url'}, {'text': ' 的 每日 GMT+8 00:00 各币种间兑换汇率。\\n', 'type': 'text'}, {'text': '2. 兑换规则：以订单下达时点当日对应的汇率转换为美元。\\n', 'type': 'text'}, {'text': '3. 对账：双方以月度为单位对账，确认后，Fastlane向客户的离岸主体账户支付/收取对应款项。', 'type': 'text'}] |\n| Fastlane | B02 | 平台/产品订阅 | 包括Fastgrowth DTC+相关 | 深圳腾飞讯途 | $5,500 / 月 | 美元 | 平台订阅费 |  |  |\n| Fastlane | B03 | 高级运营服务 | 站点技术维护 | 深圳腾飞讯途 | $4,000 / 月 | 美元 | 高级运营服务费 |  |  |\n| Fastlane | B04 | 定制开发 | 定制运营活动落地页搭建及站点开发等 | 深圳腾飞讯途 | 固定费用，按需报价 | 美元 | 定制开发费 |  |  |\n| Fastlane | B05 | 策略、创意与内容 | 营销方案策划与管理 创意素材制作 EDM/Blog内容策划 社媒平台运营 Referral Affiliate Marketing | Fastlane Limited | 素材制作：固定费用，按需报价 营销策划与运营管理：Marketing Expense * 15% | 美元 | ？ |  |  |\n| Fastlane | B06.01 | PR 媒体宣发 | 全球媒体合作 - 新闻通撰写与发布 - 媒体产品评测 - 付费媒体采买合作 - 媒体关系维护及合作 | Fastlane Limited | Paid media: Media Expense * 15% Organic media： top tier（monthly traffic >10M）--$3000/article; tier 1（monthly traffic 5M-10M）--$1500/article; tier 2（monthly traffic 1M-5M）--$1000/article; tier 3（monthly traffic 500K-1M）--$800/article； tier 4（monthly traffic <500K）--$500/article； | 本地币种 | 媒体宣发费 媒体宣发代付服务费 |  |  |\n| Fastlane | B07 | KOL 红人营销 | 网络红人合作，如品牌联动，产品测评，创意活动等 | Fastlane Limited | Paid: Influencer Expense * 15% Organic: tier 1 (Subscribers>500k) --lowest $4,000 tier 2-3 (Subscribers 50k-500k) --lowest $2,000 tier 4 (Subscribers<50k) --lowest $500 | 本地币种 | 红人营销费 红人营销代付服务费 |  |  |\n| Fastlane | B08 | Ads 广告 | 定制化数字广告投放及管理服务（包括Google, Meta, Tiktok等平台） | Fastlane Limited | Ads Expense: US $0-10k / month --15% US $10-50k / month --12% US $50k+ / Month 10% | 美元 | 广告费 广告代付服务费 |  |  |\n| / | / | 费用代付服务 |  |  | 代付费用 * 3% | 本地币种 | 具体是指？ |  |  |\n|  |  |  |  |  |  |  | 首次合作的缴费项目算保证金？Or？ |  |  |"
+  },
+  {
+    "idx": 8,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s0",
+      "row_start": 0,
+      "row_end": 13,
+      "table_rows": 13,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 5389,
+    "text": "| 上线站点 | 多选项：GL/EU/UK/MX | 上线时间 | 例：北京时间2025年6月2日20点整上线 | （*以上线发布时间要求素材和文案上传时间：如<15个工作日，该页面发布需求无法提交。） | （*以上线发布时间要求素材和文案上传时间：如<15个工作日，该页面发布需求无法提交。） | （*以上线发布时间要求素材和文案上传时间：如<15个工作日，该页面发布需求无法提交。） |\n| --- | --- | --- | --- | --- | --- | --- |\n| 页面需求 | 位置 | 标准模板参考 | 标准模板参考 | 点击上传素材 | 文案(下载标准模板填写后上传) |  |\n| Teasing KV | Homepage | {'fileToken': 'LeN0bUnqIohZchxGMXXcgZz5nOe', 'height': 259, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/LeN0bUnqIohZchxGMXXcgZz5nOe/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 492} | {'fileToken': 'GJhlbkOuIoVFQPxa0pBcCxTSnfh', 'height': 774, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/GJhlbkOuIoVFQPxa0pBcCxTSnfh/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 443} | 说明素材尺寸像素要求： PC端： Pad端 移动端： | [{'cellPosition': {'rangeId': 'QTE2', 'sheetId': 'yozylc'}, 'link': '', 'text': 'Home page KV文案模板', 'type': 'url'}] |  |\n| Teasing Landing Page | Landing Page KV | {'fileToken': 'CQEebf5ODorHXRxlta1c8jLlnEt', 'height': 488, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/CQEebf5ODorHXRxlta1c8jLlnEt/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1154} | {'fileToken': 'Tf7abpnOfobuKpxkYdFcODW0nTh', 'height': 506, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/Tf7abpnOfobuKpxkYdFcODW0nTh/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 233} | 说明素材尺寸像素要求： PC端： Pad端 移动端： | [{'cellPosition': {'rangeId': 'QTE2', 'sheetId': 'yozylc'}, 'link': '', 'text': 'Landing page KV文案模板', 'type': 'url'}] |  |\n| Teasing Landing Page | KV下第一个模块 Launch Journey | {'fileToken': 'T3XBb5nP4owFbyxBSNscebv5ned', 'height': 117, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/T3XBb5nP4owFbyxBSNscebv5ned/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 467} |  | / | [{'cellPosition': {'rangeId': 'QTIz', 'sheetId': 'yozylc'}, 'link': '', 'text': '时间线和对应时间线权益文案', 'type': 'url'}] |  |\n| Teasing Landing Page | Landing Page KSP | {'fileToken': 'KwPBbOeJOoQ8w3xLdIOcnk4sn3d', 'height': 469, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/KwPBbOeJOoQ8w3xLdIOcnk4sn3d/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1136} | {'fileToken': 'LKYMbgdXvouKzcxSTaGcxVl0nob', 'height': 536, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/LKYMbgdXvouKzcxSTaGcxVl0nob/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 223} | 卖点图数量/尺寸/像素要求 PC端： Pad端 移动端： | [{'cellPosition': {'rangeId': 'QTMy', 'sheetId': 'yozylc'}, 'link': '', 'text': '卖点图文案', 'type': 'url'}] |  |\n| Teasing Landing Page | Pre-order benefits | {'fileToken': 'DY1VbIF1gomvPixJ6KAcE7bPnld', 'height': 564, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/DY1VbIF1gomvPixJ6KAcE7bPnld/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 847} | {'fileToken': 'RnMGbsDb2oHTC1x3ROQcho7xnWd', 'height': 390, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/RnMGbsDb2oHTC1x3ROQcho7xnWd/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 218} | 说明素材尺寸像素要求： PC端： Pad端 移动端： | [{'cellPosition': {'rangeId': 'QTQx', 'sheetId': 'yozylc'}, 'link': '', 'text': '预售权益文案', 'type': 'url'}] |  |\n| Teasing Landing Page | T&C标准模块 | {'fileToken': 'BoUqb36LcoY4ZBxEHpDcpnFnn4b', 'height': 227, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/BoUqb36LcoY4ZBxEHpDcpnFnn4b/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 1065} | {'fileToken': 'QYaXbY4cToJBIYxQHPacMebbngc', 'height': 185, 'link': 'https://internal-api-drive-stream.feishu.cn/space/api/box/stream/download/v2/cover/QYaXbY4cToJBIYxQHPacMebbngc/?height=1280&mount_node_token=LC1BsAqWph5DxstTwXYcojsjnic&mount_point=sheet_image&policy=equal&width=1280', 'text': '', 'type': 'embed-image', 'width': 229} | / | [{'cellPosition': {'rangeId': 'QTQ2', 'sheetId': 'yozylc'}, 'link': '', 'text': 'T&C文案', 'type': 'url'}] |  |\n| 多语言配置说明：默认GL和UK站点配置英文，MX站点配置西班牙语，EU站点如有本地小语种文案，则对应国家配置对应小语种，如无本地小语种文案，则配置英文，最多可配置4种小语种文案 |  |  |  |  |  |  |\n| Homepage KV文案模板 |  |  |  |  |  |  |\n| 文案类型 | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| 产品名 |  |  |  |  |  |  |\n| 标题（活动主题/产品Slogan） |  |  |  |  |  |  |\n| 发布时间 |  |  |  |  |  |  |"
+  },
+  {
+    "idx": 9,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing > Landing page KV文案模板",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s1",
+      "row_start": 15,
+      "row_end": 20,
+      "table_rows": 5,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 231,
+    "text": "Landing page KV文案模板\n| 文案类型 | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 产品名 |  |  |  |  |  |  |\n| 标题（活动主题/产品Slogan） |  |  |  |  |  |  |\n| 发布时间 |  |  |  |  |  |  |\n| 预售权益文案 |  |  |  |  |  |  |"
+  },
+  {
+    "idx": 10,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing > 发布时间线文案",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s2",
+      "row_start": 22,
+      "row_end": 29,
+      "table_rows": 7,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 457,
+    "text": "发布时间线文案\n| 文案类型 | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 阶段1 时间+标题 | 例： 6.5 nubia Pad Pro Preview |  |  |  |  |  |\n| 阶段1 权益 | 例： Exclusive Discount |  |  |  |  |  |\n| 阶段2 时间+标题 | 例： 6.12-6.24 Official nubia Pad Pro Launch & Pre-order |  |  |  |  |  |\n| 阶段2 权益 | 例： Exclusive Discount Free Gift |  |  |  |  |  |\n| 阶段3 时间+标题 | 例： 6.24 Official nubia Pad Pro Sales Begin |  |  |  |  |  |\n| 阶段3 权益 | / |  |  |  |  |  |"
+  },
+  {
+    "idx": 11,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing > 卖点图文案",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s3",
+      "row_start": 31,
+      "row_end": 38,
+      "table_rows": 7,
+      "header_coverage": 0.993,
+      "is_llm_filtered": false
+    },
+    "text_len": 270,
+    "text": "卖点图文案\n| 文案类型 | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| --- | --- | --- | --- | --- | --- | --- |\n| KSP模块标题 |  |  |  |  |  |  |\n| 卖点1小标题 |  |  |  |  |  |  |\n| 卖点1描述文案 |  |  |  |  |  |  |\n| 卖点2小标题 |  |  |  |  |  |  |\n| 卖点2描述文案 |  |  |  |  |  |  |\n| .... |  |  |  |  |  |  |"
+  },
+  {
+    "idx": 12,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s4",
+      "row_start": 40,
+      "row_end": 43,
+      "table_rows": 3,
+      "header_coverage": 0.987,
+      "is_llm_filtered": false
+    },
+    "text_len": 176,
+    "text": "| 预售权益模块标题 | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 权益1文案 |  |  |  |  |  |  |\n| 权益2文案 |  |  |  |  |  |  |\n| .... |  |  |  |  |  |  |"
+  },
+  {
+    "idx": 13,
+    "heading_path": "Sheet: DTC项目运营表 > Teasing",
+    "score": 0.3,
+    "metadata": {
+      "doc_type": "SHEET",
+      "tab": "Teasing",
+      "section_id": "LC1BsAqWph5DxstTwXYcojsjnic_yozylc_s5",
+      "row_start": 45,
+      "row_end": 46,
+      "table_rows": 1,
+      "header_coverage": 1.0,
+      "is_llm_filtered": false
+    },
+    "text_len": 133,
+    "text": "| T&C文案（FL标准化T&C文案） | 英文（必填） | ES | IT | DE | FR | 可自定义1 |\n| --- | --- | --- | --- | --- | --- | --- |\n| 其他补充说明文案 |  |  |  |  |  |  |"
+  }
+]
