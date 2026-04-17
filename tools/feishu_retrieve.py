@@ -236,6 +236,111 @@ def _chunk_result_to_unified(cr, source_tool: str = "feishu") -> UnifiedChunk:
     )
 
 
+async def _two_stage_score_chunks(
+    chunks: List[UnifiedChunk],
+    query: str,
+    doc_pool: "object",
+    bm25_noise: float = 0.10,
+    rsf_noise: float = 0.20,
+    bm25_weight: float = 0.6,
+    emb_weight: float = 0.4,
+) -> List[UnifiedChunk]:
+    """Two-stage scoring for table/bitable/doc chunks.
+
+    Stage 1: BM25+IDF → bm25_noise filter (keyword relevance)
+    Stage 2: RSF hybrid (reuse BM25 + embedding) → rsf_noise filter
+
+    Args:
+        bm25_noise: Stage 1 threshold — chunks below this BM25 score are dropped
+        rsf_noise:  Stage 2 threshold — chunks below this RSF hybrid are dropped
+        bm25_weight: Weight of BM25 in RSF formula (table=0.6, doc=0.3)
+        emb_weight:  Weight of embedding in RSF formula (table=0.4, doc=0.7)
+    """
+    if not chunks:
+        return chunks
+
+    from tools.kw_generalization import expand_keywords
+    from tools.feishu_doc_pool import _bm25_score, _compute_idf
+    import re
+
+    raw_words = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
+    expanded_query = " ".join(expand_keywords(raw_words))
+
+    # Build IDF from chunk corpus
+    idf_texts = {f"c_{i}": [type('C', (), {'content': c.text})()] for i, c in enumerate(chunks)}
+    idf = _compute_idf(idf_texts)
+
+    # ── Stage 1: BM25 noise filter ────────────────────────────────
+    bm25_scores = {}
+    stage1_pass = []
+    for ci, chunk in enumerate(chunks):
+        bm25_raw = _bm25_score(expanded_query, chunk.text, idf=idf)
+        bm25_norm = min(1.0, max(0.0, bm25_raw / 5.0))
+        bm25_scores[ci] = bm25_norm
+        if bm25_norm >= bm25_noise:
+            stage1_pass.append((ci, chunk))
+
+    logger.info("_two_stage_score: stage1 BM25 %d/%d passed (threshold=%.2f)",
+                len(stage1_pass), len(chunks), bm25_noise)
+
+    if not stage1_pass:
+        return []
+
+    # ── Stage 2: RSF hybrid (BM25 reused + embedding) ─────────────
+    cache = doc_pool._embedding_cache if hasattr(doc_pool, '_embedding_cache') else None
+    focus_embs = None
+    focuses = []
+    if cache and hasattr(cache, 'focus_embeddings') and cache.focus_embeddings:
+        focus_embs = cache.focus_embeddings
+        focuses = doc_pool._focuses if hasattr(doc_pool, '_focuses') else []
+
+    use_emb = focus_embs is not None and len(focus_embs) > 0
+    chunk_embs = {}
+    if use_emb:
+        from tools.embedding import batch_embed, _cosine_similarity
+        import os
+        api_key = os.getenv("DASHSCOPE_API_KEY", "")
+        if api_key:
+            try:
+                texts = [chunk.text[:500] for _, chunk in stage1_pass]
+                embs = batch_embed(texts, api_key)
+                for idx, emb in enumerate(embs):
+                    chunk_embs[idx] = emb
+            except Exception:
+                pass
+
+    scored = []
+    for stage1_idx, (ci, chunk) in enumerate(stage1_pass):
+        bm25_norm = bm25_scores[ci]
+
+        sim_emb = 0.0
+        per_focus_sims = {}
+        if use_emb and stage1_idx in chunk_embs and focus_embs:
+            c_emb = chunk_embs[stage1_idx]
+            fsims = []
+            for fi, f_emb in enumerate(focus_embs):
+                sim = _cosine_similarity(f_emb, c_emb)
+                fsims.append(sim)
+                if fi < len(focuses):
+                    per_focus_sims[focuses[fi]] = round(sim, 4)
+            fsims.sort(reverse=True)
+            top_n = min(2, len(fsims))
+            sim_emb = sum(fsims[:top_n]) / top_n if top_n > 0 else 0.0
+
+        hybrid = (emb_weight * sim_emb + bm25_weight * bm25_norm) if use_emb else bm25_norm
+
+        if hybrid >= rsf_noise:
+            chunk.score = round(hybrid, 4)
+            chunk.metadata["bm25_norm"] = round(bm25_norm, 4)
+            chunk.metadata["sim_emb"] = round(sim_emb, 4)
+            chunk.metadata["per_focus_sims"] = per_focus_sims
+            scored.append(chunk)
+
+    logger.info("_two_stage_score: stage2 RSF %d/%d passed (threshold=%.2f, w=%.1f/%.1f)",
+                len(scored), len(stage1_pass), rsf_noise, bm25_weight, emb_weight)
+    return scored
+
+
 # ── Reader 实现 ────────────────────────────────────────────────────────────────
 
 async def _read_docx(
@@ -310,6 +415,11 @@ async def feishu_retrieve(
     query_type: str = "mixed",
     doc_pool: "Optional[object]" = None,
     table_pool: "Optional[object]" = None,
+    pool_timeout: float = 12.0,
+    skip_preflight: bool = False,
+    pool_noise_threshold: float = 0.33,
+    focus_group_idx: int = 0,
+    focuses: Optional[List[str]] = None,
 ) -> List[UnifiedChunk]:
     """飞书多格式检索编排器。
 
@@ -361,7 +471,7 @@ async def feishu_retrieve(
             )
             results = await asyncio.gather(*[_search_one(q) for q in query_variants])
             
-            # 合并去重（按 doc token）
+            # 合并去重（按 doc token）→ 取前 8 个
             seen_tokens = set()
             doc_candidates = []
             for r in results:
@@ -370,19 +480,20 @@ async def feishu_retrieve(
                     if doc_token and doc_token not in seen_tokens:
                         seen_tokens.add(doc_token)
                         doc_candidates.append(item)
+            doc_candidates = doc_candidates[:8]  # 每个 sub_query 最多取前 8 个 doc
             
             logger.info(
-                "feishu_retrieve: parallel search merged %d unique candidates",
+                "feishu_retrieve: parallel search merged → %d unique candidates (capped 8)",
                 len(doc_candidates)
             )
         else:
-            # 无品牌变体，单次搜索
+            # 无品牌变体，单次搜索 → 取前 8 个
             doc_result = search_feishu_docs(
                 query=query, count=page_size, uat=token, time_filter=time_filter,
             )
-            doc_candidates = doc_result.get("items", [])
+            doc_candidates = doc_result.get("items", [])[:8]
             logger.info(
-                "feishu_retrieve: doc search returned %d candidates",
+                "feishu_retrieve: doc search returned %d candidates (capped 8)",
                 len(doc_candidates)
             )
         
@@ -415,10 +526,25 @@ async def feishu_retrieve(
                 result = await asyncio.to_thread(
                     search_feishu_tables, query=query, count=page_size, uat=token
                 )
-                table_candidates = result.get("items", [])
+                all_table_items = result.get("items", [])
+                # Split by type and take top-3 each, dedup
+                _seen = set()
+                sheet_items = []
+                bitable_items = []
+                for item in all_table_items:
+                    tok = item.get("id", "")
+                    if tok in _seen:
+                        continue
+                    _seen.add(tok)
+                    dt = item.get("doc_type", "").upper()
+                    if dt == "SHEET" and len(sheet_items) < 3:
+                        sheet_items.append(item)
+                    elif dt == "BITABLE" and len(bitable_items) < 3:
+                        bitable_items.append(item)
+                table_candidates = sheet_items + bitable_items
                 logger.info(
-                    "feishu_retrieve: table search returned %d candidates (direct=%s wiki_table=%s)",
-                    len(table_candidates),
+                    "feishu_retrieve: table search → %d sheet + %d bitable (direct=%s wiki_table=%s)",
+                    len(sheet_items), len(bitable_items),
                     result.get("_debug", {}).get("direct_count", "?"),
                     result.get("_debug", {}).get("wiki_table_count", "?"),
                 )
@@ -472,20 +598,25 @@ async def feishu_retrieve(
 
         table_read_task = asyncio.create_task(_do_table_search_and_read())
 
-    # DocPool 读取（与 table_read_task 并行）
+    # DocPool 读取（与 table_read_task 并行）— preflight 已移除，直接进入 DocPool
     if doc_candidates:
-        if not _preflight_check(query, doc_candidates, query_type):
-            logger.info("feishu_retrieve: preflight_check SKIP, returning early")
-        elif doc_pool is not None:
+        if doc_pool is not None:
             try:
-                selected_ids = await doc_pool.submit_and_read(doc_candidates, query)
-                doc_chunks = await doc_pool.wait_and_score(selected_ids, query)
+                selected_ids = await doc_pool.submit_and_read(
+                    doc_candidates, query, group_idx=focus_group_idx,
+                )
+                doc_chunks = await doc_pool.score_and_collect(
+                    selected_ids, query,
+                    total_timeout=pool_timeout,
+                    noise_threshold=pool_noise_threshold,
+                )
                 logger.info(
                     "feishu_retrieve [pool]: query=%.30r → %d doc chunks",
                     query, len(doc_chunks),
                 )
             except Exception as e:
-                logger.warning("feishu_retrieve doc_pool failed: %s", e)
+                import traceback
+                logger.warning("feishu_retrieve doc_pool failed: %s\n%s", e, traceback.format_exc())
         else:
             doc_chunks = await _read_docx(query, doc_candidates, token, max_candidates, query_type)
 
@@ -493,6 +624,17 @@ async def feishu_retrieve(
     table_chunks: List[UnifiedChunk] = []
     if table_read_task is not None:
         table_chunks = await table_read_task
+
+    # Two-stage scoring for table chunks (BM25 0.6 : embedding 0.4)
+    if table_chunks and doc_pool is not None:
+        try:
+            table_chunks = await _two_stage_score_chunks(
+                table_chunks, query, doc_pool,
+                bm25_noise=0.10, rsf_noise=0.20,
+                bm25_weight=0.6, emb_weight=0.4,
+            )
+        except Exception as e:
+            logger.warning("feishu_retrieve table scoring failed: %s", e)
 
     all_chunks = doc_chunks + table_chunks
     logger.info(

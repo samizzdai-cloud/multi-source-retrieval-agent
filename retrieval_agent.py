@@ -143,6 +143,8 @@ class RetrievalAgent(BaseAgent):
                         if plan.time_filter:
                             kwargs["time_filter"] = plan.time_filter
                         kwargs["query_type"] = plan.query_type
+                        kwargs["focus_group_idx"] = gi
+                        kwargs["focuses"] = fg.focuses
                         if feishu_doc_pool:
                             kwargs["doc_pool"] = feishu_doc_pool
                         if feishu_table_pool:

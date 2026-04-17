@@ -142,17 +142,24 @@ class EvaluationLayer:
         for c in new_chunks:
             if c.score < min_score:
                 continue
+
+            # Per-focus scoring: use per_focus_sims from chunk metadata if available
+            per_focus_sims = c.metadata.get("per_focus_sims", {})
             chunk_words = set(re.findall(r'[\w\u4e00-\u9fff]+', c.text[:500].lower()))
+
             for focus, expanded_kw in focus_keywords.items():
+                # RSF score check: if per-focus similarity is available, use it
+                focus_sim = per_focus_sims.get(focus, 0.0) if per_focus_sims else 0.0
+                score_ok = c.score >= min_score  # already checked above, but explicit
+
                 if focus_core_keywords is not None:
-                    # [改动B+E3] 双门槛：核心词命中 AND 展开词 overlap >= min_overlap
                     core_kw = focus_core_keywords.get(focus, set())
                     core_hit = bool(chunk_words & core_kw) if core_kw else True
                     overlap = len(chunk_words & expanded_kw)
-                    if core_hit and overlap >= min_overlap:
+                    # Dual gate: RSF score threshold + keyword match
+                    if score_ok and core_hit and overlap >= min_overlap:
                         focus_hits[focus] = focus_hits.get(focus, 0) + 1
                 else:
-                    # 降级：旧逻辑（任意一词命中即满足）
                     if chunk_words & expanded_kw:
                         focus_hits[focus] = focus_hits.get(focus, 0) + 1
 

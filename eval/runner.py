@@ -143,6 +143,12 @@ async def _run_one(
                         kwargs["time_filter"] = plan.time_filter
                     kwargs["query_type"] = plan.query_type
                     kwargs["page_size"] = feishu_page_size
+                    kwargs["focus_group_idx"] = gi
+                    kwargs["focuses"] = fg.focuses
+                    if ro.get("feishu_pool_timeout"):
+                        kwargs["pool_timeout"] = ro["feishu_pool_timeout"]
+                    if ro.get("feishu_pool_noise_threshold") is not None:
+                        kwargs["pool_noise_threshold"] = ro["feishu_pool_noise_threshold"]
                     if feishu_doc_pool:
                         kwargs["doc_pool"] = feishu_doc_pool
                     if feishu_table_pool:
@@ -235,7 +241,7 @@ async def _run_one(
             "source_tool": c.source_tool,
             "source_name": c.source_name[:80],
             "heading_path": (c.heading_path or "")[:100],
-            "text": c.text[:300],
+            "text": c.text,
             "metadata_subset": {
                 k: v for k, v in c.metadata.items()
                 if k in ("index_name", "rrf_group", "focus_overlap", "sim_emb",
@@ -352,6 +358,9 @@ async def run_experiment(
     traces: List[Dict[str, Any]] = []
     total_queries = len(queries)
     for idx, q in enumerate(queries, 1):
+        # Small delay between queries to avoid Feishu API rate-limiting (99991400)
+        if idx > 1:
+            await asyncio.sleep(2.0)
         qid = q.get("id", "?")
         print(f"\n[{idx}/{total_queries}] Processing query #{qid}: {q.get('query', '')[:50]}...")
         repeats = []

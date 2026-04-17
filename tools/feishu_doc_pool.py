@@ -55,22 +55,47 @@ class PoolConfig:
 
 # ── BM25 轻量评分 ───────────────────────────────────────────────
 
-def _bm25_score(query: str, text: str, k1: float = 1.5, b: float = 0.75) -> float:
-    """极简 BM25：query 词在 text 中的 tf-idf 近似，无需语料库。"""
+def _bm25_score(query: str, text: str, k1: float = 1.5, b: float = 0.75,
+                idf: Optional[Dict[str, float]] = None) -> float:
+    """BM25 with optional IDF weighting.
+
+    When idf dict is provided, rare terms get higher weight.
+    Without IDF, all terms contribute equally (original behavior).
+    """
     query_terms = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
     if not query_terms:
         return 0.0
     text_lower = text.lower()
     text_words = re.findall(r'[\w\u4e00-\u9fff]+', text_lower)
     doc_len = len(text_words)
-    avg_dl = 200  # 假设平均文档长度
+    avg_dl = 200
     score = 0.0
     for term in query_terms:
         tf = text_lower.count(term)
         if tf > 0:
             norm_tf = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_dl))
-            score += norm_tf
+            term_idf = idf.get(term, 1.0) if idf else 1.0
+            score += norm_tf * term_idf
     return score
+
+
+def _compute_idf(chunks_by_doc: Dict[str, list]) -> Dict[str, float]:
+    """Compute IDF from all chunks in the DocPool.
+
+    IDF(term) = log(N / (1 + df(term)))
+    where N = total number of chunks, df = number of chunks containing term.
+    """
+    import math
+    all_chunks = [c for doc_chunks in chunks_by_doc.values() for c in doc_chunks]
+    N = len(all_chunks) or 1
+    df: Dict[str, int] = {}
+    for chunk in all_chunks:
+        text = chunk.content.lower() if hasattr(chunk, 'content') else str(chunk).lower()
+        terms = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', text))
+        for t in terms:
+            df[t] = df.get(t, 0) + 1
+    # Use log(1 + N/(1+count)) to ensure IDF >= 0
+    return {t: math.log(1 + N / (1 + count)) for t, count in df.items()}
 
 
 def _bm25_rank_candidates(query: str, candidates: List[dict]) -> List[dict]:
@@ -125,6 +150,8 @@ class FeishuDocPool:
         self._embedding_cache: Optional[object] = None   # EmbeddingCache 实例
         self._focuses: List[str] = []                     # flat focus 列表
         self._focus_embeddings: Optional[List] = None     # focus embedding 向量
+        # doc_id → 请求过该文档的 focus_group indices
+        self._doc_group_indices: Dict[str, Set[int]] = {}
 
     def set_embedding_cache(self, cache: object, focuses: List[str]) -> None:
         """注入 EmbeddingCache 和 focus 列表，启用混合评分。
@@ -141,11 +168,12 @@ class FeishuDocPool:
 
     async def submit_and_read(
         self, candidates: List[dict], query: str,
+        group_idx: int = 0,
     ) -> List[str]:
         """注册候选文档，BM25 筛选 top-N，触发读取。返回选中的 doc_ids。
 
         非阻塞：已缓存的 doc 不重复读取；未缓存的启动异步读取。
-        调用方随后用 wait_and_score() 等待 + 评分。
+        调用方随后用 score_and_collect() 等待 + 评分。
         """
         cfg = self.pool_config
 
@@ -162,6 +190,8 @@ class FeishuDocPool:
                 if not doc_id:
                     continue
                 selected_ids.append(doc_id)
+                # 记录 doc→focus_group 映射
+                self._doc_group_indices.setdefault(doc_id, set()).add(group_idx)
                 # 缓存 meta
                 if doc_id not in self._doc_meta:
                     self._doc_meta[doc_id] = {
@@ -257,12 +287,19 @@ class FeishuDocPool:
         n_filtered = 0
         deadline = time.monotonic() + total_timeout
 
+        # ── Compute IDF from all ready docs (progressive update) ─
+        idf_cache: Optional[Dict[str, float]] = None
+
         while pending and time.monotonic() < deadline:
             newly_done = []
             for doc_id in list(pending):
                 event = self._doc_ready_events.get(doc_id)
                 if event is None or event.is_set():
                     newly_done.append(doc_id)
+
+            # Recompute IDF when new docs arrive (lightweight, <5ms)
+            if newly_done and self._doc_chunks:
+                idf_cache = _compute_idf(self._doc_chunks)
 
             for doc_id in newly_done:
                 pending.discard(doc_id)
@@ -289,20 +326,27 @@ class FeishuDocPool:
                             logger.warning("DocPool: chunk embedding failed: %s", e)
 
                 # ── 对每个 chunk 计算混合分数 ────────────────────
-                chunk_scores: List[Tuple[float, float, Chunk]] = []  # (hybrid, bm25_norm, chunk)
+                chunk_scores: List[Tuple[float, float, float, dict, Chunk]] = []  # (hybrid, bm25_norm, sim_emb, per_focus, chunk)
                 for ci, chunk in enumerate(chunks):
-                    # BM25 侧
-                    bm25_raw = _bm25_score(expanded_query, chunk.content)
-                    bm25_norm = min(1.0, bm25_raw / 5.0)
+                    # BM25 侧 (with IDF)
+                    bm25_raw = _bm25_score(expanded_query, chunk.content, idf=idf_cache)
+                    bm25_norm = min(1.0, max(0.0, bm25_raw / 5.0))
 
-                    # Embedding 侧：取与所有 focus 的最大 cosine sim
+                    # Embedding 侧：per-focus scoring
                     sim_emb = 0.0
+                    per_focus_sims = {}
                     if use_emb and ci in chunk_embs_map and focus_embs:
                         c_emb = chunk_embs_map[ci]
-                        for f_emb in focus_embs:
+                        focus_sims = []
+                        for fi, f_emb in enumerate(focus_embs):
                             sim = _cosine_similarity(f_emb, c_emb)
-                            if sim > sim_emb:
-                                sim_emb = sim
+                            focus_sims.append(sim)
+                            if fi < len(self._focuses):
+                                per_focus_sims[self._focuses[fi]] = round(sim, 4)
+                        # Use mean of top-2 focus sims (not max)
+                        focus_sims.sort(reverse=True)
+                        top_n = min(2, len(focus_sims))
+                        sim_emb = sum(focus_sims[:top_n]) / top_n if top_n > 0 else 0.0
 
                     # 混合评分
                     if use_emb:
@@ -310,16 +354,16 @@ class FeishuDocPool:
                     else:
                         hybrid = bm25_norm  # fallback 纯 BM25
 
-                    chunk_scores.append((hybrid, bm25_norm, chunk))
+                    chunk_scores.append((hybrid, bm25_norm, sim_emb, per_focus_sims, chunk))
 
                 # 噪声过滤 + 排序
                 before_filter = len(chunk_scores)
-                chunk_scores = [(h, b, c) for h, b, c in chunk_scores if h >= noise_threshold]
+                chunk_scores = [(h, b, se, pf, c) for h, b, se, pf, c in chunk_scores if h >= noise_threshold]
                 n_filtered += before_filter - len(chunk_scores)
                 chunk_scores.sort(key=lambda x: x[0], reverse=True)
 
                 # 每篇文档取 top-K
-                for hybrid, bm25_norm, chunk in chunk_scores[:cfg.max_per_doc]:
+                for hybrid, bm25_norm, sim_emb_val, pf_sims, chunk in chunk_scores[:cfg.max_per_doc]:
                     uc = UnifiedChunk(
                         text=chunk.content,
                         source_name=meta.get("title", chunk.doc_title),
@@ -332,6 +376,8 @@ class FeishuDocPool:
                             "doc_id": doc_id,
                             "route": self._doc_route.get(doc_id, "unknown"),
                             "bm25_norm": round(bm25_norm, 4),
+                            "sim_emb": round(sim_emb_val, 4),
+                            "per_focus_sims": pf_sims,
                         },
                     )
                     all_scored.append((hybrid, uc))
@@ -354,6 +400,193 @@ class FeishuDocPool:
             "(filtered=%d noise, emb=%s, %.1fs)",
             query, len(result), collected_docs, len(doc_ids),
             n_filtered, use_emb, total_timeout,
+        )
+        return result
+
+    # ── score_and_collect: event-driven per-doc scoring ─────────
+
+    def _score_doc_chunks(
+        self, chunks: list, query: str, doc_id: str,
+        expanded_query: str, idf_cache, use_emb: bool, focus_embs,
+        chunk_embs_map: dict, noise_threshold: float,
+        bm25_noise: float = 0.05,
+    ) -> "List[UnifiedChunk]":
+        """Two-stage scoring for one doc's chunks.
+
+        Stage 1: BM25+IDF → bm25_noise filter (keyword pre-screen)
+        Stage 2: RSF hybrid = 0.7×emb + 0.3×BM25 → noise_threshold filter
+        """
+        from .models import UnifiedChunk
+        cfg = self.pool_config
+        meta = self._doc_meta.get(doc_id, {})
+
+        # Stage 1: BM25 noise pre-filter
+        bm25_passed = []
+        for ci, chunk in enumerate(chunks):
+            bm25_raw = _bm25_score(expanded_query, chunk.content, idf=idf_cache)
+            bm25_norm = min(1.0, max(0.0, bm25_raw / 5.0))
+            if bm25_norm >= bm25_noise:
+                bm25_passed.append((ci, chunk, bm25_norm))
+
+        # Stage 2: RSF hybrid scoring on BM25-passed chunks
+        scored = []
+        for ci, chunk, bm25_norm in bm25_passed:
+            sim_emb = 0.0
+            per_focus_sims = {}
+            if use_emb and ci in chunk_embs_map and focus_embs:
+                from tools.embedding import _cosine_similarity
+                c_emb = chunk_embs_map[ci]
+                focus_sims = []
+                for fi, f_emb in enumerate(focus_embs):
+                    sim = _cosine_similarity(f_emb, c_emb)
+                    focus_sims.append(sim)
+                    if fi < len(self._focuses):
+                        per_focus_sims[self._focuses[fi]] = round(sim, 4)
+                focus_sims.sort(reverse=True)
+                top_n = min(2, len(focus_sims))
+                sim_emb = sum(focus_sims[:top_n]) / top_n if top_n > 0 else 0.0
+
+            # Doc: embedding-heavy (0.7 emb + 0.3 BM25)
+            hybrid = (0.7 * sim_emb + 0.3 * bm25_norm) if use_emb else bm25_norm
+
+            if hybrid >= noise_threshold:
+                scored.append((hybrid, bm25_norm, sim_emb, per_focus_sims, chunk))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        result = []
+        for hybrid, bm25_norm, sim_emb_val, pf_sims, chunk in scored[:cfg.max_per_doc]:
+            result.append(UnifiedChunk(
+                text=chunk.content,
+                source_name=meta.get("title", chunk.doc_title),
+                source_url=meta.get("url", chunk.doc_url),
+                source_tool="feishu",
+                heading_path=chunk.heading_path,
+                score=round(hybrid, 4),
+                metadata={
+                    "content_type": chunk.content_type.value if hasattr(chunk.content_type, 'value') else str(chunk.content_type),
+                    "doc_id": doc_id,
+                    "route": self._doc_route.get(doc_id, "unknown"),
+                    "bm25_norm": round(bm25_norm, 4),
+                    "sim_emb": round(sim_emb_val, 4),
+                    "per_focus_sims": pf_sims,
+                },
+            ))
+        return result
+
+    async def score_and_collect(
+        self, doc_ids: "List[str]", query: str,
+        total_timeout: float = 12.0,
+        noise_threshold: float = 0.33,
+    ) -> "List[UnifiedChunk]":
+        """Event-driven per-doc scoring. Replaces wait_and_score.
+
+        Differences from wait_and_score:
+        - Event-driven (no 0.15s polling)
+        - Per-doc scoring as each doc completes
+        - No global sort / max_output truncation (reranker handles that)
+        """
+        from .models import UnifiedChunk
+
+        # Prepare expanded query
+        if query not in self._expanded_cache:
+            from tools.kw_generalization import expand_keywords
+            raw_words = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
+            self._expanded_cache[query] = " ".join(expand_keywords(raw_words))
+        expanded_query = self._expanded_cache[query]
+
+        # Prepare embedding
+        cache = self._embedding_cache
+        focus_embs = None
+        if cache and hasattr(cache, 'focus_embeddings') and cache.focus_embeddings:
+            focus_embs = cache.focus_embeddings
+        use_emb = focus_embs is not None and len(focus_embs) > 0
+        if not use_emb:
+            noise_threshold = min(noise_threshold, 0.05)
+
+        result: List[UnifiedChunk] = []
+        pending = set(doc_ids)
+        collected_docs = 0
+        n_filtered = 0
+        deadline = time.monotonic() + total_timeout
+        idf_cache = None
+
+        while pending and time.monotonic() < deadline:
+            # Event-driven: wait for any doc to complete
+            wait_coros = []
+            for doc_id in pending:
+                evt = self._doc_ready_events.get(doc_id)
+                if evt and not evt.is_set():
+                    wait_coros.append(evt.wait())
+
+            if wait_coros:
+                remaining = max(0.1, deadline - time.monotonic())
+                try:
+                    await asyncio.wait(
+                        [asyncio.ensure_future(c) for c in wait_coros],
+                        timeout=min(1.0, remaining),
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except Exception:
+                    pass
+            else:
+                await asyncio.sleep(0.1)
+
+            # Find newly done docs
+            newly_done = []
+            for doc_id in list(pending):
+                event = self._doc_ready_events.get(doc_id)
+                if event is None or event.is_set():
+                    newly_done.append(doc_id)
+
+            if newly_done and self._doc_chunks:
+                idf_cache = _compute_idf(self._doc_chunks)
+
+            for doc_id in newly_done:
+                pending.discard(doc_id)
+                chunks = self._doc_chunks.get(doc_id, [])
+                if not chunks:
+                    continue
+
+                collected_docs += 1
+
+                # Batch embed chunk texts
+                chunk_embs_map = {}
+                if use_emb:
+                    from tools.embedding import batch_embed
+                    import os
+                    api_key = os.getenv("DASHSCOPE_API_KEY", "")
+                    if api_key:
+                        try:
+                            texts = [c.content[:500] for c in chunks]
+                            embs = batch_embed(texts, api_key)
+                            for i, emb in enumerate(embs):
+                                chunk_embs_map[i] = emb
+                        except Exception as e:
+                            logger.warning("DocPool: chunk embedding failed: %s", e)
+
+                # Score and collect
+                before = len(result)
+                doc_result = self._score_doc_chunks(
+                    chunks, query, doc_id, expanded_query, idf_cache,
+                    use_emb, focus_embs, chunk_embs_map, noise_threshold,
+                )
+                result.extend(doc_result)
+                n_filtered += len(chunks) - len(doc_result)
+
+                logger.debug("DocPool.score_and_collect: doc %s → %d chunks",
+                             doc_id[:16], len(doc_result))
+
+        if pending:
+            logger.warning(
+                "DocPool.score_and_collect: timeout %.1fs — %d/%d docs pending, %d collected",
+                total_timeout, len(pending), len(doc_ids), collected_docs,
+            )
+
+        logger.info(
+            "DocPool.score_and_collect: query=%.30r → %d chunks from %d/%d docs "
+            "(filtered=%d, emb=%s)",
+            query, len(result), collected_docs, len(doc_ids), n_filtered, use_emb,
         )
         return result
 

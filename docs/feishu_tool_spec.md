@@ -1,8 +1,13 @@
-# Feishu Tool — 流程编排与能力规格 (v4.0: 混合评分 + 归一化重构)
+# Feishu Tool — 流程编排与能力规格 (v4.1: Reader 解耦 + 两阶段评分 + 校准数据)
 
 > 描述 feishu 作为 RetrievalAgent 多源检索中的一个 source 的完整能力边界、当前流程和可扩展方向。
 > 对照参考：`tools/bailian_retrieve.py`
-> **v4.0 更新** (2026-04-16): DocPool 混合评分(embedding+BM25)、skip_scoring、rrf_merge 统一 boost、归一化修复
+> **v4.1 更新** (2026-04-16):
+> - Reader 解耦: sheet/bitable 独立模块（删除 v1 残留，sheet 1024→425、bitable 807→354）
+> - 两阶段评分: Stage 1 BM25+IDF 降噪 → Stage 2 RSF 混合（Doc/Table 差异化权重）
+> - 阈值校准 v4: Pearson(score, grade)=-0.014，确认 L2 score 不可作为早停阈值
+> - Bug 修复: `feishu_retrieve.py` logging format TypeError（line 545）
+> **v4.0 基线** (2026-04-16): DocPool 混合评分、skip_scoring、rrf_merge 统一 boost、归一化修复
 
 ---
 
@@ -61,15 +66,25 @@ RetrievalAgent
 **输入**: `(query: str, uat: str, time_filter: str | None, query_type: str, doc_pool: FeishuDocPool | None, table_pool: TablePool | None)`
 **输出**: `List[UnifiedChunk]`（按 hybrid 混合评分排序，score ∈ [0, 1]，交由 RetrievalAgent 合并 + rerank）
 
-### v4.0 评分体系（所有分数归一化到 [0, 1]）
+### v4.1 评分体系（两阶段差异化，所有分数归一化到 [0, 1]）
 
-| 评分位置 | 公式 | 归一化方式 | 范围 |
+| 评分位置 | Stage 1 阈值 | Stage 2 公式 | Stage 2 阈值 |
 |----------|------|-----------|------|
-| DocPool `wait_and_score` | `0.7 × sim_emb + 0.3 × min(1, bm25_raw/5)` | 加权混合 + clamp | [0, 1] |
-| sheet_reader chunk score | `min(1.0, raw_bm25 / 5.0)` | clamp | [0, 1] |
-| bitable_reader chunk score | `min(1.0, raw_bm25 / 5.0)` | clamp | [0, 1] |
-| rrf_merge | `source_weight × norm_src + rank_weight × norm_rank` → `min(1.0, agg × boost)` | min-max + clamp | [0, 1] |
-| select_by_focus | `(emb_weight × sim_emb + kw_weight × sim_kw) / total_w` | 除以权重和 | [0, 1] |
+| **Doc** `feishu_doc_pool._score_doc_chunks` | BM25+IDF ≥ 0.05 | `0.3 × bm25_norm + 0.7 × sim_emb` | ≥ `pool_noise_threshold` (默认 0.33) |
+| **Table** `feishu_retrieve._two_stage_score_chunks` | BM25+IDF ≥ 0.10 | `0.6 × bm25_norm + 0.4 × sim_emb` | ≥ 0.20 |
+| rrf_merge | — | `source_weight × norm_src + rank_weight × norm_rank` → `min(1.0, agg × boost)` | — |
+| select_by_focus | — | `(emb_weight × sim_emb + kw_weight × sim_kw) / total_w` | — |
+
+**设计意图**:
+- Doc 侧语义主导（emb 0.7）：文档长文本适合 embedding 语义匹配
+- Table 侧词面主导（BM25 0.6）：表格单元多为关键词，结构化数据精确匹配更有效
+- `sim_emb` = top-2 focuses 余弦相似度均值（非 max，保留区分度）
+- `bm25_norm = min(1, BM25_raw / 5.0)`，BM25 含 IDF 权重（`_compute_idf`）
+
+**阈值校准 v4 告警** ⚠️:
+- Pearson(chunk.score, overall_grade) = -0.014（18 queries, 1554 graded）
+- feishu 单源 mean grade = 1.55（bailian 2.42，3× 差距）
+- L2 score 不建议作为早停/过滤阈值，改用 reranker L4 focus_hits；详见 §10
 
 ---
 
@@ -91,20 +106,41 @@ Phase A — 文档搜索（始终执行，与 Phase B 并行）:
         Stage 3: Block API 并发获取 blocks（QPS 限流 + 99991400 退避）
         Stage 4: 两遍扫描 (特殊block + 文本chunk + 评论注入)
         Stage 2+5: SKIP (评分由 DocPool 完成)
-      wait_and_score: 混合评分
-        BM25_norm = min(1.0, BM25(expand_keywords(sub_query), chunk) / 5.0)
-        sim_emb = max(cosine_sim(focus_emb_i, chunk_emb) for focus_i)
-        hybrid = 0.7 × sim_emb + 0.3 × BM25_norm
-        噪声: hybrid < 0.33 → 过滤
+      score_and_collect (v4.1, 事件驱动):
+        Stage 1: bm25_norm = min(1, BM25+IDF(expand_keywords(sub_query), chunk) / 5)
+                 过滤 bm25_norm < 0.05
+        Stage 2: sim_emb = mean(top-2 of cosine_sim(focus_embs, chunk_emb))
+                 hybrid = 0.3 × bm25_norm + 0.7 × sim_emb
+                 过滤 hybrid < pool_noise_threshold（默认 0.33）
 
 Phase B — 表格搜索（仅 data/mixed，与 Phase A 并行）:
   B1. search_feishu_tables (Direct + Wiki table)
   B2. TablePool 去重 + budget (max 3 sheet + 3 bitable)
-  B3. sheet_reader / bitable_reader 并行
-      chunk.score = min(1.0, BM25(expand_keywords(sub_query), text) / 5.0)
+  B3. Reader Dispatcher (v4.1 解耦):
+      doc_type = SHEET → _read_sheet → sheet_reader.read_sheets
+      doc_type = BITABLE → _read_bitable → bitable_reader.read_bitables
+      sheet_reader: 40行 chunk + tab 前缀 + header carry + 合并单元格填充
+      bitable_reader: 40行 chunk + 表名前缀 + contains filter + DateTime 格式化
+  B4. _two_stage_score_chunks (v4.1 新增):
+      Stage 1: bm25_norm ≥ 0.10（比 doc 更严，表格噪声多）
+      Stage 2: hybrid = 0.6 × bm25_norm + 0.4 × sim_emb ≥ 0.20
+      表格侧词面主导（0.6 BM25），与文档侧的语义主导（0.7 emb）形成差异化
 
 合并: doc_chunks + table_chunks → List[UnifiedChunk]（score ∈ [0, 1]）
 ```
+
+### Reader 解耦架构 (v4.1)
+
+```
+tools/feishu_retrieve.py (Dispatcher — 只做路由和合并)
+  ├─ _read_docx   → feishu_read_tool/docx_pipeline.run_rag_pipeline
+  ├─ _read_sheet  → feishu_read_tool/sheet_reader.read_sheets      ✨ 独立
+  └─ _read_bitable → feishu_read_tool/bitable_reader.read_bitables ✨ 独立
+```
+
+- **sheet_reader.py** (425 行): 独立 sheet 读取，常量 `MAX_TABS_PER_SHEET=5, MAX_READ_ROWS=500, CHUNK_MAX_ROWS=40`
+- **bitable_reader.py** (354 行): 独立 bitable 读取，常量 `MAX_TABLES_PER_BITABLE=3, MAX_RECORDS=2000, CHUNK_MAX_ROWS=40`
+- **2026-04-16 修复**: 两个文件此前各有 v1 代码残留在文件末尾（Python 后定义覆盖前定义 → 实际跑 v1），已清理完成
 
 ### Stage 4 Block Type 覆盖全表
 
@@ -474,7 +510,7 @@ class SourceConfig:
 
 - [ ] **多轮翻页 adaptive_search**：chunks < min_good_chunks 时自动翻页重搜（`feishu_retrieve.py` 内，小改动）
 - [ ] **Bitable 独立语义检索**（`feishu_bitable_retrieve`）：query → LLM 生成筛选条件 → structured query → UnifiedChunk
-- [ ] **Wiki 知识空间节点全量检索**：`/wiki/v2/spaces/{id}/nodes/search`，覆盖无法被 search-doc 搜索到的 wiki 文档
+- [ ] **Wiki 知识空间全量检索**：`/wiki/v2/spaces/{id}/nodes/search`，覆盖无法被 search-doc 搜索到的 wiki 文档
 - [ ] **文件夹作用域搜索**：`SourceConfig.feishu_folder_map` + FolderScanner post-filter，精准缩小搜索域
 
 ---
@@ -596,20 +632,68 @@ source_relevance_thresholds: Dict[str, float] = {
 | P0 ✅ | **[BUG-fix] type-31 表格单元格文本提取** | 已完成 | cell children 正确读取 |
 | P0 🔴 | **[TODO-51] type-51 Wiki 新版子目录** | 小（chunker 新分支） | 用户明确要求 |
 | P0 🔴 | **[BUG-2] type-18 bitable embed 静默跳过** | 中（pipeline pass-1 + bitable API） | 嵌入式多维表格内容丢失 |
-| P1 | 独立 Sheet 读取（Stage 3 分流） | 中 | 数据型文档（销售表等）覆盖 |
-| P1 | 独立 Bitable 读取（pipeline 接入） | 中 | 结构化查询数据覆盖 |
+| P1 ✅ | **独立 Sheet 读取（v4.1）** | 已完成 — `feishu_read_tool/sheet_reader.py` 425 行 | 数据型文档（销售表等）覆盖 |
+| P1 ✅ | **独立 Bitable 读取（v4.1）** | 已完成 — `feishu_read_tool/bitable_reader.py` 354 行 | 结构化查询数据覆盖 |
 | P2 | type-49/50 同步块内容读取 | 中（特殊 API） | 同步文档内容场景 |
 | P2 | type-27 图片 caption 提取 | 小（验证 SDK 字段） | 低频但有价值 |
 | P2 | Slides 读取可行性验证 | 小（验证+降级方案） | 低频但有价值 |
 | P2 | file 类型 Stage 3 跳过 | 极小 | 避免无效 API 调用 |
 | P0 ✅ | **[D7] 循环 import 修复** | 已完成（3文件延迟import） | feishu pipeline 可被独立测试 |
-| P0 🔴 | **[D1] chunk_scorer.py BM25 共享模块** | 小（新文件）| 零 LLM 评分基础设施 |
-| P0 🔴 | **[D2] Stage 2 LLM filter → BM25** | 小（`pipeline.py`）| -2.5s |
-| P0 🔴 | **[D3] Stage 5 LLM score → BM25** | 中（`pipeline.py` + `llm_client.py`）| -18s，最大收益 |
-| P0 🔴 | **[D4] feishu_retrieve 接受 query_type** | 极小（签名+传递）| query_type 感知 |
-| P0 🔴 | **[D5] PipelineConfig 新增 query_type 感知** | 小 | 参数按类型分化 |
+| P0 ✅ | **[D1] BM25 共享评分（feishu_doc_pool._bm25_score + _compute_idf）** | 已完成 | 零 LLM 评分基础设施 |
+| P0 ✅ | **[D2] Stage 2 LLM filter → BM25** | 已完成 | -2.5s |
+| P0 ✅ | **[D3] Stage 5 LLM score → BM25+embedding 两阶段** | 已完成（v4.1 两阶段 Doc/Table 差异化） | -18s，最大收益 |
+| P0 ✅ | **[D4] feishu_retrieve 接受 query_type** | 已完成 | query_type 感知 |
+| P0 ✅ | **[D5] PipelineConfig 新增 query_type 感知** | 已完成 | 参数按类型分化 |
 | P1 | **[D6] EvalConfig per-source min_relevance_score** | 小 | feishu/bailian 量纲对齐 |
 | P3 | 多轮翻页 adaptive_search | 小 | 提升召回率 |
 | P4 | Wiki 知识空间全量检索 | 中 | 知识库场景 |
 | P5 | 文件夹作用域搜索 | 小-中 | 精准业务域 |
 | P6 | 架构重构（dispatcher + reader 拆分） | 大 | 可维护性，待 read 能力完善后 |
+
+---
+
+## 10. v4.1 阈值校准发现（2026-04-16）
+
+### 10.1 校准配置
+
+- 18 queries（6 data + 6 concept + 6 mixed）
+- WIDE_RECALL: `hard_timeout=55s`、`feishu_pool_timeout=55s`、`feishu_pool_noise_threshold=0.0`
+- Grader: `gemini-3-flash-preview`，1554/1566 有效评分
+
+### 10.2 Feishu 源质量（严峻）
+
+| 指标 | Feishu | Bailian | 差距 |
+|---|---|---|---|
+| 总 chunk 数 | 980 | 574 | feishu 量多 |
+| mean overall_grade | **1.55** | **2.42** | 3× |
+| %≥3 | 5.2% | 35.7% | 7× |
+| %≥4 | 1.4% | 19.3% | 14× |
+
+### 10.3 Feishu 按 doc_type 细分（全部平坦）
+
+| doc_type | mean grade |
+|---|---|
+| text | 1.63 |
+| table_md | 1.66 |
+| unknown | 1.31 |
+
+→ 无论 text 还是 table，grade 都停留在 1.6 附近，说明不是纯粹的 chunking 类型问题。
+
+### 10.4 Score 与 Grade 无相关
+
+Pearson(chunk_score, overall_grade) 全体 = **-0.014**，data -0.142, concept +0.059, mixed +0.093。
+
+### 10.5 推断原因（待验证）
+
+1. **heading_path 噪声**: chunk 中插入完整章节路径，可能稀释关键词密度
+2. **Stage 1 BM25 阈值过低**: doc=0.05，实测 feishu 1.4% ≥4，阈值可上调到 0.10
+3. **embedding 召回过宽**: top-2 focuses 均值对低质 chunk 仍会给高 emb 分
+4. **搜索源本身限制**: MCP search-doc 是关键词 AND 匹配，对语义查询召回质量天然差
+
+### 10.6 Action Items（按优先级）
+
+- [ ] **A. Stage 1 阈值实验**: feishu_doc_pool._score_doc_chunks 的 `bm25_noise` 从 0.05 → 0.10（表格侧是 0.10，验证是否对 doc 也有效）
+- [ ] **B. heading_path 裁剪实验**: 只保留末级 2 级 heading，减少 chunk 内容稀释
+- [ ] **C. Focus 覆盖诊断**: 25.5% focus 零高分，定位是搜索未召回 / chunking 丢失 / 评分误杀
+- [ ] **D. min_relevance_score=0.6 全局应用**: 卡在 bailian 甜点区左侧，天然过滤 feishu 噪声
+- [ ] **E. min_sources=2 策略复查**: 若 feishu 对特定 query 结构性缺失，强制等 feishu 可能拖慢整体
