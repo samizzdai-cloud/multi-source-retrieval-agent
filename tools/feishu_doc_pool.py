@@ -155,6 +155,11 @@ class FeishuDocPool:
         selected_ids = []
         to_read_block: List[dict] = []
         to_read_mcp: List[dict] = []
+        # [S2.2-FIX] 只记录"本次 submit 真正新登记到 _reading 的 doc_id"。
+        # 之前把 `uncached = [... if did in self._reading]` 作为路由依据，会把
+        # *其他 sub_query 正在读的同一篇 doc* 也当成 new，导致重复启动
+        # _read_block_api_batch task、重复打 list_document_blocks API。
+        newly_registered: List[str] = []
 
         async with self._lock:
             for c in ranked:
@@ -172,17 +177,18 @@ class FeishuDocPool:
                 # 记录第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM）
                 if doc_id not in self._doc_query:
                     self._doc_query[doc_id] = query
-                # 已完成或正在读 → 跳过
+                # 已完成或正在读 → 跳过（不登记、不调度）
                 if doc_id in self._done or doc_id in self._reading:
                     continue
                 # 创建完成 event
                 if doc_id not in self._doc_ready_events:
                     self._doc_ready_events[doc_id] = asyncio.Event()
                 self._reading.add(doc_id)
+                newly_registered.append(doc_id)
 
-            # 路由决策：未缓存文档数 vs mcp_threshold
-            uncached = [did for did in selected_ids
-                        if did not in self._done and did in self._reading]
+            # [S2.2-FIX] 路由 *仅* 对本次 submit 新登记的 doc 生效；
+            # 其余 selected_ids（done / 他人 reading）不再重新调度读取。
+            uncached = newly_registered
 
         # 在锁外调度读取（避免持锁 IO）
         if uncached:
@@ -211,6 +217,14 @@ class FeishuDocPool:
             if to_read_mcp:
                 asyncio.create_task(self._read_mcp_batch(to_read_mcp))
 
+        # 观测分桶统计（debug 级，排查重复读时再开）
+        if logger.isEnabledFor(logging.DEBUG):
+            n_done = sum(1 for did in selected_ids if did in self._done)
+            n_reading = sum(1 for did in selected_ids if did in self._reading)
+            logger.debug(
+                "DocPool.submit_and_read: query=%.20r → %d selected (done=%d reading=%d new_block=%d new_mcp=%d)",
+                query, len(selected_ids), n_done, n_reading, len(to_read_block), len(to_read_mcp),
+            )
         return selected_ids
 
     async def wait_and_score(

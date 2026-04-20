@@ -143,10 +143,12 @@ def _inject_comments(doc_chunks: List, client, doc_id: str,
     if not doc_chunks:
         return
 
+    # [S1.2] 二道防线：即便上游（client.get_doc_comments / IO pool future）意外返回
+    # None，也强制转成 []，避免 ``for c in None`` 炸在下面的遍历里。
     if pre_fetched_comments is not None:
-        comments = pre_fetched_comments
+        comments = pre_fetched_comments or []
     else:
-        comments = client.get_doc_comments(doc_id, file_type="docx")
+        comments = client.get_doc_comments(doc_id, file_type="docx") or []
 
     if not comments:
         return
@@ -681,7 +683,10 @@ def run_rag_pipeline(
                 task_type, block, btype, bid = args
                 if task_type == "comments":
                     try:
-                        return ("comments", client.get_doc_comments(doc_id, file_type="docx"))
+                        # [S1.2] ``get_doc_comments`` 契约为 List[Dict]，但历史 log 曾出现
+                        # ``'NoneType' object is not iterable`` —— ``or []`` 做最后一道防线。
+                        fetched = client.get_doc_comments(doc_id, file_type="docx") or []
+                        return ("comments", fetched)
                     except Exception as e:
                         logger.warning("Stage 4: get_doc_comments failed: %s", e)
                         return ("comments", [])

@@ -6,6 +6,9 @@ feishu_client.py — 飞书 API 客户端
 外部项目通过实例化 FeishuClient(user_access_token) 后调用各方法。
 """
 
+import logging
+import time
+
 import requests
 import lark_oapi as lark
 from lark_oapi.api.docx.v1 import ListDocumentBlockRequest
@@ -13,6 +16,14 @@ from lark_oapi.api.drive.v1 import ListFileRequest
 from lark_oapi.api.sheets.v3 import QuerySpreadsheetSheetRequest
 from typing import List, Dict
 import json
+
+from .rate_limiter import DOC_API_BUCKET, P_BLOCK_API, P_WHITEBOARD, P_COMMENT
+
+logger = logging.getLogger(__name__)
+
+# 99991400 触发后的退避阶梯（秒）。最后一次返回 None 表示放弃重试。
+_RATELIMIT_BACKOFF_S = (1.0, 2.0, 4.0)
+_RATELIMIT_CODE = 99991400
 
 
 class APIError(Exception):
@@ -99,7 +110,22 @@ class FeishuClient:
                 request_builder.page_token(page_token)
 
             request = request_builder.build()
-            response = self.client.docx.v1.document_block.list(request, self._option)
+
+            # 99991400 共享桶：高优先级（Stage 3 关键路径）+ 本地退避。
+            response = None
+            for attempt, backoff in enumerate((*_RATELIMIT_BACKOFF_S, None)):
+                DOC_API_BUCKET.acquire(P_BLOCK_API)
+                response = self.client.docx.v1.document_block.list(request, self._option)
+                if response.success():
+                    break
+                if response.code == _RATELIMIT_CODE and backoff is not None:
+                    logger.warning(
+                        "list_document_blocks hit 99991400 (doc=%s attempt=%d) → sleep %.1fs",
+                        document_id[:12], attempt + 1, backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                break
 
             if not response.success():
                 raise APIError(
@@ -452,22 +478,40 @@ class FeishuClient:
     # ── internal helpers ─────────────────────────────────────────────────────
 
     def _fetch_whiteboard_nodes(self, whiteboard_id: str) -> List[Dict]:
-        """调用 Board API，返回原始节点列表。"""
+        """调用 Board API，返回原始节点列表。
+
+        走 99991400 共享桶（P_WHITEBOARD），遇限流自动退避重试。
+        """
         url = f"https://open.feishu.cn/open-apis/board/v1/whiteboards/{whiteboard_id}/nodes"
         headers = {"Authorization": f"Bearer {self.user_access_token}"}
-        resp = requests.get(url, headers=headers, timeout=15)
 
-        if resp.status_code != 200:
+        data = None
+        for attempt, backoff in enumerate((*_RATELIMIT_BACKOFF_S, None)):
+            DOC_API_BUCKET.acquire(P_WHITEBOARD)
+            resp = requests.get(url, headers=headers, timeout=15)
+
+            if resp.status_code != 200:
+                raise APIError(
+                    code=resp.status_code,
+                    msg=f"HTTP error getting whiteboard nodes: {resp.text}",
+                    log_id=""
+                )
+            data = resp.json()
+            if data.get("code") == 0:
+                break
+            if data.get("code") == _RATELIMIT_CODE and backoff is not None:
+                logger.warning(
+                    "_fetch_whiteboard_nodes hit 99991400 (wb=%s attempt=%d) → sleep %.1fs",
+                    whiteboard_id[:12], attempt + 1, backoff,
+                )
+                time.sleep(backoff)
+                continue
+            break
+
+        if data is None or data.get("code") != 0:
             raise APIError(
-                code=resp.status_code,
-                msg=f"HTTP error getting whiteboard nodes: {resp.text}",
-                log_id=""
-            )
-        data = resp.json()
-        if data.get("code") != 0:
-            raise APIError(
-                code=data.get("code"),
-                msg=data.get("msg", "unknown error"),
+                code=(data or {}).get("code", -1),
+                msg=(data or {}).get("msg", "unknown error"),
                 log_id=""
             )
         return data.get("data", {}).get("nodes", [])
@@ -526,24 +570,45 @@ class FeishuClient:
             if page_token:
                 params["page_token"] = page_token
 
+            # 99991400 共享桶，最低优先级（不阻塞主 pipeline）。
+            data = None
             try:
-                resp = requests.get(url, headers=headers, params=params, timeout=10)
-                if resp.status_code != 200:
-                    return []
-                data = resp.json()
-                if data.get("code") != 0:
-                    return []
+                for attempt, backoff in enumerate((*_RATELIMIT_BACKOFF_S, None)):
+                    DOC_API_BUCKET.acquire(P_COMMENT)
+                    resp = requests.get(url, headers=headers, params=params, timeout=10)
+                    if resp.status_code != 200:
+                        return results  # 保持原语义：权限/网络错直接返回已收集内容
+                    data = resp.json()
+                    if data.get("code") == 0:
+                        break
+                    if data.get("code") == _RATELIMIT_CODE and backoff is not None:
+                        logger.warning(
+                            "get_doc_comments hit 99991400 (file=%s attempt=%d) → sleep %.1fs",
+                            file_token[:12], attempt + 1, backoff,
+                        )
+                        time.sleep(backoff)
+                        continue
+                    # 其它业务错（权限、not found 等）→ 返回已收集内容
+                    return results
             except Exception:
-                return []
+                return results
+            if data is None or data.get("code") != 0:
+                return results
 
-            for item in data.get("data", {}).get("items", []):
+            # [S1.2] 飞书 API 对空字段既可能省略也可能显式 null；``.get(k, {})`` 只在 key
+            # 缺失时生效，显式 null 会穿透成 None。统一用 ``(x or {}/[])`` 兜底，避免
+            # ``for item in None`` 这类 ``'NoneType' object is not iterable``。
+            paged_data = data.get("data") or {}
+            for item in (paged_data.get("items") or []):
                 # 提取所有回复的纯文本
                 reply_texts: List[str] = []
-                for reply in item.get("reply_list", {}).get("replies", []):
+                reply_list = (item.get("reply_list") or {})
+                for reply in (reply_list.get("replies") or []):
                     parts: List[str] = []
-                    for el in reply.get("content", {}).get("elements", []):
+                    content = (reply.get("content") or {})
+                    for el in (content.get("elements") or []):
                         if el.get("type") == "text_run":
-                            t = el.get("text_run", {}).get("text", "").strip()
+                            t = (el.get("text_run") or {}).get("text", "").strip()
                             if t:
                                 parts.append(t)
                     if parts:
@@ -555,11 +620,10 @@ class FeishuClient:
                 results.append({
                     "comment_id": item.get("comment_id", ""),
                     "is_whole": item.get("is_whole", False),
-                    "quote": item.get("quote", "").strip(),
+                    "quote": (item.get("quote") or "").strip(),
                     "replies": reply_texts,
                 })
 
-            paged_data = data.get("data", {})
             if not paged_data.get("has_more"):
                 break
             page_token = paged_data.get("page_token")

@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "metric_fields": [
+    "chunks",
+    "crit_ρ",
+    "imp_ρ",
+    "cov",
+    "dup",
+    "elapsed_s"
+  ],
+  "thresholds": {
+    "crit_ρ":    {"max_drop_abs": 0.03},
+    "imp_ρ":     {"max_drop_abs": 0.05},
+    "cov":       {"max_drop_abs": 0.03},
+    "elapsed_s": {"max_rise_rel": 0.15},
+    "chunks":    {"max_drop_rel": 0.20},
+    "dup":       {}
+  },
+  "baselines": [
+    {
+      "id": "sprint2_post_fix",
+      "captured_at": "2026-04-20T18:15",
+      "commit": "9c18bb9",
+      "commit_dirty": true,
+      "source_file": "tests/exp_phase4b_eval_result.json",
+      "n_queries": 8,
+      "seed": 42,
+      "labels_included": ["E3_baseline", "E5_rule_rel_heavy"],
+      "notes": "Post Sprint 2: DocPool/TablePool dedup + QPS=5 token bucket + feishu.read_fail structured logs. S2.4 regression data (see spec_plan.md).",
+      "metrics_by_label": {
+        "E3_baseline": {
+          "chunks": 14.4,
+          "crit_ρ": 0.385,
+          "imp_ρ": 0.423,
+          "cov": 0.938,
+          "dup": 0.000,
+          "elapsed_s": 29.5
+        },
+        "E5_rule_rel_heavy": {
+          "chunks": 7.6,
+          "crit_ρ": 0.833,
+          "imp_ρ": 0.167,
+          "cov": 0.938,
+          "dup": 0.401,
+          "elapsed_s": 23.8
+        }
+      }
+    }
+  ]
+}

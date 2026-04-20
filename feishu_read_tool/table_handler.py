@@ -541,7 +541,14 @@ def build_sheet_chunk(
         range_str = f"{sheet_id}!A1:{number_to_column(19)}100"
         rows_raw = client.read_sheet_range(spreadsheet_token, range_str)
     except Exception as e:
-        logger.warning("type30 block %s: failed to fetch sheet data: %s", block_id, e)
+        # 结构化失败日志（S2.1 观测），便于统一 grep 分析是否值得做短期缓存
+        msg = str(e)
+        if len(msg) > 160:
+            msg = msg[:160] + "..."
+        logger.warning(
+            "feishu.read_fail source=type30_sheet doc=%s block=%s token=%s kind=%s msg=%s",
+            doc_id[:12], block_id[:12], str(raw_token)[:24], type(e).__name__, msg,
+        )
         return [], consumed
 
     rows: List[List[str]] = [

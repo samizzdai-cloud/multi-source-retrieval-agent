@@ -5,7 +5,7 @@ session.state['retrieval_meta']   : 性能统计 JSON
 """
 from google.adk.agents.llm_agent import Agent
 
-_INSTRUCTION = """你是一个企业知识问答助手，根据已检索到的知识片段用中文回答用户问题。
+_INSTRUCTION = """你是一个企业咨询专家，根据已检索到的知识片段回答用户问题。
 
 ## 检索到的知识片段
 {retrieval_result}

@@ -1,0 +1,121 @@
+[
+  {
+    "label": "E1_k5",
+    "top_k": 5,
+    "elapsed_s": 25.64,
+    "merged_chunks": 9,
+    "source_stats": {
+      "feishu": 4,
+      "bailian": 5
+    },
+    "focus_coverage": {
+      "focus_0": 5,
+      "focus_1": 6
+    },
+    "tier_dist": {
+      "unknown": 9
+    }
+  },
+  {
+    "label": "E1_k8",
+    "top_k": 8,
+    "elapsed_s": 31.17,
+    "merged_chunks": 16,
+    "source_stats": {
+      "feishu": 8,
+      "bailian": 8
+    },
+    "focus_coverage": {
+      "focus_0": 9,
+      "focus_1": 8
+    },
+    "tier_dist": {
+      "unknown": 16
+    }
+  },
+  {
+    "label": "E1_k12",
+    "top_k": 12,
+    "elapsed_s": 19.8,
+    "merged_chunks": 16,
+    "source_stats": {
+      "feishu": 4,
+      "bailian": 12
+    },
+    "focus_coverage": {
+      "focus_0": 10,
+      "focus_1": 9
+    },
+    "tier_dist": {
+      "unknown": 16
+    }
+  },
+  {
+    "label": "E1_k15",
+    "top_k": 15,
+    "elapsed_s": 33.09,
+    "merged_chunks": 16,
+    "source_stats": {
+      "feishu": 14,
+      "bailian": 2
+    },
+    "focus_coverage": {
+      "focus_0": 7,
+      "focus_1": 9
+    },
+    "tier_dist": {
+      "unknown": 16
+    }
+  },
+  {
+    "label": "E2_run1",
+    "top_k": 5,
+    "elapsed_s": 22.72,
+    "merged_chunks": 10,
+    "source_stats": {
+      "feishu": 5,
+      "bailian": 5
+    },
+    "focus_coverage": {
+      "focus_0": 7,
+      "focus_1": 7
+    },
+    "tier_dist": {
+      "unknown": 10
+    }
+  },
+  {
+    "label": "E2_run2",
+    "top_k": 5,
+    "elapsed_s": 32.17,
+    "merged_chunks": 10,
+    "source_stats": {
+      "feishu": 5,
+      "bailian": 5
+    },
+    "focus_coverage": {
+      "focus_0": 5,
+      "focus_1": 9
+    },
+    "tier_dist": {
+      "unknown": 10
+    }
+  },
+  {
+    "label": "E2_run3",
+    "top_k": 5,
+    "elapsed_s": 24.02,
+    "merged_chunks": 10,
+    "source_stats": {
+      "feishu": 5,
+      "bailian": 5
+    },
+    "focus_coverage": {
+      "focus_0": 6,
+      "focus_1": 8
+    },
+    "tier_dist": {
+      "unknown": 10
+    }
+  }
+]

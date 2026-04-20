@@ -1,7 +1,7 @@
 """Chunk Grader — LLM-based per-chunk per-focus relevance scoring.
 
-Replaces the heuristic _is_relevant() in bench_retrieval_quality.py with
-LLM-judged 0-3 relevance scores per (chunk, focus) pair.
+LLM-judged 0-3 relevance scores per (chunk, focus) pair (替代早期启发式
+_is_relevant 启动器)。
 
 Derived metrics (computed from scores, not by LLM):
   - nDCG@K: normalized discounted cumulative gain

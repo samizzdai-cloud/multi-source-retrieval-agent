@@ -9,4 +9,4 @@ if _pkg_root not in _sys.path:
 
 # ADK는 패키지에서 root_agent 변수(BaseAgent 인스턴스)를 탐색함
 # 모듈이 아닌 인스턴스를 직접 노출해야 함
-from .root_agent import root_agent  # noqa: F401
+from .root_agent_v1 import root_agent  # noqa: F401

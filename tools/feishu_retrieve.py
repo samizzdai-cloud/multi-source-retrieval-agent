@@ -238,6 +238,24 @@ def _chunk_result_to_unified(cr, source_tool: str = "feishu") -> UnifiedChunk:
 
 # ── Reader 实现 ────────────────────────────────────────────────────────────────
 
+def _log_read_fail(source: str, candidates: List[dict], err: BaseException) -> None:
+    """统一的 reader 失败结构化日志（S2.1 观测埋点）。
+
+    格式：feishu.read_fail source=<reader> n=<候选数> tokens=[id1,id2,...]
+          kind=<异常类型> msg=<消息截断 160 字符>
+    """
+    tokens = [c.get("id", "")[:12] for c in candidates[:5]]
+    if len(candidates) > 5:
+        tokens.append(f"...+{len(candidates)-5}")
+    msg = str(err)
+    if len(msg) > 160:
+        msg = msg[:160] + "..."
+    logger.warning(
+        "feishu.read_fail source=%s n=%d tokens=%s kind=%s msg=%s",
+        source, len(candidates), tokens, type(err).__name__, msg,
+    )
+
+
 async def _read_docx(
     query: str,
     candidates: List[dict],
@@ -259,7 +277,7 @@ async def _read_docx(
         logger.info("_read_docx: %d chunks from %d docs", len(chunks), rag_result.total_docs_read)
         return chunks
     except Exception as e:
-        logger.warning("_read_docx failed: %s", e)
+        _log_read_fail("_read_docx", candidates, e)
         return []
 
 
@@ -277,7 +295,7 @@ async def _read_sheet(
         logger.info("_read_sheet: %d chunks from %d sheets", len(chunks), len(candidates))
         return chunks
     except Exception as e:
-        logger.warning("_read_sheet failed: %s", e)
+        _log_read_fail("_read_sheet", candidates, e)
         return []
 
 
@@ -295,7 +313,7 @@ async def _read_bitable(
         logger.info("_read_bitable: %d chunks from %d bitables", len(chunks), len(candidates))
         return chunks
     except Exception as e:
-        logger.warning("_read_bitable failed: %s", e)
+        _log_read_fail("_read_bitable", candidates, e)
         return []
 
 
@@ -310,6 +328,7 @@ async def feishu_retrieve(
     query_type: str = "mixed",
     doc_pool: "Optional[object]" = None,
     table_pool: "Optional[object]" = None,
+    doc_pool_timeout: Optional[float] = None,
 ) -> List[UnifiedChunk]:
     """飞书多格式检索编排器。
 
@@ -327,6 +346,9 @@ async def feishu_retrieve(
         query_type:    "data" | "concept" | "mixed"
         doc_pool:      FeishuDocPool 实例（可选，跨 task 共享 docx 缓存）
         table_pool:    TablePool 实例（可选，跨 task 共享 sheet/bitable 缓存）
+        doc_pool_timeout: DocPool.wait_and_score 的 total_timeout（秒）。
+                          None 时沿用 DocPool 默认值（12.0s）。由 SourceAgent
+                          从 SourceAgentConfig.source_timeout_s 派生传入。
 
     Returns:
         List[UnifiedChunk]，空列表表示无结果（不抛异常）
@@ -429,11 +451,12 @@ async def feishu_retrieve(
                 bitable_cands = [c for c in table_candidates if c.get("doc_type", "").upper() in {"BITABLE"}]
 
                 if table_pool is not None:
+                    # submit_tables 已经只返回本次新登记的 candidate，
+                    # 无需再用 needs_read() 过滤（历史遗留的重复过滤会把
+                    # 本次刚加入 _reading 的 token 排除，导致没人读）。
                     selected = await table_pool.submit_tables(table_candidates, query)
-                    sheet_cands = [c for c in selected if c.get("doc_type", "").upper() == "SHEET"
-                                   and table_pool.needs_read(c.get("id", ""))]
-                    bitable_cands = [c for c in selected if c.get("doc_type", "").upper() == "BITABLE"
-                                     and table_pool.needs_read(c.get("id", ""))]
+                    sheet_cands = [c for c in selected if c.get("doc_type", "").upper() == "SHEET"]
+                    bitable_cands = [c for c in selected if c.get("doc_type", "").upper() == "BITABLE"]
 
                 tasks = []
                 if sheet_cands:
@@ -457,11 +480,13 @@ async def feishu_retrieve(
                                 await table_pool.store_result(tok, matching or [])
 
                 if table_pool is not None:
+                    # 对本 sub_query 没亲自读但已被 pool 管理（其他 sub_query
+                    # 已读完 or 正在读）的 token，等/取缓存。
+                    self_read_toks = {cc.get("id", "") for cc in sheet_cands + bitable_cands}
                     for c in table_candidates:
                         tok = c.get("id", "")
-                        if tok and not table_pool.needs_read(tok) and tok not in {
-                            cc.get("id", "") for cc in sheet_cands + bitable_cands
-                        }:
+                        if (tok and tok not in self_read_toks
+                                and table_pool.has_result_or_pending(tok)):
                             cached = await table_pool.get_cached(tok)
                             chunks.extend(cached)
 
@@ -479,10 +504,17 @@ async def feishu_retrieve(
         elif doc_pool is not None:
             try:
                 selected_ids = await doc_pool.submit_and_read(doc_candidates, query)
-                doc_chunks = await doc_pool.wait_and_score(selected_ids, query)
+                # doc_pool_timeout 从 SourceAgent 透传；None 时走 DocPool 默认
+                ws_kwargs = {}
+                if doc_pool_timeout is not None:
+                    ws_kwargs["total_timeout"] = doc_pool_timeout
+                doc_chunks = await doc_pool.wait_and_score(
+                    selected_ids, query, **ws_kwargs,
+                )
                 logger.info(
-                    "feishu_retrieve [pool]: query=%.30r → %d doc chunks",
+                    "feishu_retrieve [pool]: query=%.30r → %d doc chunks (timeout=%s)",
                     query, len(doc_chunks),
+                    f"{doc_pool_timeout:.1f}s" if doc_pool_timeout else "default",
                 )
             except Exception as e:
                 logger.warning("feishu_retrieve doc_pool failed: %s", e)

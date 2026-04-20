@@ -96,6 +96,9 @@ class TablePool:
             scored.append((s, c))
         scored.sort(key=lambda x: x[0], reverse=True)
 
+        # selected 只包含 *本次 submit 新登记到 _reading 的 candidate*。
+        # 已 done / 他人在读的 token 不再进 selected，由调用方通过
+        # get_cached() 等事件拿结果，避免被重复调度读取。
         selected: List[dict] = []
         async with self._lock:
             for _, c in scored:
@@ -104,9 +107,8 @@ class TablePool:
                     continue
                 doc_type = c.get("doc_type", "").upper()
 
-                # 已缓存或正在读 → 跳过调度，但仍加入 selected
+                # 已完成或他人正在读 → 不登记、不返回
                 if token in self._done or token in self._reading:
-                    selected.append(c)
                     continue
 
                 # Budget 检查
@@ -128,8 +130,23 @@ class TablePool:
         return selected
 
     def needs_read(self, token: str) -> bool:
-        """检查某个 token 是否需要读取（未缓存且未完成）。"""
+        """检查某个 token 是否需要读取（未完成）。
+
+        注意：返回 True 不代表"本 sub_query 应该去读"——还要检查
+        token 是否在当前 sub_query 自己的 `selected` 集合里（即 submit_tables
+        刚为本 sub_query 新登记的）。正在被 *他人* 读的 token 不在本次
+        selected 中，因此不会被调度重读；后续用 has_result_or_pending +
+        get_cached 等事件。
+        """
         return token not in self._done
+
+    def has_result_or_pending(self, token: str) -> bool:
+        """token 是否已由 TablePool 管理（已完成或他人正在读）。
+
+        True → 调用方可用 get_cached 直接取缓存或等待事件；
+        False → token 未被 submit 过，调用方自己处理。
+        """
+        return token in self._done or token in self._reading
 
     async def store_result(self, token: str, chunks: List[UnifiedChunk]) -> None:
         """存储读取结果，通知等待者。"""
@@ -150,6 +167,10 @@ class TablePool:
             try:
                 await asyncio.wait_for(event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                logger.warning("TablePool: timeout waiting for %s", token)
+                # S2.1 结构化失败日志（用 read_fail 前缀方便统一 grep）
+                logger.warning(
+                    "feishu.read_fail source=table_pool_wait token=%s kind=TimeoutError timeout_s=%.1f",
+                    token[:16], timeout,
+                )
                 return []
         return self._cache.get(token, [])
