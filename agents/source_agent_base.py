@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -62,9 +63,10 @@ class Focus:
 class SubQuery:
     """plan_only / plan_eval 产出的一条子查询（v2：支持源特有参数）。
 
-    ``tags`` / ``indexes`` / ``time_filter`` 为可选字段：
+    ``tags`` / ``indexes`` / ``time_filter`` / ``query_type`` 为可选字段：
     - bailian 的 plan_only LLM 会填 tags (L2 + 时效) 和 indexes
-    - feishu 的 plan_only LLM 会填 time_filter（"last_N_days" 或 None）
+    - feishu 的 plan_only LLM 会填 time_filter（"last_N_days" 或 None）和
+      query_type（"structured"/"concept"，驱动 Feishu reader 路由与召回数量）
     - google / notion 保持空
     """
     query: str
@@ -72,6 +74,8 @@ class SubQuery:
     tags: List[str] = field(default_factory=list)
     indexes: List[str] = field(default_factory=list)
     time_filter: Optional[str] = None
+    query_type: Optional[str] = None
+    sub_query_id: str = ""
 
 
 @dataclass
@@ -145,23 +149,33 @@ def _chunks_block(
 ) -> str:
     """渲染候选 chunks 列表供 LLM 评估。
 
-    Phase 4b：若传入 ``focuses``，按 focus_id 分组呈现，每组下列出 target_focuses
-    命中该 focus 的 chunks；命中多个 focus 的 chunk 会出现在第一个命中的组里（按
-    focus 顺序去重）。最后追加 ``## Unassigned`` 兜底组显示 target_focuses 为空
-    的 chunk。
-
-    不传 focuses 时退化为扁平列表（兼容老调用点）。
+    表格类 chunk（content 含 markdown 表格）使用更大的摘要窗口（500 字），
+    让 LLM 能看到实际数据行，而不只是表头。
     """
     if not chunks:
         return "(empty)"
 
+    _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:")
+
+    def _is_table_chunk(c: ChunkEntry) -> bool:
+        content = c.content or ""
+        return any(m in content for m in _TABLE_MARKERS)
+
     def _render_one(c: ChunkEntry) -> str:
+        effective_max = 500 if _is_table_chunk(c) else max_chars
         snippet = (c.content or "").replace("\n", " ").strip()
-        if len(snippet) > max_chars:
-            snippet = snippet[:max_chars] + "..."
+        if len(snippet) > effective_max:
+            snippet = snippet[:effective_max] + "..."
+        meta = c.metadata or {}
+        route = meta.get("route") or meta.get("route_hint") or ""
+        source_label = meta.get("source_name") or ""
+        heading = meta.get("heading_path") or ""
+        extra = f" | route={route}" if route else ""
+        extra += f" | src={source_label[:30]}" if source_label else ""
+        extra += f" | heading={heading[:40]}" if heading else ""
         return (
             f"- id={c.id} | focuses={sorted(c.target_focuses)} "
-            f"| score={c.score} | {snippet}"
+            f"| score={c.score}{extra} | {snippet}"
         )
 
     # 扁平渲染（兼容老路径）
@@ -190,6 +204,17 @@ def _chunks_block(
     return "\n".join(lines)
 
 
+def _sub_query_budget(n_focuses: int, source_top_k: int) -> int:
+    """v2.1: sub_queries 总数上限 = min(n_focuses*2, source_top_k*2)，保底 2。
+
+    取代旧的 ``max(3, source_top_k)``：
+    - 旧公式 n_focuses=1 时允许 5 条 sub_q（过度分配）
+    - 旧公式 n_focuses=6 时仍只有 5 条（过度收紧）
+    新公式随 focus 数线性增长，天花板由 source_top_k 决定。
+    """
+    return max(2, min(n_focuses * 2, source_top_k * 2))
+
+
 def _build_plan_only_prompt(
     focuses: List[Focus],
     profile: SourceProfile,
@@ -197,10 +222,12 @@ def _build_plan_only_prompt(
     extra_rules_block: str = "",
 ) -> str:
     """拼 plan_only 用户消息。``extra_rules_block`` 供子类注入源专业规则。"""
+    sq_budget = _sub_query_budget(len(focuses), source_top_k)
     parts = [
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"source_profile_block:\n{profile.to_prompt_block()}",
         f"source_top_k: {source_top_k}",
+        f"sub_query_total_cap: {sq_budget}  (sub_queries 总数不得超过该上限)",
     ]
     if extra_rules_block:
         parts.append(f"source_query_rules_block:\n{extra_rules_block}")
@@ -267,6 +294,7 @@ class SourceAgent:
         self._execute_fn = execute_fn
         # 运行时注入：execute_sub_query 通过 target_focus 回查对应 Focus 对象
         self._current_focus_lookup: Dict[str, Focus] = {}
+        self._sub_query_seq: int = 0
 
     async def execute_sub_query(
         self, sub_query: str, target_focus: str,
@@ -307,11 +335,38 @@ class SourceAgent:
         """
         return ""
 
+    def _post_process_sub_queries(
+        self,
+        focuses: List[Focus],
+        sub_queries: List[SubQuery],
+    ) -> List[SubQuery]:
+        """规划后 callback。
+
+        设计意图：
+        - 保持 ``_plan`` 主链简洁：focus -> plan_only -> assign ids -> callback
+        - 允许子类做最小限度的收束、校验、去重，而不用覆写整段 ``_plan`` 流程
+        - 默认不做任何处理
+        """
+        _ = focuses
+        return sub_queries
+
+    def _assign_sub_query_ids(self, sub_queries: List[SubQuery]) -> List[SubQuery]:
+        """为运行时 sub_queries 分配稳定的本地 id。"""
+        for sq in sub_queries:
+            if sq.sub_query_id:
+                continue
+            self._sub_query_seq += 1
+            sq.sub_query_id = f"{self.source}:{sq.target_focus}:sq{self._sub_query_seq}"
+        return sub_queries
+
     async def _plan(self, focuses: List[Focus]) -> List[SubQuery]:
         """统一规划入口：优先子类确定性 _plan_sub_queries；空则回退 plan_only LLM。"""
         subs = self._plan_sub_queries(focuses)
         if subs:
-            return subs
+            return self._post_process_sub_queries(
+                focuses,
+                self._assign_sub_query_ids(subs),
+            )
         if self.plan_only is None:
             return []
         prompt = _build_plan_only_prompt(
@@ -319,16 +374,18 @@ class SourceAgent:
             extra_rules_block=self._source_query_rules_block(),
         )
         out = await _run_llm_agent(self.plan_only, prompt)
-        return [
+        planned = self._assign_sub_query_ids([
             SubQuery(
                 query=q["query"],
                 target_focus=q["target_focus"],
                 tags=list(q.get("tags") or []),
                 indexes=list(q.get("indexes") or []),
                 time_filter=q.get("time_filter"),
+                query_type=q.get("query_type"),
             )
             for q in out.get("sub_queries", [])
-        ]
+        ])
+        return self._post_process_sub_queries(focuses, planned)
 
     # ── 公开入口 ──────────────────────────────────────────────
     async def run(self, focuses: List[Focus]) -> SourceAgentResult:
@@ -337,6 +394,7 @@ class SourceAgent:
         chunk_pool: Dict[str, ChunkEntry] = {}
         # 注入 focus 回查表，供 execute_sub_query 读 focus 的完整字段（time_hint/entity_hint 等）
         self._current_focus_lookup = {f.focus_id: f for f in focuses}
+        self._sub_query_seq = 0
 
         # 单 loop（min=max=1）走简化路径；其余走多 loop
         if self.cfg.min_loops == 1 and self.cfg.max_loops == 1:
@@ -436,9 +494,11 @@ class SourceAgent:
                         tags=list(q.get("tags") or []),
                         indexes=list(q.get("indexes") or []),
                         time_filter=q.get("time_filter"),
+                        query_type=q.get("query_type"),
                     )
                     for q in (pe_out.get("replan_queries") or [])
                 ]
+                replan = self._assign_sub_query_ids(replan)
                 if not replan:
                     logger.warning("[%s] loop=%d continue with empty replan → stop", self.source, loop_n)
                     break
@@ -466,13 +526,22 @@ class SourceAgent:
     async def _eval_only_finalize(
         self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
     ) -> List[ChunkEntry]:
+        started = time.perf_counter()
         eval_prompt = _build_eval_only_prompt(
             focuses, list(chunk_pool.values()), self.cfg.source_top_k,
         )
         eval_out = await _run_llm_agent(self.eval_only, eval_prompt)
         top_ids: List[str] = eval_out.get("top_k_chunk_ids", [])
         tiers_map: Dict[str, Dict] = tiers_list_to_map(eval_out.get("tiers"))
-        return self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+        chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+        logger.info(
+            "TIMING source.eval_only source=%s input_chunks=%d selected=%d ms=%.1f",
+            self.source,
+            len(chunk_pool),
+            len(chunks),
+            (time.perf_counter() - started) * 1000.0,
+        )
+        return chunks
 
     def _assemble_top_chunks(
         self,

@@ -12,13 +12,12 @@ from .google_retrieve import google_retrieve
 from .notion_retrieve import notion_retrieve
 
 # feishu_retrieve 和 search_feishu_file 延迟 import，避免循环：
-# tools/__init__ → feishu_retrieve → feishu_read_tool.pipeline → tools.llm_client → tools/__init__
+# tools/__init__ → feishu_retrieve → feishu_read_tool → tools.llm_client → tools/__init__
 def _lazy_feishu():
     from .feishu_retrieve import feishu_retrieve  # noqa: PLC0415
     from feishu_read_tool.search import search_feishu_file  # noqa: PLC0415
     return feishu_retrieve, search_feishu_file
 
-# 保留顶层名称供 retrieval_agent.py 直接 import（用时才解析）
 def __getattr__(name):
     if name == "feishu_retrieve":
         return _lazy_feishu()[0]

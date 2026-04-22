@@ -1,8 +1,8 @@
 """RetrieveAgent v1——多源并行检索编排器（spec_plan.md v1 §2）。
 
 职责：
-1. **Global Plan**: 用现有 ``tools.query_planner.plan_query`` 产出 focus_groups，
-   扁平化为 ``List[Focus(focus_id, text)]``（全局 focuses）。
+1. **Global Plan**: 用现有 ``tools.query_planner.plan_query`` 产出扁平 ``focuses[{text, targets}]``，
+   转为 ``List[Focus(focus_id, text)]``（全局 focuses）。
 2. **SourceDispatcher**: 并发启动 enabled_sources 的 SourceAgent.run(focuses)，
    ``asyncio.gather(..., return_exceptions=True)`` 保护单源故障不拖垮全局。
 3. **MergeStage**: 跨源去重合并（同 ChunkEntry.id 走 ``merge``），按 focus_id 分组输出。
@@ -15,8 +15,10 @@ Phase 1：只启用 bailian；eval_layer 关闭；min=max=1。
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
+import re
 import time
 import uuid
 from typing import AsyncGenerator, Dict, List, Optional
@@ -39,14 +41,14 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Global planner：复用 plan_query，扁平化 focus_groups → List[Focus]
+# Global planner：v2.1 直接返回 flat focuses（FG 下线）
 # ─────────────────────────────────────────────────────────────────────
-def _flatten_focuses(query: str, available_sources: List[str]) -> List[Focus]:
-    """调用 query_planner，把 ``focus_groups[{focuses, targets}]`` 扁平化为 focuses。
+def _prepare_focuses(query: str, available_sources: List[str]) -> List[Focus]:
+    """调用 query_planner，把 ``QueryPlan.focuses`` 映射到 runtime ``Focus``。
 
-    v2 Global Planner 只负责「语义拆解 + 源路由」：
-    - 每个 FG 的 ``focuses`` 是一组语义 focus 文本
-    - 每个 FG 的 ``targets`` 是这组 focus 应该查的源（AND 路由，非 required_targets）
+    v2.1 QueryPlan 已是 flat 结构（PlanFocus{text, targets}），本函数仅负责：
+    - 补上 runtime ``focus_id``（``focus_0`` / ``focus_1`` ...）
+    - 对 targets 再做一次交集兜底（planner 内已做，这里是 defense-in-depth）
 
     SourceAgent 各自的 plan_only LLM 再基于 focus.text + 源专业规则产出
     sub_queries（含 tags / indexes / time_filter），不依赖 planner 下发 hints。
@@ -58,28 +60,90 @@ def _flatten_focuses(query: str, available_sources: List[str]) -> List[Focus]:
         return [Focus(focus_id="focus_0", text=query, targets=list(available_sources))]
 
     focuses: List[Focus] = []
-    idx = 0
-    for fg in plan.focus_groups:
-        fg_targets = [t for t in (fg.targets or []) if t in available_sources]
-        if not fg_targets:
-            fg_targets = list(available_sources)
-        for text in fg.focuses:
-            focuses.append(Focus(
-                focus_id=f"focus_{idx}",
-                text=text,
-                targets=list(fg_targets),
-            ))
-            idx += 1
+    for idx, pf in enumerate(plan.focuses):
+        targets = [t for t in (pf.targets or []) if t in available_sources]
+        if not targets:
+            targets = list(available_sources)
+        focuses.append(Focus(
+            focus_id=f"focus_{idx}",
+            text=pf.text,
+            targets=targets,
+        ))
 
     if not focuses:
         return [Focus(focus_id="focus_0", text=query, targets=list(available_sources))]
     return focuses
 
 
+# 兼容旧名字（防外部 import）
+_flatten_focuses = _prepare_focuses
+
+
 # ─────────────────────────────────────────────────────────────────────
 # MergeStage：跨源去重 + 按 focus 分组 + 渲染 AnswerAgent 兼容 JSON
 # ─────────────────────────────────────────────────────────────────────
 _TIER_RANK = {"critical": 0, "important": 1, "noise": 2, None: 3}
+
+
+def _normalize_dedupe_heading(heading: str) -> str:
+    heading = (heading or "").lower().strip()
+    heading = re.sub(r"\s+", " ", heading)
+    return heading
+
+
+def _normalize_dedupe_text(text: str) -> str:
+    text = (text or "").lower()
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"\d[\d,./:%-]*", "0", text)
+    text = re.sub(r"[$¥€£]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:420]
+
+
+def _is_near_duplicate(a: ChunkEntry, b: ChunkEntry) -> bool:
+    if a.source != b.source:
+        return False
+
+    meta_a = a.metadata or {}
+    meta_b = b.metadata or {}
+    heading_a = _normalize_dedupe_heading(str(meta_a.get("heading_path", "") or ""))
+    heading_b = _normalize_dedupe_heading(str(meta_b.get("heading_path", "") or ""))
+    if heading_a and heading_b and heading_a != heading_b:
+        return False
+
+    text_a = _normalize_dedupe_text(a.content or "")
+    text_b = _normalize_dedupe_text(b.content or "")
+    if not text_a or not text_b:
+        return False
+    if text_a == text_b:
+        return True
+
+    ratio = difflib.SequenceMatcher(None, text_a, text_b).ratio()
+    return ratio >= 0.94
+
+
+def _suppress_near_duplicates(chunks: List[ChunkEntry]) -> List[ChunkEntry]:
+    deduped: List[ChunkEntry] = []
+    merged_count = 0
+    for chunk in chunks:
+        merged = False
+        for idx, kept in enumerate(deduped):
+            if _is_near_duplicate(kept, chunk):
+                deduped[idx] = kept.merge(chunk)
+                merged = True
+                merged_count += 1
+                break
+        if not merged:
+            deduped.append(chunk)
+
+    if merged_count:
+        logger.info(
+            "RetrieveAgent: near-duplicate suppression merged %d chunks (%d -> %d)",
+            merged_count,
+            len(chunks),
+            len(deduped),
+        )
+    return deduped
 
 
 def _merge_across_sources(
@@ -92,10 +156,11 @@ def _merge_across_sources(
             existing = pool.get(c.id)
             pool[c.id] = existing.merge(c) if existing else c
     # 按 tier 优先、score 次之排序
-    return sorted(
+    merged = sorted(
         pool.values(),
         key=lambda c: (_TIER_RANK.get(c.tier, 3), -(c.score or 0.0)),
     )
+    return _suppress_near_duplicates(merged)
 
 
 def _render_for_answer(
@@ -265,32 +330,63 @@ class RetrieveAgent(BaseAgent):
         enabled = list(self.sources.keys())
         logger.info("RetrieveAgent: query=%r, sources=%s", query, enabled)
 
-        # 1. Global plan → focuses
-        focuses = await asyncio.to_thread(_flatten_focuses, query, enabled)
+        # 1. Global plan → focuses (v2.1 flat, FG retired)
+        plan_started = time.perf_counter()
+        focuses = await asyncio.to_thread(_prepare_focuses, query, enabled)
+        logger.info(
+            "TIMING retrieve.prepare_focuses focuses=%d ms=%.1f",
+            len(focuses),
+            (time.perf_counter() - plan_started) * 1000.0,
+        )
         logger.info("RetrieveAgent: %d focuses produced", len(focuses))
 
         # 2. Dispatch（每源超时独立走 SourceAgent.cfg.source_timeout_s）
+        dispatch_started = time.perf_counter()
         per_source = await _dispatch_sources(self.sources, focuses)
+        logger.info(
+            "TIMING retrieve.dispatch sources=%d ms=%.1f",
+            len(self.sources),
+            (time.perf_counter() - dispatch_started) * 1000.0,
+        )
 
         # 3. Merge
+        merge_started = time.perf_counter()
         merged = _merge_across_sources(per_source)
+        logger.info(
+            "TIMING retrieve.merge merged=%d ms=%.1f",
+            len(merged),
+            (time.perf_counter() - merge_started) * 1000.0,
+        )
 
-        # 3b. EvalLayer（Phase 4b）：按 (tier, relevance, coverage) 公式重排 + min-keep 截断
-        if self.config.eval_layer_enabled and merged:
+        # 3b. EvalLayer（Phase 4b / 4c）：按 (tier, relevance, coverage) 公式重排 + min-keep 截断
+        if self.config.eval_layer_active and merged:
             try:
-                layer = build_eval_layer(self.config.eval_layer_mode)
+                eval_started = time.perf_counter()
+                layer = build_eval_layer(self.config.eval_layer_effective_mode)
                 before = len(merged)
                 merged = layer.rank(merged, focuses, top_k=self.config.eval_layer_top_k)
                 logger.info(
                     "RetrieveAgent: eval_layer mode=%s %d→%d chunks",
-                    self.config.eval_layer_mode, before, len(merged),
+                    self.config.eval_layer_effective_mode, before, len(merged),
+                )
+                logger.info(
+                    "TIMING retrieve.eval_layer before=%d after=%d ms=%.1f",
+                    before,
+                    len(merged),
+                    (time.perf_counter() - eval_started) * 1000.0,
                 )
             except Exception as e:
                 logger.exception("eval_layer failed, fallback to merged: %s", e)
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
+        render_started = time.perf_counter()
         payload = _render_for_answer(query, merged, per_source, focuses, elapsed_ms)
+        logger.info(
+            "TIMING retrieve.render chunks=%d ms=%.1f",
+            len(payload.get("chunks") or []),
+            (time.perf_counter() - render_started) * 1000.0,
+        )
         logger.info(
             "RetrieveAgent: done in %dms, merged=%d chunks, source_stats=%s",
             elapsed_ms, len(merged), payload["source_stats"],
@@ -322,7 +418,7 @@ def build_retrieve_agent(
 ) -> RetrieveAgent:
     """按配置装配 SourceAgent 字典。
 
-    v2：Global Planner 只出 focus_groups(focuses, targets)，各源 plan_only LLM
+    v2.1：Global Planner 只出扁平 ``focuses[{text, targets}]``，各源 plan_only LLM
     自主产出 sub_queries + tags/indexes/time_filter。不再有 tag_strategy 开关。
     """
     cfg = config or RetrieveConfig(enabled_sources=["bailian"])
@@ -370,7 +466,10 @@ def _build_feishu_source_agent(
 ) -> SourceAgent:
     """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。
 
-    query_type 固定 "mixed"（文档 + 表格都查），PoolConfig 走该模式的默认值。
+    Phase 4d：query_type 收敛为 ``structured`` / ``concept``，且 doc route
+    规划前移到 FeishuSourceAgent。pool 只保留默认 ``structured`` 作为兜底；
+    实际 reader 路由由全局 doc planner 写入 ``route_hint`` 后再交给 DocPool 执行。
+
     若 FEISHU_UAT 未配置，退化为无共享池模式（feishu_retrieve 内部会返回空）。
     """
     from agents.feishu_source_agent import FeishuSourceAgent
@@ -378,12 +477,11 @@ def _build_feishu_source_agent(
     from tools.table_pool import TablePool
 
     uat = sc.get("feishu_uat", "FEISHU_UAT")
-    query_type = "mixed"
 
     doc_pool = None
     table_pool = None
     if uat:
-        doc_pool = FeishuDocPool(uat=uat, query_type=query_type)
+        doc_pool = FeishuDocPool(uat=uat)  # default_query_type="structured"
         table_pool = TablePool(uat=uat)
     else:
         logger.warning("FeishuSourceAgent: FEISHU_UAT empty, proceeding without pools")
@@ -391,7 +489,6 @@ def _build_feishu_source_agent(
     return FeishuSourceAgent(
         cfg=sa_cfg,
         uat=uat,
-        query_type=query_type,
         doc_pool=doc_pool,
         table_pool=table_pool,
     )

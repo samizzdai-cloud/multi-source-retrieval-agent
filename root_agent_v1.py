@@ -23,24 +23,20 @@ from retrieve_agent import build_retrieve_agent
 from tools.models import RetrieveConfig, SourceAgentConfig, SourceConfig
 
 
-_SOURCE_CFG = SourceAgentConfig(
-    source_top_k=8,
-    min_loops=1,
-    max_loops=1,
-    source_timeout_s=45.0,   # feishu 读文档较慢，放宽超时
-    sub_query_top_n=8,
+# Phase 4c：用 preset="lite" 走 STRICT 基底 + eval_layer 关（生产默认）
+# feishu 单源把 source_timeout_s 从 STRICT 的 25s 抬到 45s（文档读取慢），
+# 其他字段继承 STRICT preset。
+_FEISHU_OVERRIDE = SourceAgentConfig(
+    source_timeout_s=45.0,
 )
 
 _retrieve_agent = build_retrieve_agent(
     config=RetrieveConfig(
+        preset="lite",
         enabled_sources=["feishu", "bailian"],
         source_configs={
-            "feishu":  _SOURCE_CFG,
-            "bailian": _SOURCE_CFG,
+            "feishu": _FEISHU_OVERRIDE,
         },
-        eval_layer_enabled=False,
-        # RetrieveAgent 整体超时 = source_timeout_s，由每源 cfg 提供
-        # model 来自 RetrieveConfig 默认值："gemini-3.1-flash-lite-preview"
     ),
     source_config=SourceConfig(load_from_env=True),
     name="retrieve_v1",

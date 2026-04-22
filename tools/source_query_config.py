@@ -141,6 +141,14 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
         "  · 优先策略：先「品牌 + 动作词」（2词），必要时加国家（3词）\n"
         "  · tags 始终为 []、indexes 始终为 []\n"
         "  · time_filter：相对时间词（今年/本月/本周/最新/近期）→ \"last_N_days\"；其余 → null\n"
+        "  · query_type（必填，影响 DocPool API/MCP 路由和召回量）：\n"
+        "      - \"structured\"：focus 问的是结构化、可核对、可追踪的事实载体\n"
+        "                     包括：指标/数字/排名/销量/GMV/转化率/库存，以及流程/项目管理/进度/\n"
+        "                     owner/里程碑/任务状态/执行记录/排期/checklist\n"
+        "                   → top_n_docs=6, max_per_doc=5, max_output=22，全 Block API（表格开启）\n"
+        "      - \"concept\" ：focus 问的是策略/原因/背景/定位/市场分析/方法论等文本理解\n"
+        "                   → top_n_docs=8, max_per_doc=5, max_output=25，concept-only 文档按预算走 MCP 分流\n"
+        "  · 如果同一 focus 既需要结构化事实又需要背景解释，必须拆成两条 sub_query；禁止输出混合类型\n"
         "  · 正确示例：「nubia 销售」「hypershell 策略」「nubia 日本 运营」"
     ),
     "bailian": (

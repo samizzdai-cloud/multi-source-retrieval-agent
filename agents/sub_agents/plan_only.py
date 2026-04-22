@@ -20,13 +20,14 @@ _INSTRUCTION = """你是检索规划器。针对给定的 source，按 focuses �
 用户消息里会提供：
 - focuses_block: 检索维度列表（focus_id + 描述）
 - source_profile_block: 目标检索源的能力画像（strengths / weaknesses / sub_query_hints）
-- source_top_k: 该源最终产出 chunks 上限，用于估算 sub_query 数量
+- source_top_k: 该源最终产出 chunks 上限
+- sub_query_total_cap: sub_queries 总数上限（硬约束，不得超过该值）
 - source_query_rules_block（可选）: 该源的 query 编写规则、tag/index/time 约束、枚举值等——
   如果存在，必须严格遵守其中的所有硬约束。
 
 ## 输出要求（严格 JSON）
 - 每个 focus 至少覆盖 1 条 sub_query，最多 3 条
-- sub_queries 总数不超过 max(3, source_top_k)
+- sub_queries 总数不超过用户消息给出的 sub_query_total_cap
 - 每条 sub_query 必填：
     · query: 按 source 风格写好的检索串（见 source_query_rules_block）
     · target_focus: 该 sub_query 服务的 focus_id
@@ -34,22 +35,26 @@ _INSTRUCTION = """你是检索规划器。针对给定的 source，按 focuses �
     · tags: 百炼专用业务/时效标签；其他源留 []
     · indexes: 百炼专用知识库索引；其他源留 []
     · time_filter: 飞书专用相对时间串（如 "last_30_days"）；其他源留 null
+    · query_type: 飞书专用，取值 "structured" | "concept"（按 source_query_rules_block
+      给的判定规则选择）；其他源留 null
+    · 如果同一 focus 既需要结构化事实又需要背景解释，拆成两条 sub_query，不要产出混合类型
 - 不要输出额外说明，只输出 JSON
 
 输出示例（百炼源）：
 {"sub_queries": [
   {"query": "nubia UK/英国/United Kingdom 2026年3月份 DTC 销售额和GMV表现",
-   "target_focus": "focus_0", "tags": ["DTC", "2026_Q1"], "indexes": ["nubia"], "time_filter": null},
+   "target_focus": "focus_0", "tags": ["DTC", "2026_Q1"], "indexes": ["nubia"],
+   "time_filter": null, "query_type": null},
   {"query": "nubia Marketplace 英国 转化率", "target_focus": "focus_1",
-   "tags": ["Marketplace"], "indexes": ["nubia"], "time_filter": null}
+   "tags": ["Marketplace"], "indexes": ["nubia"], "time_filter": null, "query_type": null}
 ]}
 
 输出示例（飞书源）：
 {"sub_queries": [
   {"query": "nubia 英国 销售", "target_focus": "focus_0",
-   "tags": [], "indexes": [], "time_filter": null},
+   "tags": [], "indexes": [], "time_filter": null, "query_type": "structured"},
   {"query": "nubia 策略", "target_focus": "focus_1",
-   "tags": [], "indexes": [], "time_filter": "last_30_days"}
+   "tags": [], "indexes": [], "time_filter": "last_30_days", "query_type": "concept"}
 ]}
 """
 

@@ -368,6 +368,36 @@ def _read_single_sheet(
     sheet_title = candidate.get("title", "")
     sheet_url = candidate.get("url", "")
 
+    # 快速路径：table_pool 已注入缓存 + selected_sheet_ids 已知
+    # 直接跳过 wiki token 解析和 query_all_sheets_metadata API 调用
+    cached_tabs = candidate.get("_cached_tabs")
+    selected_sheet_ids = set(candidate.get("selected_sheet_ids") or [])
+    if cached_tabs is not None and selected_sheet_ids:
+        candidate_tabs = [t for t in cached_tabs if t.get("sheet_id") in selected_sheet_ids]
+        if not candidate_tabs:
+            # selected_sheet_ids 有但在缓存里找不到，fallback 到全部可见 tab
+            candidate_tabs = [t for t in cached_tabs if not t.get("hidden")][:MAX_TABS_PER_SHEET]
+        if not candidate_tabs:
+            return []
+        chunks = []
+        with ThreadPoolExecutor(max_workers=min(len(candidate_tabs), 5)) as executor:
+            future_to_tab = {
+                executor.submit(
+                    _read_single_tab,
+                    client, spreadsheet_token, tab, keywords, query,
+                    sheet_title, sheet_url,
+                ): tab
+                for tab in candidate_tabs
+            }
+            for future in as_completed(future_to_tab):
+                tab = future_to_tab[future]
+                try:
+                    chunks.extend(future.result())
+                except Exception as e:
+                    logger.warning("sheet_reader: tab %s failed: %s", tab.get("title", ""), e)
+        return chunks
+
+    # 慢速路径：无缓存，需要解析 wiki token 并拉取 tab 列表
     # Wiki-hosted sheet: prefer node_id or candidate id and resolve to obj_token
     is_wiki = (candidate.get("_source") == "wiki" or (sheet_url and "/wiki/" in sheet_url and "/sheets/" not in sheet_url))
     if is_wiki:
@@ -379,7 +409,6 @@ def _read_single_sheet(
                 wiki_token = m.group(1)
         if wiki_token:
             try:
-                # Use backoff wrapper to handle transient rate-limits
                 node_info = _api_call_with_backoff(client.get_wiki_node_info, wiki_token)
                 obj_token = node_info.get("obj_token", "")
                 obj_type = node_info.get("obj_type", "").lower()
@@ -394,31 +423,37 @@ def _read_single_sheet(
     if not spreadsheet_token:
         return []
 
-    # Step 1: 获取所有 tabs 元数据
-    try:
-        tabs = _api_call_with_backoff(client.query_all_sheets_metadata, spreadsheet_token)
-    except Exception as e:
-        logger.warning("sheet_reader: metadata failed for %s: %s", spreadsheet_token, e)
-        return []
-
-    # 过滤 hidden, 只保留 resource_type=sheet
-    visible_tabs = [t for t in tabs if not t.get("hidden") and t.get("resource_type") == "sheet"]
+    # Step 1: 获取所有 tabs 元数据（有缓存但无 selected_sheet_ids 时也走这里）
+    if cached_tabs is not None:
+        visible_tabs = [t for t in cached_tabs if not t.get("hidden")]
+    else:
+        try:
+            tabs = _api_call_with_backoff(client.query_all_sheets_metadata, spreadsheet_token)
+        except Exception as e:
+            logger.warning("sheet_reader: metadata failed for %s: %s", spreadsheet_token, e)
+            return []
+        visible_tabs = [t for t in tabs if not t.get("hidden") and t.get("resource_type") == "sheet"]
     if not visible_tabs:
         return []
 
-    # Step 2: Tab 筛选 — 关键词匹配 tab title
-    matched_tabs = []
-    for t in visible_tabs:
-        tab_title = t.get("title", "").lower()
-        for kw in keywords:
-            if kw.lower() in tab_title:
-                matched_tabs.append(t)
-                break
-    # 兜底：如果没有命中，取所有 visible tabs
-    candidate_tabs = matched_tabs if matched_tabs else visible_tabs
-    candidate_tabs = candidate_tabs[:MAX_TABS_PER_SHEET]
+    if selected_sheet_ids:
+        candidate_tabs = [t for t in visible_tabs if t.get("sheet_id") in selected_sheet_ids]
+    else:
+        # Tab 筛选 — 关键词匹配 tab title
+        matched_tabs = []
+        for t in visible_tabs:
+            tab_title = t.get("title", "").lower()
+            for kw in keywords:
+                if kw.lower() in tab_title:
+                    matched_tabs.append(t)
+                    break
+        candidate_tabs = matched_tabs if matched_tabs else visible_tabs
+        candidate_tabs = candidate_tabs[:MAX_TABS_PER_SHEET]
 
-    # Step 3: 并行读取所有候选 tabs（ThreadPoolExecutor 并行化 API IO）
+    if not candidate_tabs:
+        return []
+
+    # 并行读取所有候选 tabs
     chunks = []
     with ThreadPoolExecutor(max_workers=min(len(candidate_tabs), 5)) as executor:
         future_to_tab = {
@@ -432,8 +467,7 @@ def _read_single_sheet(
         for future in as_completed(future_to_tab):
             tab = future_to_tab[future]
             try:
-                tab_chunks = future.result()
-                chunks.extend(tab_chunks)
+                chunks.extend(future.result())
             except Exception as e:
                 logger.warning("sheet_reader: tab %s failed: %s", tab.get("title", ""), e)
 
@@ -589,6 +623,7 @@ def _read_single_tab(
             metadata={
                 "doc_type": "SHEET",
                 "tab": tab_title,
+                "sheet_id": sheet_id,
                 "section_id": f"{spreadsheet_token}_{sheet_id}_s{sec_idx}",
                 "row_start": section_start,
                 "row_end": section_end,

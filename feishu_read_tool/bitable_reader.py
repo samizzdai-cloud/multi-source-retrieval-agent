@@ -265,19 +265,30 @@ def _read_single_bitable(
     bitable_title = candidate.get("title", "")
     bitable_url = candidate.get("url", "")
 
-    # 从 URL 尝试提取 table_id（如果有）
+    # 快速路径：table_pool 已注入缓存 + selected_table_ids 已知
+    # 直接跳过 wiki token 解析和 list_tables API 调用
+    cached_tables = candidate.get("_cached_tables")
+    selected_table_ids = set(candidate.get("selected_table_ids") or [])
+    if cached_tables is not None and selected_table_ids:
+        selected_tables = [t for t in cached_tables if t.get("table_id") in selected_table_ids]
+        if not selected_tables:
+            selected_tables = cached_tables[:MAX_TABLES_PER_BITABLE]
+        if not selected_tables:
+            return []
+        return _read_tables_parallel(
+            bitable_id, selected_tables, keywords, query, uat,
+            bitable_title, bitable_url,
+        )
+
+    # 慢速路径：无缓存，需要解析 wiki token 并拉取 table 列表
     url_table_id = None
     if bitable_url:
         _, url_table_id = _extract_bitable_id_from_url(bitable_url)
 
-    # Wiki URL 需要先解析 node → obj_token
-    # 检查 URL 是否包含 /wiki/ 或 _source 为 wiki
     is_wiki = (candidate.get("_source") == "wiki" or
                ("/wiki/" in bitable_url and "/base/" not in bitable_url))
-    # Prefer explicit node_id, fall back to candidate id or URL-extracted token.
     wiki_token = candidate.get("node_id") or candidate.get("id") or candidate.get("document_id") or ""
     if not wiki_token and is_wiki and bitable_url:
-        # 从 URL 提取 wiki node token（更宽松的匹配，取 /wiki/ 后直到分隔符）
         import re as _re
         m = _re.search(r'/wiki/([^/?#]+)', bitable_url)
         if m:
@@ -299,24 +310,28 @@ def _read_single_bitable(
     if not bitable_id:
         return []
 
-    # Step 1: List all tables
-    try:
-        tables = _api_call_with_backoff(list_tables, bitable_id, uat)
-    except Exception as e:
-        logger.warning("bitable_reader: list_tables failed for %s: %s", bitable_id, e)
-        return []
+    # 获取 table 列表（有缓存但无 selected_table_ids 时也走这里）
+    if cached_tables is not None:
+        tables = cached_tables
+    else:
+        try:
+            tables = _api_call_with_backoff(list_tables, bitable_id, uat)
+        except Exception as e:
+            logger.warning("bitable_reader: list_tables failed for %s: %s", bitable_id, e)
+            return []
 
     if not tables:
         return []
 
-    # Step 2: Table 筛选
-    if url_table_id:
-        # URL 携带 table_id → 直接选中
+    if selected_table_ids:
+        selected_tables = [t for t in tables if t.get("table_id") in selected_table_ids]
+        if not selected_tables:
+            selected_tables = tables[:MAX_TABLES_PER_BITABLE]
+    elif url_table_id:
         selected_tables = [t for t in tables if t.get("table_id") == url_table_id]
         if not selected_tables:
             selected_tables = tables[:MAX_TABLES_PER_BITABLE]
     else:
-        # 关键词匹配 table name
         matched = []
         for t in tables:
             name = t.get("name", "").lower()
@@ -327,17 +342,50 @@ def _read_single_bitable(
         selected_tables = matched if matched else tables
         selected_tables = selected_tables[:MAX_TABLES_PER_BITABLE]
 
-    # Step 3: 每个 table → 读取 → chunks
-    chunks = []
-    for table in selected_tables:
+    return _read_tables_parallel(
+        bitable_id, selected_tables, keywords, query, uat,
+        bitable_title, bitable_url,
+    )
+
+
+def _read_tables_parallel(
+    bitable_id: str,
+    selected_tables: List[dict],
+    keywords: List[str],
+    query: str,
+    uat: str,
+    bitable_title: str,
+    bitable_url: str,
+) -> List[UnifiedChunk]:
+    """并行读取多个 selected tables。"""
+    if not selected_tables:
+        return []
+    if len(selected_tables) == 1:
         try:
-            table_chunks = _read_single_table(
-                bitable_id, table, keywords, query, uat,
+            return _read_single_table(
+                bitable_id, selected_tables[0], keywords, query, uat,
                 bitable_title, bitable_url,
             )
-            chunks.extend(table_chunks)
         except Exception as e:
-            logger.warning("bitable_reader: table %s failed: %s", table.get("name", ""), e)
+            logger.warning("bitable_reader: table %s failed: %s", selected_tables[0].get("name", ""), e)
+            return []
+    chunks = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(selected_tables), 3)) as ex:
+        futures = {
+            ex.submit(
+                _read_single_table,
+                bitable_id, table, keywords, query, uat,
+                bitable_title, bitable_url,
+            ): table
+            for table in selected_tables
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            table = futures[fut]
+            try:
+                chunks.extend(fut.result())
+            except Exception as e:
+                logger.warning("bitable_reader: table %s failed: %s", table.get("name", ""), e)
+    return chunks
 
     return chunks
 
@@ -448,6 +496,5 @@ def _read_single_table(
             "searchable_fields": searchable_fields[:5],
         },
     )]
-
 
 

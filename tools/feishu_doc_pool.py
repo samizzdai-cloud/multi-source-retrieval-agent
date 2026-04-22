@@ -3,25 +3,17 @@
 核心职责：
   1. 文档去重：多个 sub_query 搜到相同 doc_id → 只读一次
   2. API 调度：Block API 4/s rate limiter + MCP 无限频并发
-  3. 路由：query_type + 未缓存文档数 → Block API / MCP
+  3. reader 调度：按候选上的 ``route_hint`` 分配到 Block API / MCP
   4. 渐进缓存：一篇文档 chunk 完立即可用，不等全部完成
-  5. BM25 评分：按各 sub_query 独立评分 → 每个 task 输出不同 top-K
+  5. 原始 chunk 回收：等待指定 doc_id 完成后，返回原始 UnifiedChunk 列表
 
 生命周期：RetrievalAgent._run_async_impl 创建一个实例，传给所有 feishu task。
-
-设定参数 (query_type → top-N / per-doc-K / max-output):
-  data:    top-3 docs, per-doc top-3 chunks, max 10 output
-  concept: top-6 docs, per-doc top-5 chunks, max 15 output
-  mixed:   top-4 docs, per-doc top-4 chunks, max 12 output
 """
 
 import asyncio
-import hashlib
 import logging
-import re
 import time
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Set
 
 from feishu_read_tool.pipeline_models import Chunk, PipelineConfig
 
@@ -32,74 +24,29 @@ logger = logging.getLogger(__name__)
 
 # ── 路由参数 ─────────────────────────────────────────────────────
 
-@dataclass
-class PoolConfig:
-    """query_type 分化参数。"""
-    top_n_docs: int = 4         # 文档级 BM25 筛选保留数
-    max_per_doc: int = 4        # 每篇文档输出 top-K chunks
-    max_output: int = 12        # feishu_retrieve 单次输出上限
-    mcp_threshold: int = 4      # 未缓存文档数 > 此值时触发 MCP 路径
-    block_api_concurrency: int = 3  # Block API 安全并发数（实测 4 触发 99991400 限频）
-    eval_mode: str = "bm25"     # "bm25" | "bm25+embedding"
-
-    @classmethod
-    def for_query_type(cls, query_type: str) -> "PoolConfig":
-        # MCP 配比：data 全走 Block API（P3-B 验证 MCP 反而更慢），concept/mixed 按阈值走
-        if query_type == "data":
-            return cls(top_n_docs=5, max_per_doc=4, max_output=20, mcp_threshold=99)
-        elif query_type == "concept":
-            return cls(top_n_docs=8, max_per_doc=5, max_output=25, mcp_threshold=3)
-        else:  # mixed
-            return cls(top_n_docs=6, max_per_doc=5, max_output=22, mcp_threshold=4)
+BLOCK_API_CONCURRENCY = 3  # 实测 4 会较容易撞到 99991400 限频
 
 
-# ── BM25 轻量评分 ───────────────────────────────────────────────
-
-def _bm25_score(query: str, text: str, k1: float = 1.5, b: float = 0.75) -> float:
-    """极简 BM25：query 词在 text 中的 tf-idf 近似，无需语料库。"""
-    query_terms = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
-    if not query_terms:
-        return 0.0
-    text_lower = text.lower()
-    text_words = re.findall(r'[\w\u4e00-\u9fff]+', text_lower)
-    doc_len = len(text_words)
-    avg_dl = 200  # 假设平均文档长度
-    score = 0.0
-    for term in query_terms:
-        tf = text_lower.count(term)
-        if tf > 0:
-            norm_tf = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_dl))
-            score += norm_tf
-    return score
-
-
-def _bm25_rank_candidates(query: str, candidates: List[dict]) -> List[dict]:
-    """按 BM25(query, title+summary) 对候选文档排序。"""
-    scored = []
-    for c in candidates:
-        text = (c.get("title", "") + " " + c.get("summary", "")).strip()
-        s = _bm25_score(query, text)
-        scored.append((s, c))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [c for _, c in scored]
-
-
-def _text_hash(text: str) -> str:
-    """chunk 去重 hash。"""
-    normalized = re.sub(r"\s+", " ", text[:500].strip().lower())
-    return hashlib.md5(normalized.encode()).hexdigest()
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
 
 
 # ── FeishuDocPool ────────────────────────────────────────────────
 
 class FeishuDocPool:
-    """跨 sub_query 共享的飞书文档读取池。"""
+    """跨 sub_query 共享的飞书文档读取池。
 
-    def __init__(self, uat: str, query_type: str = "mixed",
-                 pool_config_override: Optional["PoolConfig"] = None):
+    v5：doc_pool 退化为 reader scheduler + raw chunk collector。
+    - ``submit_and_read`` 信任候选上的 ``route_hint``，不再自行推断 reader 路由
+    - ``wait_and_collect`` 只等待 doc 完成并返回原始 UnifiedChunk，不再做 BM25 /
+      embedding / noise_threshold / max_per_doc / max_output
+    - 跨 sub_query 的 doc 缓存 (``_doc_chunks`` / ``_done`` / ``_reading``) 与
+      Block API 全局并发 semaphore 仍在 pool 级共享（缓存决定语义不受 query_type 影响）
+    """
+
+    def __init__(self, uat: str, query_type: str = "structured"):
         self.uat = uat
-        self.query_type = query_type
-        self.pool_config = pool_config_override or PoolConfig.for_query_type(query_type)
+        self.default_query_type = query_type
 
         # 共享缓存: doc_id → List[Chunk]
         self._doc_chunks: Dict[str, List[Chunk]] = {}
@@ -114,45 +61,71 @@ class FeishuDocPool:
         # 全局锁
         self._lock = asyncio.Lock()
         # Block API 全局并发控制（跨所有 sub_query 共享，防止 99991400 限频）
-        self._block_api_sem = asyncio.Semaphore(self.pool_config.block_api_concurrency)
+        self._block_api_sem = asyncio.Semaphore(BLOCK_API_CONCURRENCY)
         # doc 完成通知 (渐进式：一篇完成立即通知等待的 task)
         self._doc_ready_events: Dict[str, asyncio.Event] = {}
         # doc_id → 第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM 提取）
         self._doc_query: Dict[str, str] = {}
-        # sub_query → expanded BM25 query string（缓存，避免重复展开）
-        self._expanded_cache: Dict[str, str] = {}
-        # Embedding 混合评分（由 retrieval_agent 注入）
-        self._embedding_cache: Optional[object] = None   # EmbeddingCache 实例
-        self._focuses: List[str] = []                     # flat focus 列表
-        self._focus_embeddings: Optional[List] = None     # focus embedding 向量
 
     def set_embedding_cache(self, cache: object, focuses: List[str]) -> None:
-        """注入 EmbeddingCache 和 focus 列表，启用混合评分。
-
-        在 retrieval_agent 创建 DocPool 后立即调用。
-        cache 的 focus embedding 可能尚未就绪（precompute_focuses 正在并行），
-        wait_and_score 会在需要时等待。
-        """
-        self._embedding_cache = cache
-        self._focuses = focuses
+        """兼容旧调用；chunk 评分已前移到 SourceAgent rerank。"""
+        _ = (cache, focuses)
 
     def _get_doc_id(self, candidate: dict) -> str:
         return candidate.get("id", candidate.get("document_id", candidate.get("doc_id", "")))
 
+    def _merge_doc_meta(self, existing: Optional[dict], candidate: dict) -> dict:
+        existing = dict(existing or {})
+        candidate_route = candidate.get("route_hint") or "block_api"
+        existing_route = existing.get("route_hint") or candidate_route
+        merged_route = "block_api" if "block_api" in {existing_route, candidate_route} else "mcp"
+        read_query = existing.get("read_query") or candidate.get("read_query", "")
+        if candidate_route == "block_api" and existing_route != "block_api":
+            read_query = candidate.get("read_query", "") or read_query
+        merged = {
+            "title": existing.get("title") or candidate.get("title", ""),
+            "url": existing.get("url") or candidate.get("url", ""),
+            "doc_type": existing.get("doc_type") or candidate.get("doc_type", "DOCX"),
+            "summary": existing.get("summary") or candidate.get("summary", ""),
+            "_source": existing.get("_source") or candidate.get("_source", ""),
+            "route_hint": merged_route,
+            "read_query": read_query,
+            "selected_focus_ids": sorted(
+                set(existing.get("selected_focus_ids") or []) | set(candidate.get("selected_focus_ids") or [])
+            ),
+            "selected_sub_query_ids": sorted(
+                set(existing.get("selected_sub_query_ids") or []) | set(candidate.get("selected_sub_query_ids") or [])
+            ),
+            "selected_feishu_urls": sorted(
+                set(existing.get("selected_feishu_urls") or []) | set(candidate.get("selected_feishu_urls") or [])
+            ),
+            "selected_query_types": sorted(
+                set(existing.get("selected_query_types") or []) | set(candidate.get("selected_query_types") or [])
+            ),
+            "candidate_rerank_score": max(
+                float(existing.get("candidate_rerank_score", 0.0) or 0.0),
+                float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
+            ),
+        }
+        return merged
+
     async def submit_and_read(
         self, candidates: List[dict], query: str,
+        query_type: Optional[str] = None,
     ) -> List[str]:
-        """注册候选文档，BM25 筛选 top-N，触发读取。返回选中的 doc_ids。
+        """注册已经筛选好的候选文档，触发读取。返回选中的 doc_ids。
 
         非阻塞：已缓存的 doc 不重复读取；未缓存的启动异步读取。
-        调用方随后用 wait_and_score() 等待 + 评分。
+        调用方随后用 wait_and_collect() 等待 + 回收原始 chunks。
+
+        Args:
+            candidates: 候选文档列表
+            query: 候选未携带 ``read_query`` 时的兜底 query
+            query_type: 保留兼容签名；reader 路由不再由该字段决定
         """
-        cfg = self.pool_config
-
-        # BM25 文档级排序
-        ranked = _bm25_rank_candidates(query, candidates)[:cfg.top_n_docs]
-
+        started = time.perf_counter()
         selected_ids = []
+        selected_seen: Set[str] = set()
         to_read_block: List[dict] = []
         to_read_mcp: List[dict] = []
         # [S2.2-FIX] 只记录"本次 submit 真正新登记到 _reading 的 doc_id"。
@@ -162,23 +135,27 @@ class FeishuDocPool:
         newly_registered: List[str] = []
 
         async with self._lock:
-            for c in ranked:
+            for c in candidates:
                 doc_id = self._get_doc_id(c)
                 if not doc_id:
                     continue
-                selected_ids.append(doc_id)
+                if doc_id not in selected_seen:
+                    selected_ids.append(doc_id)
+                    selected_seen.add(doc_id)
                 # 缓存 meta
-                if doc_id not in self._doc_meta:
-                    self._doc_meta[doc_id] = {
-                        "title": c.get("title", ""),
-                        "url": c.get("url", ""),
-                        "doc_type": c.get("doc_type", "DOCX"),
-                    }
+                self._doc_meta[doc_id] = self._merge_doc_meta(self._doc_meta.get(doc_id), c)
+                desired_route = self._doc_meta[doc_id].get("route_hint", "block_api")
                 # 记录第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM）
                 if doc_id not in self._doc_query:
-                    self._doc_query[doc_id] = query
+                    self._doc_query[doc_id] = self._doc_meta[doc_id].get("read_query") or query
                 # 已完成或正在读 → 跳过（不登记、不调度）
                 if doc_id in self._done or doc_id in self._reading:
+                    existing_route = self._doc_route.get(doc_id, "unknown")
+                    if desired_route == "block_api" and existing_route == "mcp":
+                        logger.info(
+                            "DocPool.submit_and_read: stronger route requested for doc=%s but reuse existing route=%s",
+                            doc_id[:16], existing_route,
+                        )
                     continue
                 # 创建完成 event
                 if doc_id not in self._doc_ready_events:
@@ -192,24 +169,14 @@ class FeishuDocPool:
 
         # 在锁外调度读取（避免持锁 IO）
         if uncached:
-            # concept 且未缓存文档多 → MCP 并发 + top-3 走 Block API
-            if (self.query_type == "concept"
-                    and len(uncached) > cfg.mcp_threshold):
-                block_ids = set(uncached[:3])  # top-3 走 Block API
-                for did in uncached:
-                    c = self._doc_meta[did]
-                    if did in block_ids:
-                        to_read_block.append({"id": did, **c})
-                        self._doc_route[did] = "block_api"
-                    else:
-                        to_read_mcp.append({"id": did, **c})
-                        self._doc_route[did] = "mcp"
-            else:
-                # data / mixed / 少量文档 → 全部 Block API
-                for did in uncached:
-                    c = self._doc_meta[did]
+            for did in uncached:
+                c = self._doc_meta[did]
+                route = c.get("route_hint", "block_api")
+                self._doc_route[did] = route
+                if route == "mcp":
+                    to_read_mcp.append({"id": did, **c})
+                else:
                     to_read_block.append({"id": did, **c})
-                    self._doc_route[did] = "block_api"
 
             # 启动异步读取（不 await，让调用方通过 event 等待）
             if to_read_block:
@@ -222,53 +189,30 @@ class FeishuDocPool:
             n_done = sum(1 for did in selected_ids if did in self._done)
             n_reading = sum(1 for did in selected_ids if did in self._reading)
             logger.debug(
-                "DocPool.submit_and_read: query=%.20r → %d selected (done=%d reading=%d new_block=%d new_mcp=%d)",
+                "DocPool.submit_and_read: query=%.20r → %d preselected (done=%d reading=%d new_block=%d new_mcp=%d)",
                 query, len(selected_ids), n_done, n_reading, len(to_read_block), len(to_read_mcp),
             )
+        logger.info(
+            "TIMING doc_pool.submit selected=%d new_block=%d new_mcp=%d ms=%.1f",
+            len(selected_ids),
+            len(to_read_block),
+            len(to_read_mcp),
+            _elapsed_ms(started),
+        )
         return selected_ids
 
-    async def wait_and_score(
-        self, doc_ids: List[str], query: str,
+    async def wait_and_collect(
+        self,
+        doc_ids: List[str],
         total_timeout: float = 12.0,
-        emb_weight: float = 0.7,
-        kw_weight: float = 0.3,
-        noise_threshold: float = 0.33,
     ) -> "List[UnifiedChunk]":
-        """等待指定文档就绪，混合评分（embedding + BM25），返回过滤后的 UnifiedChunks。
-
-        混合评分公式:
-          bm25_norm = BM25(expanded_sub_query, chunk) / 5.0, clamped [0, 1]
-          sim_emb = max(cosine_sim(focus_emb, chunk_emb) for each focus)
-          hybrid_score = emb_weight × sim_emb + kw_weight × bm25_norm
-
-        噪声过滤: hybrid_score < noise_threshold → 不输出
-
-        无 embedding 时 fallback 到纯 BM25（noise_threshold 自动降为 0.05）。
-        """
+        """等待指定文档就绪，返回原始 UnifiedChunks。"""
+        started = time.perf_counter()
         from .models import UnifiedChunk
-        cfg = self.pool_config
 
-        # ── 准备 BM25 扩展 query ─────────────────────────────────
-        if query not in self._expanded_cache:
-            from tools.kw_generalization import expand_keywords
-            raw_words = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
-            self._expanded_cache[query] = " ".join(expand_keywords(raw_words))
-        expanded_query = self._expanded_cache[query]
-
-        # ── 准备 embedding（如果注入了 cache）────────────────────
-        cache = self._embedding_cache
-        focus_embs = None
-        if cache and hasattr(cache, 'focus_embeddings') and cache.focus_embeddings:
-            focus_embs = cache.focus_embeddings
-        use_emb = focus_embs is not None and len(focus_embs) > 0
-        if not use_emb:
-            # 无 embedding fallback：纯 BM25，降低噪声阈值
-            noise_threshold = 0.05
-
-        all_scored: List[Tuple[float, UnifiedChunk]] = []
         pending = set(doc_ids)
+        collected_by_doc: Dict[str, List[UnifiedChunk]] = {}
         collected_docs = 0
-        n_filtered = 0
         deadline = time.monotonic() + total_timeout
 
         while pending and time.monotonic() < deadline:
@@ -282,92 +226,58 @@ class FeishuDocPool:
                 pending.discard(doc_id)
                 chunks = self._doc_chunks.get(doc_id, [])
                 if not chunks:
+                    collected_by_doc[doc_id] = []
                     continue
 
                 meta = self._doc_meta.get(doc_id, {})
                 collected_docs += 1
-
-                # ── 批量 embed chunk texts（如果可用）────────────
-                chunk_embs_map: Dict[int, List[float]] = {}
-                if use_emb:
-                    from tools.embedding import batch_embed, _cosine_similarity
-                    import os
-                    api_key = os.getenv("DASHSCOPE_API_KEY", "")
-                    if api_key:
-                        try:
-                            texts = [c.content[:500] for c in chunks]
-                            embs = batch_embed(texts, api_key)
-                            for i, emb in enumerate(embs):
-                                chunk_embs_map[i] = emb
-                        except Exception as e:
-                            logger.warning("DocPool: chunk embedding failed: %s", e)
-
-                # ── 对每个 chunk 计算混合分数 ────────────────────
-                chunk_scores: List[Tuple[float, float, Chunk]] = []  # (hybrid, bm25_norm, chunk)
-                for ci, chunk in enumerate(chunks):
-                    # BM25 侧
-                    bm25_raw = _bm25_score(expanded_query, chunk.content)
-                    bm25_norm = min(1.0, bm25_raw / 5.0)
-
-                    # Embedding 侧：取与所有 focus 的最大 cosine sim
-                    sim_emb = 0.0
-                    if use_emb and ci in chunk_embs_map and focus_embs:
-                        c_emb = chunk_embs_map[ci]
-                        for f_emb in focus_embs:
-                            sim = _cosine_similarity(f_emb, c_emb)
-                            if sim > sim_emb:
-                                sim_emb = sim
-
-                    # 混合评分
-                    if use_emb:
-                        hybrid = emb_weight * sim_emb + kw_weight * bm25_norm
-                    else:
-                        hybrid = bm25_norm  # fallback 纯 BM25
-
-                    chunk_scores.append((hybrid, bm25_norm, chunk))
-
-                # 噪声过滤 + 排序
-                before_filter = len(chunk_scores)
-                chunk_scores = [(h, b, c) for h, b, c in chunk_scores if h >= noise_threshold]
-                n_filtered += before_filter - len(chunk_scores)
-                chunk_scores.sort(key=lambda x: x[0], reverse=True)
-
-                # 每篇文档取 top-K
-                for hybrid, bm25_norm, chunk in chunk_scores[:cfg.max_per_doc]:
+                doc_chunks: List[UnifiedChunk] = []
+                for chunk in chunks:
                     uc = UnifiedChunk(
                         text=chunk.content,
                         source_name=meta.get("title", chunk.doc_title),
                         source_url=meta.get("url", chunk.doc_url),
                         source_tool="feishu",
                         heading_path=chunk.heading_path,
-                        score=round(hybrid, 4),
+                        score=0.0,
                         metadata={
                             "content_type": chunk.content_type.value if hasattr(chunk.content_type, 'value') else str(chunk.content_type),
                             "doc_id": doc_id,
                             "route": self._doc_route.get(doc_id, "unknown"),
-                            "bm25_norm": round(bm25_norm, 4),
+                            "reader_score": 0.0,
+                            "selected_focus_ids": list(meta.get("selected_focus_ids") or []),
+                            "selected_sub_query_ids": list(meta.get("selected_sub_query_ids") or []),
+                            "selected_feishu_urls": list(meta.get("selected_feishu_urls") or []),
+                            "selected_query_types": list(meta.get("selected_query_types") or []),
+                            "candidate_rerank_score": float(meta.get("candidate_rerank_score", 0.0) or 0.0),
                         },
                     )
-                    all_scored.append((hybrid, uc))
+                    doc_chunks.append(uc)
+                collected_by_doc[doc_id] = doc_chunks
 
             if not newly_done and pending:
                 await asyncio.sleep(0.15)
 
         if pending:
             logger.warning(
-                "DocPool.wait_and_score: total_timeout %.1fs — %d/%d docs still pending, returning %d collected",
+                "DocPool.wait_and_collect: total_timeout %.1fs — %d/%d docs still pending, returning %d collected",
                 total_timeout, len(pending), len(doc_ids), collected_docs,
             )
 
-        # 全局排序 + 截断
-        all_scored.sort(key=lambda x: x[0], reverse=True)
-        result = [uc for _, uc in all_scored[:cfg.max_output]]
+        result: List[UnifiedChunk] = []
+        for doc_id in doc_ids:
+            result.extend(collected_by_doc.get(doc_id, []))
 
         logger.info(
-            "DocPool.wait_and_score: query=%.30r → %d chunks from %d/%d docs "
-            "(filtered=%d noise, emb=%s, %.1fs)",
-            query, len(result), collected_docs, len(doc_ids),
-            n_filtered, use_emb, total_timeout,
+            "DocPool.wait_and_collect: %d chunks from %d/%d docs (timeout=%.1fs)",
+            len(result), collected_docs, len(doc_ids), total_timeout,
+        )
+        logger.info(
+            "TIMING doc_pool.wait_and_collect docs=%d collected_docs=%d chunks=%d ms=%.1f",
+            len(doc_ids),
+            collected_docs,
+            len(result),
+            _elapsed_ms(started),
         )
         return result
 
@@ -383,6 +293,7 @@ class FeishuDocPool:
 
         async def _read_one(doc: dict):
             doc_id = doc["id"]
+            doc_started = time.perf_counter()
             async with sem:
                 for attempt in range(3):
                     try:
@@ -419,6 +330,12 @@ class FeishuDocPool:
                         if evt:
                             evt.set()  # 通知等待的 task
                         logger.info("DocPool: block_api done %s → %d chunks", doc_id[:16], len(chunks))
+                        logger.info(
+                            "TIMING doc_pool.read_block_api doc=%s chunks=%d ms=%.1f",
+                            doc_id[:16],
+                            len(chunks),
+                            _elapsed_ms(doc_started),
+                        )
                         return
                     except Exception as e:
                         if attempt < 2:
@@ -444,6 +361,7 @@ class FeishuDocPool:
 
         async def _read_one(doc: dict):
             doc_id = doc["id"]
+            doc_started = time.perf_counter()
             for attempt in range(3):
                 try:
                     result = await asyncio.to_thread(
@@ -466,6 +384,12 @@ class FeishuDocPool:
                     )
                     self._doc_chunks[doc_id] = chunks
                     logger.info("DocPool: mcp done %s → %d chunks", doc_id[:16], len(chunks))
+                    logger.info(
+                        "TIMING doc_pool.read_mcp doc=%s chunks=%d ms=%.1f",
+                        doc_id[:16],
+                        len(chunks),
+                        _elapsed_ms(doc_started),
+                    )
                     break
                 except Exception as e:
                     if attempt < 2:

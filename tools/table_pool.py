@@ -1,19 +1,24 @@
-"""TablePool — 跨 sub_query 共享的表格读取池（轻量版）
+"""TablePool — 跨 sub_query 共享的表格读取池。
 
 核心职责：
-  1. 跨 sub_query 去重：多个 sub_query 搜到同一 spreadsheet/bitable → 只读一次
-  2. Budget 控制：每 focus 最多 3 sheet + 3 bitable
-  3. BM25 排序：用 sub_query 对 candidates 排序，取 top-N
-  4. 缓存：读取结果缓存，后续 sub_query 直接复用
-
-生命周期：retrieval_agent 创建一个实例，传给所有 feishu_retrieve task。
+  1. 前置 budget：按 focus_id 控制每类表格的读取上限
+  2. 去重与缓存：多个 sub_query/loop 命中同一父文件 → 只读一次
+  3. 结构缓存：sheet tabs / bitable tables 元数据复用
+  4. 调度：按 candidate_rerank_score 排优先级，异步安排 reader
+  5. 原始 chunk 回收：返回已读父文件的 raw UnifiedChunk
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
-import re
-from dataclasses import dataclass, field
+import time
+from collections import defaultdict
 from typing import Dict, List, Optional, Set
+
+from feishu_read_tool.client import FeishuClient
+from feishu_read_tool.basic_tool.bitable_read import list_tables
+from feishu_read_tool.rate_limiter import PriorityTokenBucket
 
 from .models import UnifiedChunk
 
@@ -21,137 +26,380 @@ logger = logging.getLogger(__name__)
 
 MAX_SHEETS_PER_FOCUS = 3
 MAX_BITABLES_PER_FOCUS = 3
+SHEET_STRUCTURE_CONCURRENCY = 3
+SHEET_STRUCTURE_QPS = 100.0 / 60.0
+SHEET_STRUCTURE_BUCKET_CAPACITY = 2
+BITABLE_STRUCTURE_CONCURRENCY = 3
+SHEET_READ_CONCURRENCY = 6   # sheet API QPS 充足，放宽并发
+BITABLE_READ_CONCURRENCY = 6  # bitable API QPS 充足，放宽并发
 
 
-def _bm25_score(query: str, text: str, k1: float = 1.5, b: float = 0.75) -> float:
-    """极简 BM25：query 词在 text 中的 tf-idf 近似。"""
-    query_terms = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
-    if not query_terms:
-        return 0.0
-    text_lower = text.lower()
-    text_words = re.findall(r'[\w\u4e00-\u9fff]+', text_lower)
-    doc_len = len(text_words)
-    avg_dl = 20  # 表格标题平均长度短
-    score = 0.0
-    for term in query_terms:
-        tf = text_lower.count(term)
-        if tf > 0:
-            norm_tf = (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_len / avg_dl))
-            score += norm_tf
-    return score
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
+def _merge_unique_strs(*values: List[str]) -> List[str]:
+    merged: List[str] = []
+    seen = set()
+    for items in values:
+        for item in items or []:
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+    return merged
 
 
 class TablePool:
-    """跨 sub_query 共享的表格读取池。
+    """跨 sub_query 共享的表格读取池。"""
 
-    与 FeishuDocPool 的区别：
-    - 更简单：无渐进缓存、无 MCP/Block 路由
-    - 只做去重 + budget + BM25 排序 + 结果缓存
-    """
-
-    def __init__(self, uat: str, max_sheets: int = MAX_SHEETS_PER_FOCUS,
-                 max_bitables: int = MAX_BITABLES_PER_FOCUS):
+    def __init__(
+        self,
+        uat: str,
+        max_sheets: int = MAX_SHEETS_PER_FOCUS,
+        max_bitables: int = MAX_BITABLES_PER_FOCUS,
+    ):
         self.uat = uat
         self.max_sheets = max_sheets
         self.max_bitables = max_bitables
 
-        # 缓存: token → List[UnifiedChunk]
         self._cache: Dict[str, List[UnifiedChunk]] = {}
-        # 正在读取的 token
         self._reading: Set[str] = set()
-        # 已完成的 token
         self._done: Set[str] = set()
-        # 已选中的 sheet / bitable 计数
-        self._sheet_count = 0
-        self._bitable_count = 0
-        # 完成事件
         self._ready_events: Dict[str, asyncio.Event] = {}
         self._lock = asyncio.Lock()
+
+        self._parent_meta: Dict[str, dict] = {}
+        self._sheet_count_by_focus: Dict[str, int] = defaultdict(int)
+        self._bitable_count_by_focus: Dict[str, int] = defaultdict(int)
+
+        self._sheet_struct_cache: Dict[str, List[dict]] = {}
+        self._bitable_struct_cache: Dict[str, List[dict]] = {}
+        self._sheet_struct_sem = asyncio.Semaphore(SHEET_STRUCTURE_CONCURRENCY)
+        self._sheet_struct_bucket = PriorityTokenBucket(
+            qps=SHEET_STRUCTURE_QPS,
+            capacity=SHEET_STRUCTURE_BUCKET_CAPACITY,
+            name="feishu_sheet_structure",
+        )
+        self._bitable_struct_sem = asyncio.Semaphore(BITABLE_STRUCTURE_CONCURRENCY)
+        self._sheet_read_sem = asyncio.Semaphore(SHEET_READ_CONCURRENCY)
+        self._bitable_read_sem = asyncio.Semaphore(BITABLE_READ_CONCURRENCY)
 
     @property
     def stats(self) -> Dict:
         return {
             "cached": len(self._cache),
-            "sheets_selected": self._sheet_count,
-            "bitables_selected": self._bitable_count,
+            "reading": len(self._reading),
+            "sheets_selected_by_focus": dict(self._sheet_count_by_focus),
+            "bitables_selected_by_focus": dict(self._bitable_count_by_focus),
+            "sheet_structure_cached": len(self._sheet_struct_cache),
+            "bitable_structure_cached": len(self._bitable_struct_cache),
         }
 
-    async def submit_tables(
-        self,
-        candidates: List[dict],
-        query: str,
-    ) -> List[dict]:
-        """BM25 排序 + 去重 + budget 控制，返回需要读取的候选列表。
+    def _token_of(self, candidate: dict) -> str:
+        return (
+            candidate.get("id")
+            or candidate.get("document_id")
+            or candidate.get("doc_id")
+            or candidate.get("url")
+            or ""
+        )
 
-        已缓存的直接跳过（后续 get_cached 取结果）。
-        """
+    def _focus_ids_of(self, candidate: dict) -> List[str]:
+        return [str(fid) for fid in (candidate.get("selected_focus_ids") or []) if fid]
+
+    def _merge_parent_meta(self, existing: Optional[dict], candidate: dict) -> dict:
+        existing = dict(existing or {})
+        read_queries = list(existing.get("_read_queries") or [])
+        new_query = str(candidate.get("read_query", "") or "").strip()
+        if new_query and new_query not in read_queries:
+            read_queries.append(new_query)
+
+        merged = {
+            "id": existing.get("id") or candidate.get("id", ""),
+            "title": existing.get("title") or candidate.get("title", ""),
+            "url": existing.get("url") or candidate.get("url", ""),
+            "doc_type": existing.get("doc_type") or candidate.get("doc_type", ""),
+            "_source": existing.get("_source") or candidate.get("_source", ""),
+            "_sources": _merge_unique_strs(
+                list(existing.get("_sources") or []),
+                list(candidate.get("_sources") or []),
+                [candidate.get("_source", "")] if candidate.get("_source") else [],
+            ),
+            "node_id": existing.get("node_id") or candidate.get("node_id", ""),
+            "space_id": existing.get("space_id") or candidate.get("space_id", ""),
+            "selected_focus_ids": _merge_unique_strs(
+                list(existing.get("selected_focus_ids") or []),
+                list(candidate.get("selected_focus_ids") or []),
+            ),
+            "selected_sub_query_ids": _merge_unique_strs(
+                list(existing.get("selected_sub_query_ids") or []),
+                list(candidate.get("selected_sub_query_ids") or []),
+            ),
+            "selected_feishu_urls": _merge_unique_strs(
+                list(existing.get("selected_feishu_urls") or []),
+                list(candidate.get("selected_feishu_urls") or []),
+            ),
+            "selected_query_types": sorted(
+                set(existing.get("selected_query_types") or [])
+                | set(candidate.get("selected_query_types") or [])
+            ),
+            "selected_sheet_ids": _merge_unique_strs(
+                list(existing.get("selected_sheet_ids") or []),
+                list(candidate.get("selected_sheet_ids") or []),
+            ),
+            "selected_sheet_titles": _merge_unique_strs(
+                list(existing.get("selected_sheet_titles") or []),
+                list(candidate.get("selected_sheet_titles") or []),
+            ),
+            "selected_table_ids": _merge_unique_strs(
+                list(existing.get("selected_table_ids") or []),
+                list(candidate.get("selected_table_ids") or []),
+            ),
+            "selected_table_titles": _merge_unique_strs(
+                list(existing.get("selected_table_titles") or []),
+                list(candidate.get("selected_table_titles") or []),
+            ),
+            "candidate_rerank_score": max(
+                float(existing.get("candidate_rerank_score", 0.0) or 0.0),
+                float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
+            ),
+            "candidate_rerank_rank": min(
+                int(existing.get("candidate_rerank_rank", 10**9) or 10**9),
+                int(candidate.get("candidate_rerank_rank", 10**9) or 10**9),
+            ),
+            "table_selected_child_count": max(
+                int(existing.get("table_selected_child_count", 0) or 0),
+                int(candidate.get("table_selected_child_count", 0) or 0),
+                len(existing.get("selected_sheet_ids") or []),
+                len(existing.get("selected_table_ids") or []),
+                len(candidate.get("selected_sheet_ids") or []),
+                len(candidate.get("selected_table_ids") or []),
+            ),
+            "table_structure_child_count": max(
+                int(existing.get("table_structure_child_count", 0) or 0),
+                int(candidate.get("table_structure_child_count", 0) or 0),
+            ),
+            "table_read_ms": float(existing.get("table_read_ms", 0.0) or 0.0),
+            "table_read_chunks": int(existing.get("table_read_chunks", 0) or 0),
+            "table_submit_selected": bool(existing.get("table_submit_selected", False)),
+            "table_submit_skipped": bool(existing.get("table_submit_skipped", False)),
+            "_read_queries": read_queries,
+        }
+        merged["read_query"] = " ".join(read_queries[:3]).strip()
+        return merged
+
+    def _mark_parent_submit_state(self, token: str, *, selected: bool, skipped: bool = False) -> None:
+        meta = dict(self._parent_meta.get(token) or {})
+        meta["table_submit_selected"] = bool(selected or meta.get("table_submit_selected", False))
+        meta["table_submit_skipped"] = bool(skipped or meta.get("table_submit_skipped", False))
+        self._parent_meta[token] = meta
+
+    def _mark_parent_read_result(self, token: str, *, read_ms: float, chunk_count: int) -> None:
+        meta = dict(self._parent_meta.get(token) or {})
+        meta["table_read_ms"] = float(read_ms)
+        meta["table_read_chunks"] = int(chunk_count)
+        self._parent_meta[token] = meta
+
+    def _has_budget_for_candidate(self, candidate: dict) -> bool:
+        doc_type = str(candidate.get("doc_type", "")).upper()
+        focus_ids = self._focus_ids_of(candidate)
+        if not focus_ids:
+            return True
+        if doc_type == "SHEET":
+            return any(self._sheet_count_by_focus[fid] < self.max_sheets for fid in focus_ids)
+        if doc_type == "BITABLE":
+            return any(self._bitable_count_by_focus[fid] < self.max_bitables for fid in focus_ids)
+        return True
+
+    def _consume_budget(self, candidate: dict) -> None:
+        doc_type = str(candidate.get("doc_type", "")).upper()
+        for fid in self._focus_ids_of(candidate):
+            if doc_type == "SHEET" and self._sheet_count_by_focus[fid] < self.max_sheets:
+                self._sheet_count_by_focus[fid] += 1
+            elif doc_type == "BITABLE" and self._bitable_count_by_focus[fid] < self.max_bitables:
+                self._bitable_count_by_focus[fid] += 1
+
+    async def get_sheet_structure(self, candidate: dict) -> List[dict]:
+        started = time.perf_counter()
+        token = self._token_of(candidate)
+        if not token:
+            return []
+        if token in self._sheet_struct_cache:
+            rows = list(self._sheet_struct_cache[token])
+            logger.info(
+                "TIMING table_pool.sheet_structure token=%s count=%d ms=%.1f cache=hit",
+                token[:16],
+                len(rows),
+                _elapsed_ms(started),
+            )
+            return rows
+        async with self._sheet_struct_sem:
+            if token in self._sheet_struct_cache:
+                return list(self._sheet_struct_cache[token])
+            try:
+                client = FeishuClient(user_access_token=self.uat)
+                await asyncio.to_thread(self._sheet_struct_bucket.acquire, 0, 60.0)
+                tabs = await asyncio.to_thread(client.query_all_sheets_metadata, token)
+                visible_tabs = [
+                    t for t in tabs
+                    if not t.get("hidden") and t.get("resource_type") == "sheet"
+                ]
+                self._sheet_struct_cache[token] = list(visible_tabs)
+            except Exception as e:
+                logger.warning("table_pool: sheet structure fetch failed for %s: %s", token[:16], e)
+                self._sheet_struct_cache[token] = []
+        rows = list(self._sheet_struct_cache.get(token, []))
+        logger.info(
+            "TIMING table_pool.sheet_structure token=%s count=%d ms=%.1f cache=miss",
+            token[:16],
+            len(rows),
+            _elapsed_ms(started),
+        )
+        return rows
+
+    async def get_bitable_structure(self, candidate: dict) -> List[dict]:
+        started = time.perf_counter()
+        token = self._token_of(candidate)
+        if not token:
+            return []
+        if token in self._bitable_struct_cache:
+            rows = list(self._bitable_struct_cache[token])
+            logger.info(
+                "TIMING table_pool.bitable_structure token=%s count=%d ms=%.1f cache=hit",
+                token[:16],
+                len(rows),
+                _elapsed_ms(started),
+            )
+            return rows
+        async with self._bitable_struct_sem:
+            if token in self._bitable_struct_cache:
+                return list(self._bitable_struct_cache[token])
+            try:
+                tables = await asyncio.to_thread(list_tables, token, self.uat)
+                self._bitable_struct_cache[token] = list(tables)
+            except Exception as e:
+                logger.warning("table_pool: bitable structure fetch failed for %s: %s", token[:16], e)
+                self._bitable_struct_cache[token] = []
+        rows = list(self._bitable_struct_cache.get(token, []))
+        logger.info(
+            "TIMING table_pool.bitable_structure token=%s count=%d ms=%.1f cache=miss",
+            token[:16],
+            len(rows),
+            _elapsed_ms(started),
+        )
+        return rows
+
+    async def submit_and_read(self, candidates: List[dict]) -> List[str]:
+        """注册已选中的表格父文件，返回本轮可管理的父文件 token 列表。"""
+        started = time.perf_counter()
         if not candidates:
             return []
 
-        # BM25 排序
-        scored = []
-        for c in candidates:
-            title = c.get("title", "")
-            s = _bm25_score(query, title)
-            scored.append((s, c))
-        scored.sort(key=lambda x: x[0], reverse=True)
+        ordered_candidates = sorted(
+            candidates,
+            key=lambda c: (
+                -float(c.get("candidate_rerank_score", 0.0) or 0.0),
+                int(c.get("candidate_rerank_rank", 10**9) or 10**9),
+                str(c.get("title", "") or ""),
+            ),
+        )
 
-        # selected 只包含 *本次 submit 新登记到 _reading 的 candidate*。
-        # 已 done / 他人在读的 token 不再进 selected，由调用方通过
-        # get_cached() 等事件拿结果，避免被重复调度读取。
-        selected: List[dict] = []
+        selected_ids: List[str] = []
+        to_read_sheet: List[dict] = []
+        to_read_bitable: List[dict] = []
+
         async with self._lock:
-            for _, c in scored:
-                token = c.get("id", "")
+            for candidate in ordered_candidates:
+                token = self._token_of(candidate)
                 if not token:
                     continue
-                doc_type = c.get("doc_type", "").upper()
+                merged_meta = self._merge_parent_meta(self._parent_meta.get(token), candidate)
+                self._parent_meta[token] = merged_meta
 
-                # 已完成或他人正在读 → 不登记、不返回
                 if token in self._done or token in self._reading:
+                    self._mark_parent_submit_state(token, selected=True)
+                    selected_ids.append(token)
+                    continue
+                if not self._has_budget_for_candidate(merged_meta):
+                    self._mark_parent_submit_state(token, selected=False, skipped=True)
                     continue
 
-                # Budget 检查
-                if doc_type == "SHEET" and self._sheet_count >= self.max_sheets:
-                    continue
-                if doc_type == "BITABLE" and self._bitable_count >= self.max_bitables:
-                    continue
-
-                # 选中
-                if doc_type == "SHEET":
-                    self._sheet_count += 1
-                elif doc_type == "BITABLE":
-                    self._bitable_count += 1
-
+                self._consume_budget(merged_meta)
                 self._reading.add(token)
                 self._ready_events[token] = asyncio.Event()
-                selected.append(c)
+                self._mark_parent_submit_state(token, selected=True)
+                selected_ids.append(token)
 
-        return selected
+                doc_type = str(merged_meta.get("doc_type", "")).upper()
+                # 修复1: 把已缓存的结构信息注入 payload，reader 可跳过重复 API 调用
+                payload = {"id": token, **merged_meta}
+                if doc_type == "SHEET" and token in self._sheet_struct_cache:
+                    payload["_cached_tabs"] = self._sheet_struct_cache[token]
+                elif doc_type == "BITABLE" and token in self._bitable_struct_cache:
+                    payload["_cached_tables"] = self._bitable_struct_cache[token]
+                if doc_type == "SHEET":
+                    to_read_sheet.append(payload)
+                elif doc_type == "BITABLE":
+                    to_read_bitable.append(payload)
 
-    def needs_read(self, token: str) -> bool:
-        """检查某个 token 是否需要读取（未完成）。
-
-        注意：返回 True 不代表"本 sub_query 应该去读"——还要检查
-        token 是否在当前 sub_query 自己的 `selected` 集合里（即 submit_tables
-        刚为本 sub_query 新登记的）。正在被 *他人* 读的 token 不在本次
-        selected 中，因此不会被调度重读；后续用 has_result_or_pending +
-        get_cached 等事件。
-        """
-        return token not in self._done
+        if to_read_sheet:
+            asyncio.create_task(self._read_sheet_batch(to_read_sheet))
+        if to_read_bitable:
+            asyncio.create_task(self._read_bitable_batch(to_read_bitable))
+        logger.info(
+            "TIMING table_pool.submit parents=%d selected=%d new_sheet=%d new_bitable=%d ms=%.1f",
+            len(candidates),
+            len(selected_ids),
+            len(to_read_sheet),
+            len(to_read_bitable),
+            _elapsed_ms(started),
+        )
+        return selected_ids
 
     def has_result_or_pending(self, token: str) -> bool:
-        """token 是否已由 TablePool 管理（已完成或他人正在读）。
-
-        True → 调用方可用 get_cached 直接取缓存或等待事件；
-        False → token 未被 submit 过，调用方自己处理。
-        """
         return token in self._done or token in self._reading
 
+    def _normalize_chunks_for_storage(self, token: str, chunks: List[UnifiedChunk]) -> List[UnifiedChunk]:
+        meta = self._parent_meta.get(token, {})
+        normalized: List[UnifiedChunk] = []
+        for uc in chunks:
+            merged_meta = dict(uc.metadata or {})
+            merged_meta["reader_score"] = float(uc.score or 0.0)
+            merged_meta["doc_id"] = token
+            merged_meta["doc_token"] = token
+            merged_meta["route"] = "sheet_api" if str(meta.get("doc_type", "")).upper() == "SHEET" else "bitable_api"
+            merged_meta["selected_focus_ids"] = list(meta.get("selected_focus_ids") or [])
+            merged_meta["selected_sub_query_ids"] = list(meta.get("selected_sub_query_ids") or [])
+            merged_meta["selected_feishu_urls"] = list(meta.get("selected_feishu_urls") or [])
+            merged_meta["selected_query_types"] = list(meta.get("selected_query_types") or [])
+            merged_meta["candidate_rerank_score"] = float(meta.get("candidate_rerank_score", 0.0) or 0.0)
+            merged_meta["candidate_source"] = meta.get("_source", "")
+            merged_meta["candidate_sources"] = list(meta.get("_sources") or [])
+            merged_meta["read_query"] = meta.get("read_query", "")
+            merged_meta["table_selected_child_count"] = int(meta.get("table_selected_child_count", 0) or 0)
+            merged_meta["table_structure_child_count"] = int(meta.get("table_structure_child_count", 0) or 0)
+            merged_meta["table_read_ms"] = float(meta.get("table_read_ms", 0.0) or 0.0)
+            merged_meta["table_read_chunks"] = int(meta.get("table_read_chunks", 0) or 0)
+            merged_meta["table_submit_selected"] = bool(meta.get("table_submit_selected", False))
+            merged_meta["table_submit_skipped"] = bool(meta.get("table_submit_skipped", False))
+            normalized.append(
+                UnifiedChunk(
+                    text=uc.text,
+                    source_name=uc.source_name,
+                    source_url=uc.source_url,
+                    source_tool=uc.source_tool,
+                    heading_path=uc.heading_path,
+                    score=0.0,
+                    confidence_tier=uc.confidence_tier,
+                    metadata=merged_meta,
+                )
+            )
+        return normalized
+
     async def store_result(self, token: str, chunks: List[UnifiedChunk]) -> None:
-        """存储读取结果，通知等待者。"""
         async with self._lock:
-            self._cache[token] = chunks
+            self._cache[token] = self._normalize_chunks_for_storage(token, chunks)
             self._reading.discard(token)
             self._done.add(token)
             event = self._ready_events.get(token)
@@ -159,7 +407,6 @@ class TablePool:
                 event.set()
 
     async def get_cached(self, token: str, timeout: float = 30.0) -> List[UnifiedChunk]:
-        """获取缓存的结果。如果正在读取，等待完成。"""
         if token in self._done:
             return self._cache.get(token, [])
         event = self._ready_events.get(token)
@@ -167,10 +414,144 @@ class TablePool:
             try:
                 await asyncio.wait_for(event.wait(), timeout=timeout)
             except asyncio.TimeoutError:
-                # S2.1 结构化失败日志（用 read_fail 前缀方便统一 grep）
                 logger.warning(
                     "feishu.read_fail source=table_pool_wait token=%s kind=TimeoutError timeout_s=%.1f",
                     token[:16], timeout,
                 )
                 return []
         return self._cache.get(token, [])
+
+    async def wait_and_collect(self, tokens: List[str], total_timeout: float = 20.0) -> List[UnifiedChunk]:
+        started = time.perf_counter()
+        pending = set(tokens)
+        collected_by_token: Dict[str, List[UnifiedChunk]] = {}
+        deadline = asyncio.get_event_loop().time() + total_timeout
+
+        while pending and asyncio.get_event_loop().time() < deadline:
+            newly_done = []
+            for token in list(pending):
+                event = self._ready_events.get(token)
+                if event is None or event.is_set():
+                    newly_done.append(token)
+            for token in newly_done:
+                pending.discard(token)
+                collected_by_token[token] = list(self._cache.get(token, []))
+            if not newly_done and pending:
+                await asyncio.sleep(0.15)
+
+        if pending:
+            logger.warning(
+                "TablePool.wait_and_collect: total_timeout %.1fs — %d/%d parents still pending",
+                total_timeout,
+                len(pending),
+                len(tokens),
+            )
+
+        result: List[UnifiedChunk] = []
+        for token in tokens:
+            result.extend(collected_by_token.get(token, self._cache.get(token, [])))
+        logger.info(
+            "TIMING table_pool.wait_and_collect parents=%d chunks=%d pending=%d ms=%.1f",
+            len(tokens),
+            len(result),
+            len(pending),
+            _elapsed_ms(started),
+        )
+        return result
+
+    async def _read_sheet_batch(self, candidates: List[dict]) -> None:
+        from feishu_read_tool.sheet_reader import read_sheets
+
+        async def _read_one(candidate: dict) -> None:
+            token = self._token_of(candidate)
+            row_started = time.perf_counter()
+            async with self._sheet_read_sem:
+                try:
+                    chunks = await asyncio.to_thread(
+                        read_sheets,
+                        candidate.get("read_query", "") or "",
+                        [candidate],
+                        self.uat,
+                    )
+                    read_ms = _elapsed_ms(row_started)
+                    self._mark_parent_read_result(token, read_ms=read_ms, chunk_count=len(chunks))
+                    await self.store_result(token, chunks)
+                    logger.info(
+                        "TIMING table_pool.read_sheet token=%s chunks=%d ms=%.1f",
+                        token[:16],
+                        len(chunks),
+                        read_ms,
+                    )
+                except Exception as e:
+                    logger.warning("table_pool: sheet read failed for %s: %s", token[:16], e)
+                    self._mark_parent_read_result(token, read_ms=_elapsed_ms(row_started), chunk_count=0)
+                    await self.store_result(token, [])
+
+        await asyncio.gather(*[_read_one(candidate) for candidate in candidates], return_exceptions=True)
+
+    async def _read_bitable_batch(self, candidates: List[dict]) -> None:
+        from feishu_read_tool.bitable_reader import read_bitables
+
+        async def _read_one(candidate: dict) -> None:
+            token = self._token_of(candidate)
+            row_started = time.perf_counter()
+            async with self._bitable_read_sem:
+                try:
+                    chunks = await asyncio.to_thread(
+                        read_bitables,
+                        candidate.get("read_query", "") or "",
+                        [candidate],
+                        self.uat,
+                    )
+                    read_ms = _elapsed_ms(row_started)
+                    self._mark_parent_read_result(token, read_ms=read_ms, chunk_count=len(chunks))
+                    await self.store_result(token, chunks)
+                    logger.info(
+                        "TIMING table_pool.read_bitable token=%s chunks=%d ms=%.1f",
+                        token[:16],
+                        len(chunks),
+                        read_ms,
+                    )
+                except Exception as e:
+                    logger.warning("table_pool: bitable read failed for %s: %s", token[:16], e)
+                    self._mark_parent_read_result(token, read_ms=_elapsed_ms(row_started), chunk_count=0)
+                    await self.store_result(token, [])
+
+        await asyncio.gather(*[_read_one(candidate) for candidate in candidates], return_exceptions=True)
+
+    def get_roi_rows(self, final_selected_tokens: Optional[Set[str]] = None) -> List[dict]:
+        final_selected_tokens = set(final_selected_tokens or set())
+        rows: List[dict] = []
+        for token, meta in self._parent_meta.items():
+            raw_structure_count = int(meta.get("table_structure_child_count", 0) or 0)
+            structure_count = max(1, raw_structure_count)
+            selected_count = int(meta.get("table_selected_child_count", 0) or 0)
+            rows.append({
+                "token": token,
+                "title": meta.get("title", ""),
+                "doc_type": meta.get("doc_type", ""),
+                "candidate_rerank_score": float(meta.get("candidate_rerank_score", 0.0) or 0.0),
+                "candidate_rerank_rank": int(meta.get("candidate_rerank_rank", 10**9) or 10**9),
+                "selected_child_count": selected_count,
+                "structure_child_count": raw_structure_count,
+                "selected_child_ratio": round(selected_count / structure_count, 4),
+                "read_ms": float(meta.get("table_read_ms", 0.0) or 0.0),
+                "read_chunks": int(meta.get("table_read_chunks", 0) or 0),
+                "submit_selected": bool(meta.get("table_submit_selected", False)),
+                "submit_skipped": bool(meta.get("table_submit_skipped", False)),
+                "final_selected": token in final_selected_tokens,
+                "selected_focus_ids": list(meta.get("selected_focus_ids") or []),
+                "selected_sub_query_ids": list(meta.get("selected_sub_query_ids") or []),
+                "selected_query_types": list(meta.get("selected_query_types") or []),
+            })
+        rows.sort(
+            key=lambda row: (
+                not row["submit_selected"],
+                not row["final_selected"],
+                -row["read_ms"],
+                -row["candidate_rerank_score"],
+                row["candidate_rerank_rank"],
+                row["title"],
+            )
+        )
+        return rows

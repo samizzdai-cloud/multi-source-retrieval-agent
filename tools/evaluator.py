@@ -126,13 +126,13 @@ class EvaluationLayer:
         focus_hits: Dict[str, int],
         min_score: float,
         focus_core_keywords: Optional[Dict[str, set]] = None,
-        query_type: str = "mixed",
+        query_type: str = "structured",
     ) -> None:
         """对新到达的 chunks，逐个匹配每个 focus 的关键词，更新命中计数。
 
         命中条件（改动B）：
           核心词（不展开）至少 1 个命中 AND 泛化词 overlap >= min_overlap
-          [P1.5] min_overlap 统一为 1（放宽 data/mixed 型阈值，避免早停误判）
+          [P1.5] min_overlap 统一为 1（放宽 structured 型阈值，避免早停误判）
           防止任意一个泛化词命中即满足导致早停误判。
           focus_core_keywords 为 None 时降级为旧逻辑（向后兼容）。
         """
@@ -172,7 +172,7 @@ class EvaluationLayer:
         task_group_map: Optional[Dict[asyncio.Task, int]] = None,
         embedding_cache: "Optional[object]" = None,
         focus_groups: Optional[List] = None,
-        query_type: str = "mixed",
+        query_type: str = "structured",
     ) -> tuple[List[UnifiedChunk], Dict[str, int], Dict[str, int], Dict[int, int]]:
         """收集所有任务的结果，支持 per-focus 早停和硬超时。
 
@@ -182,7 +182,7 @@ class EvaluationLayer:
             task_group_map: {asyncio.Task: group_index}
             embedding_cache: EmbeddingCache 实例（可选，用于语义 focus 命中判断）
             focus_groups: 完整 FocusGroup 列表（含 required_targets），用于 forced_done 判断
-            query_type: 查询类型 "data" | "concept" | "mixed"，影响 focus 命中判断松紧
+            query_type: 查询类型 "structured" | "concept"，影响 focus 命中判断松紧
 
         Returns:
             (all_chunks, source_stats, focus_hits, task_results)

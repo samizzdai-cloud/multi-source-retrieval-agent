@@ -98,7 +98,7 @@ class PipelineConfig:
     max_candidates:     int   = 10
 
     # query_type: affects Stage 2 BM25 filter and Stage 5 scoring params
-    query_type:         str   = "mixed"   # "data" | "concept" | "mixed"
+    query_type:         str   = "structured"   # "structured" | "concept"
     # Stage 5: BM25+embedding hybrid scoring (D3)
     use_embedding_score: bool = True       # False = pure BM25, True = BM25+embedding
     bm25_weight:        float = 0.5       # Stage 5 hybrid: BM25 weight
@@ -197,7 +197,7 @@ class SubQueryPlan:
     original_query: str
     sub_queries: List[SubQuery]
     time_filter: Optional[str]   # "last_N_days" | None
-    query_type: str              # "data" | "concept" | "mixed"
+    query_type: str              # "structured" | "concept"
 
 
 @dataclass

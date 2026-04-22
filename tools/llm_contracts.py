@@ -36,9 +36,10 @@ Decision = Literal["continue", "stop"]
 class SubQueryItem(BaseModel):
     """plan_only / plan_eval 产出的 sub_query 元素（v2：支持源特有参数）。
 
-    ``tags`` / ``indexes`` / ``time_filter`` 均可选：
+    ``tags`` / ``indexes`` / ``time_filter`` / ``query_type`` 均可选：
     - bailian 的 plan_only 会填 ``tags``（L2 业务分类 + 时效 tag）+ ``indexes``（知识库名）
-    - feishu 的 plan_only 会填 ``time_filter``（"last_N_days" 或 None）
+    - feishu 的 plan_only 会填 ``time_filter``（"last_N_days" 或 None）+ ``query_type``
+      （"structured"/"concept"，驱动 Feishu doc reader 路由与召回量分化）
     - google / notion 保持默认空
     """
     query: str = Field(..., description="子查询原文")
@@ -54,6 +55,11 @@ class SubQueryItem(BaseModel):
     time_filter: Optional[str] = Field(
         default=None,
         description="feishu 专用：'last_N_days' 或 None；其他源留空",
+    )
+    query_type: Optional[Literal["structured", "concept"]] = Field(
+        default=None,
+        description="feishu 专用：structured=结构化/可核对事实载体，concept=概念/背景/策略；"
+                    "其他源留空（None）",
     )
 
 

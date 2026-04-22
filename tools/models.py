@@ -46,29 +46,28 @@ class UnifiedChunk:
 
 
 @dataclass
-class FocusGroup:
-    """一组检索意图 + 源路由分配（v2 精简）。
+class PlanFocus:
+    """Global Planner 输出的单个 focus（扁平架构，v2.1）。
 
-    Global Planner 输出的最小单元：
-    - focuses: 可评估的检索目标列表，每个 focus 描述一个维度/方面。
-    - targets: 该 FocusGroup 应派发到的源列表（planner 已完成路由决策）。
+    v2.1 FG 下线后，每个 focus 独立携带自己的源路由 ``targets``。
 
-    示例: query="nubia 3月销售" →
-        FocusGroup(focuses=["nubia DTC渠道销售数据"], targets=["feishu","bailian"])
+    下游 ``retrieve_agent._prepare_focuses`` 会把 ``PlanFocus`` 映射到
+    ``agents.source_agent_base.Focus``（补上 ``focus_id``）后再派发。
     """
-    focuses: List[str] = field(default_factory=list)
+    text: str
     targets: List[str] = field(default_factory=list)
 
 
 @dataclass
 class QueryPlan:
-    """Global Planner 的输出（v2 精简：只管语义拆解 + 源路由）。
+    """Global Planner 的输出（v2.1：FG 下线，flat focuses）。
 
+    只管语义拆解 + 源路由（每个 focus 独立带 targets）。
     不再包含 time_filter / query_type / sub_queries / tags / indexes / required_targets
     ——这些由各 SourceAgent 自己的 plan_only LLM 产出。
     """
     original_query: str
-    focus_groups: List[FocusGroup] = field(default_factory=list)
+    focuses: List[PlanFocus] = field(default_factory=list)
 
 
 @dataclass
@@ -138,6 +137,11 @@ class ChunkEntry:
         a2 = set((other.metadata or {}).get("answered_focuses") or [])
         if a1 or a2:
             merged_meta["answered_focuses"] = sorted(a1 | a2)
+        for key in ("focus_ids", "sub_query_ids", "feishu_urls", "selected_query_types"):
+            v1 = set((self.metadata or {}).get(key) or [])
+            v2 = set((other.metadata or {}).get(key) or [])
+            if v1 or v2:
+                merged_meta[key] = sorted(v1 | v2)
 
         return ChunkEntry(
             id=self.id,
@@ -216,26 +220,70 @@ LOOSE_SOURCE_CFG = SourceAgentConfig(
 # ── eval_layer 模式（Phase 4b）────────────────────────────────────
 EvalLayerMode = Literal["rule", "llm_tool"]
 
+# ── RetrieveConfig 一体化档位（Phase 4c）──────────────────────────
+# 档位语义（preset × eval_layer 耦合）：
+#   lite      : STRICT 基底 + eval_layer 关             生产默认，快准低延迟
+#   balanced  : STRICT 基底 + rule eval_layer           需要跨源重排但不烧 LLM
+#   deep_dive : LOOSE  基底 + llm_tool eval_layer       模糊 query + 多源噪声大
+# 其他组合（strict+llm / loose+rule）无有效收益，不提供档位。
+RetrievePreset = Literal["lite", "balanced", "deep_dive"]
+
 
 @dataclass
 class RetrieveConfig:
-    """retrieve_agent 顶层配置。"""
+    """retrieve_agent 顶层配置。
+
+    推荐用 ``preset`` 一键切档（见 RetrievePreset 注释）；需要微调时用
+    ``source_configs[source]`` 覆写单源字段，或显式设置 ``source_preset`` /
+    ``eval_layer_enabled`` / ``eval_layer_mode`` 覆盖 preset 推导值。
+    """
     enabled_sources: List[str] = field(default_factory=lambda: ["feishu", "bailian"])
     source_configs: Dict[str, SourceAgentConfig] = field(default_factory=dict)
 
-    # ── SourceAgent 预设耦合（Phase 4b）──
-    # 当 enabled_preset != None 时，effective_config_for 以预设为基底叠加 source_configs 覆写
-    # 可取 "strict" / "loose" / None（后者 = 完全由 source_configs 决定，同旧行为）
-    source_preset: Optional[Literal["strict", "loose"]] = None
+    # ── 一体化档位（Phase 4c）──
+    preset: RetrievePreset = "lite"
 
-    # ── eval_layer（Phase 4b）──
-    eval_layer_enabled: bool = False
-    eval_layer_mode: EvalLayerMode = "rule"
+    # ── preset 显式覆盖通道（向后兼容 + 细粒度手动覆盖）──
+    # 这些字段为 None/默认值时走 preset 推导；非默认时覆盖 preset。
+    # exp_phase4b*.py 显式设置 source_configs + eval_layer_enabled=True/False 的写法继续生效。
+    source_preset: Optional[Literal["strict", "loose"]] = None
+    eval_layer_enabled: Optional[bool] = None
+    eval_layer_mode: Optional[EvalLayerMode] = None
+
+    # ── eval_layer 细粒度旋钮（Phase 4b）──
     eval_layer_top_k: int = 12             # 兜底上限；实际值由 min(n_focuses*3, CAP) 计算
     eval_layer_llm_timeout_s: float = 15.0 # LlmEvalLayer 单次 LLM 超时
     eval_layer_llm_max_input: int = 22     # LlmEvalLayer 直灌 LLM 的最大 chunk 数，超过则 rule 预筛
 
     model: str = "gemini-3.1-flash-lite-preview"   # 全局统一 LLM
+
+    # ── preset 推导内部表 ───────────────────────────────────────
+    _PRESET_DEFAULTS = {
+        "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule"},
+        "balanced":  {"source_preset": "strict", "eval_layer_enabled": True,  "eval_layer_mode": "rule"},
+        "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool"},
+    }
+
+    @property
+    def effective_source_preset(self) -> Optional[Literal["strict", "loose"]]:
+        """实际生效的 source_preset：显式设置优先，否则从 preset 推导。"""
+        if self.source_preset is not None:
+            return self.source_preset
+        return self._PRESET_DEFAULTS.get(self.preset, {}).get("source_preset")  # type: ignore[return-value]
+
+    @property
+    def eval_layer_active(self) -> bool:
+        """eval_layer 是否启用：显式设置优先，否则从 preset 推导。"""
+        if self.eval_layer_enabled is not None:
+            return self.eval_layer_enabled
+        return bool(self._PRESET_DEFAULTS.get(self.preset, {}).get("eval_layer_enabled", False))
+
+    @property
+    def eval_layer_effective_mode(self) -> EvalLayerMode:
+        """eval_layer 模式：显式设置优先，否则从 preset 推导。"""
+        if self.eval_layer_mode is not None:
+            return self.eval_layer_mode
+        return self._PRESET_DEFAULTS.get(self.preset, {}).get("eval_layer_mode", "rule")  # type: ignore[return-value]
 
     def config_for(self, source: str) -> SourceAgentConfig:
         """取某源配置，缺省返回默认 ``SourceAgentConfig()``（不叠加 preset，兼容旧调用）。"""
@@ -244,15 +292,14 @@ class RetrieveConfig:
     def effective_config_for(self, source: str) -> SourceAgentConfig:
         """取某源的最终生效配置。
 
-        优先级：``source_configs[source]`` 非默认字段 > ``source_preset`` > ``SourceAgentConfig()``。
-
-        实现策略：用 preset 作为基底 dataclass，再用 source_configs[source] 里**与
-        ``SourceAgentConfig()`` 默认值不同**的字段覆写。未传 source_configs 时返回纯 preset。
+        优先级：``source_configs[source]`` 非默认字段 > ``effective_source_preset``
+        (显式 source_preset 或 preset 推导) > ``SourceAgentConfig()``。
         """
-        # 1) 基底 = preset 或 默认
-        if self.source_preset == "strict":
+        # 1) 基底 = effective preset 或 默认
+        sp = self.effective_source_preset
+        if sp == "strict":
             base = replace(STRICT_SOURCE_CFG)
-        elif self.source_preset == "loose":
+        elif sp == "loose":
             base = replace(LOOSE_SOURCE_CFG)
         else:
             base = SourceAgentConfig()

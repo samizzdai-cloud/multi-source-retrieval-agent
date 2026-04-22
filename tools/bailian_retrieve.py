@@ -214,7 +214,6 @@ async def bailian_retrieve_unified(
     index_id: Optional[str] = None,
     tags: Optional[List[str]] = None,
     indexes: Optional[List[str]] = None,
-    query_type: str = "mixed",
     rerank_top_n_override: Optional[int] = None,
     rerank_min_score_override: Optional[float] = None,
 ) -> List[UnifiedChunk]:
@@ -225,7 +224,8 @@ async def bailian_retrieve_unified(
         index_id: 指定单个知识库 ID（旧版兼容，优先级低于 indexes）
         tags: tag 过滤列表（l2分类 + 时效），空/None = 不过滤全量检索
         indexes: 指定知识库名列表（["nubia", "hypershell"]），空/None = 查全部
-        query_type: "data" | "concept" | "mixed"，concept 型降低 rerank_min_score 以提升接占平率
+        rerank_top_n_override: 覆盖 rerank_top_n 默认值（12）
+        rerank_min_score_override: 覆盖 rerank_min_score 默认值（0.5）
 
     每个 chunk.metadata["index_name"] 标注来源知识库名。
     每个 chunk.metadata["filtered_by_tags"] 标注使用的 tag 过滤。
@@ -260,10 +260,9 @@ async def bailian_retrieve_unified(
         query, list(target_indexes.keys()), effective_tags,
     )
 
-    # rerank_top_n 按 query_type 分化（实验验证 dense/sparse top_k 对百炼无效，只有 top_n 有效）
-    # [P1.3↑] 扩大每个 index call 的返回量：data 6→10，concept/mixed 8→12
-    _rerank_top_default = 10 if query_type == "data" else 12  # mixed/concept 都是 12
-    _rerank_top = rerank_top_n_override or _rerank_top_default
+    # rerank_top_n：实验验证 dense/sparse top_k 对百炼无效，只有 top_n 有效
+    # 默认 12（[P1.3↑] 扩大每个 index call 的返回量以提升召回）
+    _rerank_top = rerank_top_n_override or 12
     _rerank_min = rerank_min_score_override if rerank_min_score_override is not None else 0.5
 
     async def _fetch_one(name: str, idx_id: str, call_tags: Optional[List[str]]) -> List[UnifiedChunk]:
@@ -311,18 +310,3 @@ async def bailian_retrieve_unified(
     )
     return all_chunks
 
-
-# ── Backward compat ──────────────────────────────────────────────
-
-def bailian_retrieve(query: str, index_id: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-    """同步检索接口（向后兼容）。只查单个 index，默认使用第一个配置的库。"""
-    indexes = get_configured_indexes()
-    effective_id = index_id or next(iter(indexes.values()), "")
-    if not effective_id:
-        return {"status": "error", "message": "未配置知识库 ID (BAILIAN_INDEX_MAP / BAILIAN_INDEX_ID)"}
-    return _retrieve_single_index(query, effective_id)
-
-
-def tool_bailian_retrieve(query: str, index_id: str = "") -> dict:
-    """ADK tool 接口（向后兼容）。"""
-    return bailian_retrieve(query=query, index_id=index_id or None)

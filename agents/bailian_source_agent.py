@@ -1,7 +1,7 @@
 """BailianSourceAgent (v2)——百炼源适配器，恢复 plan_only LLM。
 
-v2 架构（2026-04-20）：
-- Global Planner 只出 ``focus_groups[{focuses, targets}]``，不再下发 tags/indexes/time
+v2.1 架构（2026-04-21）：
+- Global Planner 只出扁平 ``focuses[{text, targets}]``，不再下发 tags/indexes/time
 - BailianSourceAgent 的 plan_only LLM 基于 focus.text + 注入的专业规则自主产出：
     · query（百炼风格：完整语义化句子，含国家三元组展开）
     · tags（L2 ≤1 + 时效 ≤1，硬约束兜底 ``enforce_tag_caps``）
@@ -154,7 +154,6 @@ class BailianSourceAgent(SourceAgent):
             query=sq.query,
             tags=tags or None,
             indexes=indexes if indexes else None,
-            query_type="mixed",
             rerank_top_n_override=self.cfg.sub_query_top_n,
         )
         if not uc_list:

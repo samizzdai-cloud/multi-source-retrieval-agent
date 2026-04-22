@@ -38,6 +38,11 @@ _wiki_last_call = 0.0                  # timestamp of last call
 _wiki_time_lock = threading.Lock()     # protects _wiki_last_call
 _WIKI_MIN_INTERVAL = 0.35             # ≈2.8 QPS, safely below burst-9 threshold
 
+# Wiki 短期缓存，用于合并相同 query 的并发调用（如 Phase A 和 Phase B 的同时调用）
+_wiki_cache = {}
+_wiki_cache_lock = threading.Lock()
+_WIKI_CACHE_TTL = 2.0  # seconds
+
 # Wiki obj_type → doc_type 映射（仅保留支持的类型）
 _WIKI_OBJ_TYPE_MAP = {
     1: "DOC",
@@ -383,6 +388,16 @@ def _search_wiki(
     import time as _time
     global _wiki_last_call
 
+    # 尝试从缓存获取（缓存时长2秒）
+    cache_key = f"{query}::{token}"
+    with _wiki_cache_lock:
+        if cache_key in _wiki_cache:
+            cache_time, cache_data = _wiki_cache[cache_key]
+            if _time.time() - cache_time < _WIKI_CACHE_TTL:
+                return list(cache_data)  # 返回副本以防外部修改
+            else:
+                del _wiki_cache[cache_key]
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=utf-8",
@@ -440,6 +455,11 @@ def _search_wiki(
                         "space_id": item.get("space_id", ""),
                         "_source": "wiki",
                     })
+                
+                # 存入缓存
+                with _wiki_cache_lock:
+                    _wiki_cache[cache_key] = (_time.time(), list(normalized))
+                    
                 return normalized
             except Exception as e:
                 logger.warning("_search_wiki exception: %s", e)
@@ -515,9 +535,18 @@ def search_feishu_docs(
         if domain:
             _inferred_tenant_domain = domain
 
-    # 按 title 去重：MCP 优先（有 summary）
-    mcp_titles = {item.get("title", "") for item in mcp_items if item.get("title")}
-    deduped_wiki = [w for w in wiki_doc_items if w.get("title", "") not in mcp_titles]
+    # 按 wiki_node_id 去重：MCP 优先（有 summary）
+    # MCP 的 URL 可能包含 /wiki/node_id，如果和 Wiki 结果的 node_id 相同，则说明是同一份知识库文档
+    import re
+    mcp_node_ids = set()
+    for item in mcp_items:
+        url = item.get("url", "")
+        match = re.search(r'/wiki/([a-zA-Z0-9]+)', url)
+        if match:
+            mcp_node_ids.add(match.group(1))
+
+    # 如果 Wiki 结果的 node_id 在 MCP 中已有，说明已经被 MCP 召回（且带有 summary），Wiki 这边就剔除
+    deduped_wiki = [w for w in wiki_doc_items if w.get("node_id", "") not in mcp_node_ids]
 
     merged = mcp_items + deduped_wiki
     return {

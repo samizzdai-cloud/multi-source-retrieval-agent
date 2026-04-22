@@ -722,7 +722,7 @@ def rerank_and_filter(
     precomputed_sim_matrix: "List[List[float]] | None" = None,
     emb_weight: float = 0.4,
     kw_weight: float = 0.15,
-    query_type: str = "mixed",
+    query_type: str = "structured",
     source_weight: float = 0.7,
 ) -> Tuple[List[UnifiedChunk], List[FocusCoverage]]:
     """完整 rerank pipeline：dedup → deny-list → RSF+RRF → table bonus → per-focus select → tier → top_k → compress。
@@ -734,7 +734,7 @@ def rerank_and_filter(
         min_per_focus: 每个 focus select_by_focus 选出的代表 chunk 数。
         top_k: 最终输出的硬上限。
         precomputed_sim_matrix: N×M 语义相似度矩阵（EmbeddingCache 提供）。None 则用关键词。
-        query_type: "data" 时增大 kw_weight（精确词命中更重要），"concept" 时增大 emb_weight。
+        query_type: "structured" 时增大 kw_weight（精确词命中更重要），"concept" 时增大 emb_weight。
         source_weight: RSF 权重 (0=纯 RRF, 1=纯 RSF)，默认 0.7。
 
     Returns:
@@ -742,9 +742,9 @@ def rerank_and_filter(
     """
     # focus_type-aware 权重调整
     # RSF 侧已用扩展关键词评分，这里调的是 select_by_focus 内语义 vs 关键词比例
-    if query_type == "data":
-        emb_weight = max(emb_weight, 0.35)   # data: embedding 仍有价值（表格语义）
-        kw_weight = max(kw_weight, 0.25)     # data: 精确关键词命中更重要
+    if query_type == "structured":
+        emb_weight = max(emb_weight, 0.35)   # structured: embedding 仍有价值（表格/流程语义）
+        kw_weight = max(kw_weight, 0.25)     # structured: 精确关键词命中更重要
     elif query_type == "concept":
         emb_weight = max(emb_weight, 0.65)   # concept: 语义理解主导
         kw_weight = min(kw_weight, 0.05)     # concept: 关键词弱化
@@ -756,9 +756,9 @@ def rerank_and_filter(
 
     chunks = rrf_merge(chunks, source_weight=source_weight)
 
-    # Table bonus: data/mixed 查询时 table_md chunks 得分 ×1.3
-    # 表格天然包含精确数据，但关键词覆盖度低于叙述性文本，需要补偿
-    if query_type in ("data", "mixed"):
+    # Table bonus: structured 查询时 table_md chunks 得分 ×1.3
+    # 表格/流程载体天然包含精确事实，但关键词覆盖度低于叙述性文本，需要补偿
+    if query_type == "structured":
         from feishu_read_tool.pipeline_models import ChunkContentType
         for c in chunks:
             ct = c.metadata.get("content_type", "")
