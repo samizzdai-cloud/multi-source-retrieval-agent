@@ -118,7 +118,7 @@ async def _run_one(
             feishu_doc_pool.set_embedding_cache(cache, focuses)
         except Exception:
             pass
-        if plan.query_type in ("data", "mixed"):
+        if plan.query_type == "structured":
             try:
                 from tools.table_pool import TablePool
                 tb = ro.get("feishu_table_budget")

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
 from feishu_read_tool.search import search_feishu_docs, search_feishu_tables
-from feishu_read_tool.pipeline_models import PipelineConfig, ChunkContentType
+from feishu_read_tool.pipeline_models import ChunkContentType
 from .models import UnifiedChunk
 from .rerank import (
     build_focus_sub_query_question,
@@ -39,8 +39,10 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 FEISHU_UAT = os.getenv("FEISHU_UAT", "")
-TABLE_SEARCH_ROUTE_TOP_K = 6
-TABLE_CHILD_SELECT_TOP_K = 2
+TABLE_SEARCH_ROUTE_TOP_K = 6          # balanced/deep_dive 每路召回上限
+TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # lite 每路召回上限
+TABLE_CHILD_SELECT_TOP_K = 2          # 每个 parent 最多保留的 child 数
+TABLE_CHILD_SELECT_GLOBAL_TOP_K = 10  # 跨所有 parent 的全局 child rerank 上限
 TABLE_CHILD_SCORE_THRESHOLD = 0.18
 TABLE_CHILD_MIN_KEEP = 1
 
@@ -338,6 +340,7 @@ def _dedupe_table_candidates(
 
 def _build_sheet_structure_candidates(parent: dict, children: List[dict]) -> List[dict]:
     parent_title = str(parent.get("title", "") or "").strip()
+    parent_source = parent.get("_source", "")
     docs: List[dict] = []
     for child in children:
         title = str(child.get("title", "") or child.get("sheet_title", "") or "").strip()
@@ -354,8 +357,10 @@ def _build_sheet_structure_candidates(parent: dict, children: List[dict]) -> Lis
                 "title": f"{parent_title} / {title}" if parent_title and title else (title or parent_title),
                 "summary": " | ".join(summary_bits),
                 "doc_type": "WORKSHEET",
-                "_source": "sheet_structure",
+                "_source": parent_source,
                 "_child_title": title,
+                "_parent_title": parent_title,
+                "_parent_id": parent.get("id", ""),
             }
         )
     return docs
@@ -363,6 +368,7 @@ def _build_sheet_structure_candidates(parent: dict, children: List[dict]) -> Lis
 
 def _build_bitable_structure_candidates(parent: dict, children: List[dict]) -> List[dict]:
     parent_title = str(parent.get("title", "") or "").strip()
+    parent_source = parent.get("_source", "")
     docs: List[dict] = []
     for child in children:
         title = str(child.get("name", "") or child.get("title", "") or "").strip()
@@ -372,8 +378,10 @@ def _build_bitable_structure_candidates(parent: dict, children: List[dict]) -> L
                 "title": f"{parent_title} / {title}" if parent_title and title else (title or parent_title),
                 "summary": "",
                 "doc_type": "BITABLE_TABLE",
-                "_source": "bitable_structure",
+                "_source": parent_source,
                 "_child_title": title,
+                "_parent_title": parent_title,
+                "_parent_id": parent.get("id", ""),
             }
         )
     return docs
@@ -773,8 +781,19 @@ async def search_and_select_feishu_table_candidates(
     focus_text: str = "",
     sub_query_id: str = "",
     table_pool: "Optional[object]" = None,
+    direct_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
+    wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
 ) -> List[dict]:
-    """执行 Feishu table 搜索并返回当前 sub_query 选中的父文件候选。"""
+    """执行 Feishu table 搜索，全局 child rerank，返回已选中子表的父文件候选。
+
+    流程：
+    1. search → _dedupe_table_candidates（按 direct_limit/wiki_limit 截断）
+    2. 并发 structure prefetch（所有 parent）
+    3. 全局 child rerank：把所有 parent 的 children 合并，一次 rerank 选 top
+       TABLE_CHILD_SELECT_GLOBAL_TOP_K 个 child，再按 parent 分组，每个 parent
+       最多保留 TABLE_CHILD_SELECT_TOP_K 个 child（按分数截断多余的）
+    4. 返回有 selected children 的 parent 列表
+    """
     started = time.perf_counter()
     query_type = _normalize_query_type(query_type)
     if query_type != "structured":
@@ -791,62 +810,167 @@ async def search_and_select_feishu_table_candidates(
         logger.warning("feishu_retrieve table search failed: %s", e)
         return []
 
-    parent_candidates = _dedupe_table_candidates(raw_result)
+    parent_candidates = _dedupe_table_candidates(
+        raw_result, direct_limit=direct_limit, wiki_limit=wiki_limit,
+    )
     if not parent_candidates:
         logger.info(
             "TIMING feishu.table_parent_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
-            sub_query_id or "unknown",
-            _elapsed_ms(started),
+            sub_query_id or "unknown", _elapsed_ms(started),
         )
         return []
 
-    async def _select_one(parent_rank_and_candidate) -> Optional[dict]:
-        parent_rank, parent = parent_rank_and_candidate
+    # ── Step 1: 并发 structure prefetch ──────────────────────
+    async def _fetch_one(parent: dict) -> tuple:
         try:
-            return await _select_table_children_for_parent(
-                parent,
-                token=token,
-                focus_id=focus_id,
-                focus_text=focus_text or query,
-                sub_query=query,
-                sub_query_id=sub_query_id,
-                query_type=query_type,
-                parent_rank=parent_rank,
-                table_pool=table_pool,
-            )
+            children = await _fetch_table_structure(parent, token=token, table_pool=table_pool)
+            return (parent, children)
         except Exception as exc:
             logger.warning(
-                "feishu_retrieve: table structure selection failed for parent=%s sub_query_id=%s: %s",
-                parent.get("title", ""),
-                sub_query_id or "unknown",
-                exc,
+                "feishu_retrieve: structure fetch failed for parent=%s: %s",
+                parent.get("title", ""), exc,
             )
-            return None
+            return (parent, [])
 
-    selected_parents = await asyncio.gather(
-        *[
-            _select_one((parent_rank, parent))
-            for parent_rank, parent in enumerate(parent_candidates, start=1)
-        ]
-    )
-    selected = [parent for parent in selected_parents if parent]
+    fetch_results = await asyncio.gather(*[_fetch_one(p) for p in parent_candidates])
+
+    # ── Step 2: 构建全局 child candidates（含 parent 归属）──
+    question = build_focus_sub_query_question(focus_text or query, query)
+    all_child_candidates: List[dict] = []
+    parent_by_child_id: Dict[str, dict] = {}   # child_id → parent
+    children_by_parent: Dict[str, List[dict]] = {}  # parent_id → raw children
+
+    for parent_rank, (parent, children) in enumerate(fetch_results, start=1):
+        parent_id = parent.get("id", "")
+        if not children:
+            continue
+        children_by_parent[parent_id] = children
+        parent_doc_type = str(parent.get("doc_type", "") or "").upper()
+        if parent_doc_type == "SHEET":
+            child_cands = _build_sheet_structure_candidates(parent, children)
+        else:
+            child_cands = _build_bitable_structure_candidates(parent, children)
+        for cc in child_cands:
+            cc["_parent_rank"] = parent_rank
+            all_child_candidates.append(cc)
+            parent_by_child_id[cc["id"]] = parent
+
+    if not all_child_candidates:
+        logger.info(
+            "TIMING feishu.table_parent_select sub_query_id=%s raw=%d selected=0 ms=%.1f",
+            sub_query_id or "unknown", len(parent_candidates), _elapsed_ms(started),
+        )
+        return []
+
+    # ── Step 3: 全局 child rerank ─────────────────────────────
+    global_top_k = TABLE_CHILD_SELECT_GLOBAL_TOP_K
+    per_parent_cap = TABLE_CHILD_SELECT_TOP_K
+
+    if len(all_child_candidates) <= global_top_k:
+        selected_child_cands = all_child_candidates
+        selected_child_scores: Dict[str, float] = {
+            cc["id"]: _default_table_parent_score(cc.get("_parent_rank", 1))
+            for cc in all_child_candidates
+        }
+    else:
+        rerank_result = select_search_candidates(
+            query=question,
+            candidates=all_child_candidates,
+            top_n=global_top_k,
+            score_threshold=TABLE_CHILD_SCORE_THRESHOLD,
+            min_keep=TABLE_CHILD_MIN_KEEP,
+            instruct_template="qa",
+        )
+        if rerank_result.get("status") == "success":
+            selected_child_cands = list(rerank_result.get("selected_candidates") or [])
+            selected_child_scores = {
+                item["candidate"]["id"]: float(item.get("relevance_score", 0.0) or 0.0)
+                for item in (rerank_result.get("selected_results") or [])
+                if item.get("candidate", {}).get("id")
+            }
+        else:
+            logger.warning(
+                "feishu_retrieve: global child rerank failed sub_query_id=%s: %s",
+                sub_query_id or "unknown", rerank_result.get("message"),
+            )
+            selected_child_cands = all_child_candidates[:global_top_k]
+            selected_child_scores = {
+                cc["id"]: _default_table_parent_score(cc.get("_parent_rank", 1))
+                for cc in selected_child_cands
+            }
+
+    # ── Step 4: 按 parent 分组，每个 parent 最多 per_parent_cap 个 child ──
+    # 按分数降序，超出 cap 的截断
+    children_selected_by_parent: Dict[str, List[dict]] = {}
+    for cc in selected_child_cands:
+        parent = parent_by_child_id.get(cc["id"])
+        if parent is None:
+            continue
+        parent_id = parent.get("id", "")
+        if parent_id not in children_selected_by_parent:
+            children_selected_by_parent[parent_id] = []
+        if len(children_selected_by_parent[parent_id]) < per_parent_cap:
+            children_selected_by_parent[parent_id].append(cc)
+
+    # ── Step 5: 组装 annotated parent 列表 ───────────────────
+    selected: List[dict] = []
+    for parent_rank, (parent, children) in enumerate(fetch_results, start=1):
+        parent_id = parent.get("id", "")
+        sel_children = children_selected_by_parent.get(parent_id, [])
+        if not sel_children:
+            continue
+
+        parent_doc_type = str(parent.get("doc_type", "") or "").upper()
+        if parent_doc_type == "SHEET":
+            child_id_field = "selected_sheet_ids"
+            child_title_field = "selected_sheet_titles"
+        else:
+            child_id_field = "selected_table_ids"
+            child_title_field = "selected_table_titles"
+
+        # parent score = 最高 child score
+        best_score = max(
+            (selected_child_scores.get(cc["id"], 0.0) for cc in sel_children),
+            default=_default_table_parent_score(parent_rank),
+        )
+
+        annotated = _annotate_selected_candidate(
+            parent,
+            focus_id=focus_id,
+            sub_query_id=sub_query_id,
+            score=best_score,
+            rank=parent_rank,
+        )
+        annotated["selected_query_types"] = sorted(
+            set(annotated.get("selected_query_types") or []) | {query_type}
+        )
+        raw_children = children_by_parent.get(parent_id, [])
+        annotated["table_structure_child_count"] = len(raw_children)
+        annotated["table_selected_child_count"] = len(sel_children)
+
+        sel_ids = [cc["id"] for cc in sel_children if cc.get("id")]
+        sel_titles = [cc.get("_child_title", "") for cc in sel_children]
+        annotated[child_id_field] = _merge_unique_strs(
+            list(annotated.get(child_id_field) or []), sel_ids,
+        )
+        annotated[child_title_field] = _merge_unique_strs(
+            list(annotated.get(child_title_field) or []), sel_titles,
+        )
+        annotated["read_query"] = query
+        selected.append(annotated)
+
     selected.sort(
-        key=lambda candidate: (
-            -float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
-            int(candidate.get("candidate_rerank_rank", 10**9) or 10**9),
-            str(candidate.get("title", "") or ""),
+        key=lambda c: (
+            -float(c.get("candidate_rerank_score", 0.0) or 0.0),
+            int(c.get("candidate_rerank_rank", 10**9) or 10**9),
+            str(c.get("title", "") or ""),
         )
     )
     logger.info(
-        "feishu_retrieve: table parent selection sub_query_id=%s raw=%d selected=%d",
+        "TIMING feishu.table_parent_select sub_query_id=%s raw=%d children_total=%d selected_parents=%d ms=%.1f",
         sub_query_id or "unknown",
         len(parent_candidates),
-        len(selected),
-    )
-    logger.info(
-        "TIMING feishu.table_parent_select sub_query_id=%s raw=%d selected=%d ms=%.1f",
-        sub_query_id or "unknown",
-        len(parent_candidates),
+        len(all_child_candidates),
         len(selected),
         _elapsed_ms(started),
     )
@@ -889,186 +1013,6 @@ def _candidate_meta_for_chunk_result(cr, lookup: Optional[Dict[str, Dict[str, An
     return {}
 
 
-def _build_table_candidate_meta_lookup(candidates: List[dict]) -> Dict[str, Dict[str, Any]]:
-    by_id: Dict[str, Dict[str, Any]] = {}
-    by_url: Dict[str, Dict[str, Any]] = {}
-    by_title: Dict[str, Dict[str, Any]] = {}
-    for candidate in candidates:
-        meta = {
-            "doc_id": candidate.get("id", ""),
-            "doc_token": candidate.get("id", ""),
-            "doc_type": candidate.get("doc_type", ""),
-            "selected_focus_ids": list(candidate.get("selected_focus_ids") or []),
-            "selected_sub_query_ids": list(candidate.get("selected_sub_query_ids") or []),
-            "selected_feishu_urls": list(candidate.get("selected_feishu_urls") or []),
-            "selected_query_types": list(candidate.get("selected_query_types") or []),
-            "candidate_rerank_score": float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
-        }
-        cand_id = candidate.get("id")
-        if cand_id:
-            by_id[cand_id] = meta
-        if candidate.get("url"):
-            by_url[candidate["url"]] = meta
-        if candidate.get("title"):
-            by_title[candidate["title"]] = meta
-    return {"by_id": by_id, "by_url": by_url, "by_title": by_title}
-
-
-def _candidate_meta_for_unified_chunk(uc: UnifiedChunk, lookup: Optional[Dict[str, Dict[str, Any]]]) -> Dict[str, Any]:
-    if not lookup:
-        return {}
-    meta = uc.metadata or {}
-    doc_id = meta.get("doc_id") or meta.get("doc_token") or ""
-    if doc_id and doc_id in lookup["by_id"]:
-        return dict(lookup["by_id"][doc_id])
-    if uc.source_url and uc.source_url in lookup["by_url"]:
-        return dict(lookup["by_url"][uc.source_url])
-    if uc.source_name and uc.source_name in lookup["by_title"]:
-        return dict(lookup["by_title"][uc.source_name])
-    return {}
-
-
-def _normalize_local_table_chunks(chunks: List[UnifiedChunk], candidates: List[dict]) -> List[UnifiedChunk]:
-    lookup = _build_table_candidate_meta_lookup(candidates)
-    normalized: List[UnifiedChunk] = []
-    for uc in chunks:
-        extra = _candidate_meta_for_unified_chunk(uc, lookup)
-        meta = dict(uc.metadata or {})
-        meta["reader_score"] = float(uc.score or 0.0)
-        for key, value in extra.items():
-            if key in {"selected_focus_ids", "selected_sub_query_ids", "selected_feishu_urls", "selected_query_types"}:
-                meta[key] = list(value or [])
-            elif key == "doc_type":
-                if value and not meta.get("doc_type"):
-                    meta["doc_type"] = value
-                if not meta.get("route"):
-                    meta["route"] = "sheet_api" if str(value).upper() == "SHEET" else "bitable_api"
-            elif value and not meta.get(key):
-                meta[key] = value
-            elif key == "candidate_rerank_score":
-                meta[key] = float(value or 0.0)
-        normalized.append(
-            UnifiedChunk(
-                text=uc.text,
-                source_name=uc.source_name,
-                source_url=uc.source_url,
-                source_tool=uc.source_tool,
-                heading_path=uc.heading_path,
-                score=0.0,
-                confidence_tier=uc.confidence_tier,
-                metadata=meta,
-            )
-        )
-    return normalized
-
-
-# ── Reader 实现 ────────────────────────────────────────────────────────────────
-
-def _log_read_fail(source: str, candidates: List[dict], err: BaseException) -> None:
-    """统一的 reader 失败结构化日志（S2.1 观测埋点）。
-
-    格式：feishu.read_fail source=<reader> n=<候选数> tokens=[id1,id2,...]
-          kind=<异常类型> msg=<消息截断 160 字符>
-    """
-    tokens = [c.get("id", "")[:12] for c in candidates[:5]]
-    if len(candidates) > 5:
-        tokens.append(f"...+{len(candidates)-5}")
-    msg = str(err)
-    if len(msg) > 160:
-        msg = msg[:160] + "..."
-    logger.warning(
-        "feishu.read_fail source=%s n=%d tokens=%s kind=%s msg=%s",
-        source, len(candidates), tokens, type(err).__name__, msg,
-    )
-
-
-async def _read_docx(
-    query: str,
-    candidates: List[dict],
-    token: str,
-    max_candidates: int,
-    query_type: str,
-) -> List[UnifiedChunk]:
-    """DOCX/DOC reader — 调用 docx_pipeline 完整链路。"""
-    started = time.perf_counter()
-    from feishu_read_tool.docx_pipeline import run_rag_pipeline
-    cfg = PipelineConfig(max_candidates=max_candidates, query_type=query_type)
-    candidate_lookup = _build_candidate_meta_lookup(candidates)
-    try:
-        rag_result = run_rag_pipeline(
-            query=query,
-            candidates=candidates,
-            user_access_token=token,
-            cfg=cfg,
-        )
-        chunks = []
-        for cr in rag_result.chunks:
-            uc = _chunk_result_to_unified(cr)
-            uc.metadata.update(_candidate_meta_for_chunk_result(cr, candidate_lookup))
-            chunks.append(uc)
-        logger.info("_read_docx: %d chunks from %d docs", len(chunks), rag_result.total_docs_read)
-        logger.info(
-            "TIMING feishu.reader_docx docs=%d chunks=%d ms=%.1f",
-            len(candidates),
-            len(chunks),
-            _elapsed_ms(started),
-        )
-        return chunks
-    except Exception as e:
-        _log_read_fail("_read_docx", candidates, e)
-        return []
-
-
-async def _read_sheet(
-    query: str,
-    candidates: List[dict],
-    token: str,
-    query_type: str,
-) -> List[UnifiedChunk]:
-    """SHEET reader — 调用 sheet_reader 完整链路。"""
-    started = time.perf_counter()
-    from feishu_read_tool.sheet_reader import read_sheets
-    try:
-        loop = asyncio.get_event_loop()
-        chunks = await loop.run_in_executor(None, read_sheets, query, candidates, token)
-        logger.info("_read_sheet: %d chunks from %d sheets", len(chunks), len(candidates))
-        logger.info(
-            "TIMING feishu.reader_sheet parents=%d chunks=%d ms=%.1f",
-            len(candidates),
-            len(chunks),
-            _elapsed_ms(started),
-        )
-        return chunks
-    except Exception as e:
-        _log_read_fail("_read_sheet", candidates, e)
-        return []
-
-
-async def _read_bitable(
-    query: str,
-    candidates: List[dict],
-    token: str,
-    query_type: str,
-) -> List[UnifiedChunk]:
-    """BITABLE reader — 调用 bitable_reader 完整链路。"""
-    started = time.perf_counter()
-    from feishu_read_tool.bitable_reader import read_bitables
-    try:
-        loop = asyncio.get_event_loop()
-        chunks = await loop.run_in_executor(None, read_bitables, query, candidates, token)
-        logger.info("_read_bitable: %d chunks from %d bitables", len(chunks), len(candidates))
-        logger.info(
-            "TIMING feishu.reader_bitable parents=%d chunks=%d ms=%.1f",
-            len(candidates),
-            len(chunks),
-            _elapsed_ms(started),
-        )
-        return chunks
-    except Exception as e:
-        _log_read_fail("_read_bitable", candidates, e)
-        return []
-
-
 async def search_and_read_feishu_tables(
     query: str,
     *,
@@ -1099,9 +1043,6 @@ async def search_and_read_feishu_tables(
         if not table_candidates:
             return []
 
-        sheet_cands = [c for c in table_candidates if c.get("doc_type", "").upper() in {"SHEET"}]
-        bitable_cands = [c for c in table_candidates if c.get("doc_type", "").upper() in {"BITABLE"}]
-
         if table_pool is not None:
             selected_ids = await table_pool.submit_and_read(table_candidates)
             chunks = await table_pool.wait_and_collect(selected_ids)
@@ -1113,28 +1054,8 @@ async def search_and_read_feishu_tables(
             )
             return chunks
 
-        tasks = []
-        if sheet_cands:
-            tasks.append(("sheet", _read_sheet(query, sheet_cands, token, query_type)))
-        if bitable_cands:
-            tasks.append(("bitable", _read_bitable(query, bitable_cands, token, query_type)))
-
-        chunks: List[UnifiedChunk] = []
-        if tasks:
-            results = await asyncio.gather(*[t[1] for t in tasks], return_exceptions=True)
-            for (label, _), r in zip(tasks, results):
-                if isinstance(r, Exception):
-                    logger.warning("feishu_retrieve %s reader raised: %s", label, r)
-                    continue
-                chunks.extend(r)
-        normalized = _normalize_local_table_chunks(chunks, table_candidates)
-        logger.info(
-            "TIMING feishu.table_pipeline mode=local parents=%d chunks=%d ms=%.1f",
-            len(table_candidates),
-            len(normalized),
-            _elapsed_ms(started),
-        )
-        return normalized
+        logger.warning("feishu_retrieve: table_pool is None, skipping table read")
+        return []
     except Exception as e:
         logger.warning("feishu_retrieve table pipeline failed: %s", e)
         return []
@@ -1145,7 +1066,6 @@ async def search_and_read_feishu_tables(
 async def feishu_retrieve(
     query: str,
     time_filter: Optional[str] = None,
-    max_candidates: int = 10,
     page_size: int = 20,
     uat: str = "",
     query_type: str = "structured",
@@ -1166,12 +1086,11 @@ async def feishu_retrieve(
     Args:
         query:         单个子查询（已由 query_planner 拆解）
         time_filter:   时间过滤，如 "last_30_days"
-        max_candidates: docx reader 保留最多文档数
         page_size:     搜索每路返回条数
         uat:           用户访问令牌（优先参数值，fallback env）
         query_type:    "structured" | "concept"
-        doc_pool:      FeishuDocPool 实例（可选，跨 task 共享 docx 缓存）
-        table_pool:    TablePool 实例（可选，跨 task 共享 sheet/bitable 缓存）
+        doc_pool:      FeishuDocPool 实例（跨 task 共享 docx 缓存，必须提供）
+        table_pool:    TablePool 实例（跨 task 共享 sheet/bitable 缓存，必须提供）
         doc_pool_timeout: DocPool.wait_and_collect 的 total_timeout（秒）。
                           None 时沿用 DocPool 默认值（12.0s）。由 SourceAgent
                           从 SourceAgentConfig.source_timeout_s 派生传入。
@@ -1242,7 +1161,6 @@ async def feishu_retrieve(
                 selected_ids = await doc_pool.submit_and_read(
                     doc_candidates, query, query_type=query_type,
                 )
-                # doc_pool_timeout 从 SourceAgent 透传；None 时走 DocPool 默认
                 ws_kwargs = {}
                 if doc_pool_timeout is not None:
                     ws_kwargs["total_timeout"] = doc_pool_timeout
@@ -1256,8 +1174,6 @@ async def feishu_retrieve(
                 )
             except Exception as e:
                 logger.warning("feishu_retrieve doc_pool failed: %s", e)
-        else:
-            doc_chunks = await _read_docx(query, doc_candidates, token, max_candidates, query_type)
 
     # 收割 table 结果（大概率已完成，因为与 DocPool 并行）
     table_chunks: List[UnifiedChunk] = []

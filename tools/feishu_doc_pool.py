@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # ── 路由参数 ─────────────────────────────────────────────────────
 
-BLOCK_API_CONCURRENCY = 3  # 实测 4 会较容易撞到 99991400 限频
+BLOCK_API_CONCURRENCY = 4  # 提升并发，减少排队等待（原为3）
 
 
 def _elapsed_ms(start: float) -> float:

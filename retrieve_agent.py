@@ -358,16 +358,19 @@ class RetrieveAgent(BaseAgent):
             (time.perf_counter() - merge_started) * 1000.0,
         )
 
-        # 3b. EvalLayer（Phase 4b / 4c）：按 (tier, relevance, coverage) 公式重排 + min-keep 截断
+        # 3b. EvalLayer（deep_dive 模式）：LLM 最终分配，覆盖 focus & query
         if self.config.eval_layer_active and merged:
             try:
                 eval_started = time.perf_counter()
                 layer = build_eval_layer(self.config.eval_layer_effective_mode)
                 before = len(merged)
-                merged = layer.rank(merged, focuses, top_k=self.config.eval_layer_top_k)
+                n_sources = len([r for r in per_source if r.top_chunks])
+                eval_top_k = len(focuses) * max(n_sources, 1) * 3
+                merged = layer.rank(merged, focuses, top_k=eval_top_k)
                 logger.info(
-                    "RetrieveAgent: eval_layer mode=%s %d→%d chunks",
+                    "RetrieveAgent: eval_layer mode=%s %d→%d chunks (top_k=%d = %d focuses × %d sources × 3)",
                     self.config.eval_layer_effective_mode, before, len(merged),
+                    eval_top_k, len(focuses), max(n_sources, 1),
                 )
                 logger.info(
                     "TIMING retrieve.eval_layer before=%d after=%d ms=%.1f",
@@ -439,7 +442,7 @@ def build_retrieve_agent(
                 allowed_indexes=allowed,
             )
         elif src == "feishu":
-            sources[src] = _build_feishu_source_agent(sa_cfg, sc)
+            sources[src] = _build_feishu_source_agent(sa_cfg, sc, preset=cfg.preset)
         elif src == "google":
             # Phase 4 骨架：底层 google_retrieve 是 stub，调用会返回空
             sources[src] = GoogleSourceAgent(cfg=sa_cfg)
@@ -462,16 +465,9 @@ def build_retrieve_agent(
 
 
 def _build_feishu_source_agent(
-    sa_cfg: SourceAgentConfig, sc: SourceConfig,
+    sa_cfg: SourceAgentConfig, sc: SourceConfig, preset: str = "balanced",
 ) -> SourceAgent:
-    """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。
-
-    Phase 4d：query_type 收敛为 ``structured`` / ``concept``，且 doc route
-    规划前移到 FeishuSourceAgent。pool 只保留默认 ``structured`` 作为兜底；
-    实际 reader 路由由全局 doc planner 写入 ``route_hint`` 后再交给 DocPool 执行。
-
-    若 FEISHU_UAT 未配置，退化为无共享池模式（feishu_retrieve 内部会返回空）。
-    """
+    """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。"""
     from agents.feishu_source_agent import FeishuSourceAgent
     from tools.feishu_doc_pool import FeishuDocPool
     from tools.table_pool import TablePool
@@ -481,7 +477,7 @@ def _build_feishu_source_agent(
     doc_pool = None
     table_pool = None
     if uat:
-        doc_pool = FeishuDocPool(uat=uat)  # default_query_type="structured"
+        doc_pool = FeishuDocPool(uat=uat)
         table_pool = TablePool(uat=uat)
     else:
         logger.warning("FeishuSourceAgent: FEISHU_UAT empty, proceeding without pools")
@@ -491,4 +487,5 @@ def _build_feishu_source_agent(
         uat=uat,
         doc_pool=doc_pool,
         table_pool=table_pool,
+        preset=preset,
     )

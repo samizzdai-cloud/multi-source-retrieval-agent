@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 
 MAX_SHEETS_PER_FOCUS = 3
 MAX_BITABLES_PER_FOCUS = 3
-SHEET_STRUCTURE_CONCURRENCY = 3
+SHEET_STRUCTURE_CONCURRENCY = 10   # QPS 充足但避免 429，适度并发
 SHEET_STRUCTURE_QPS = 100.0 / 60.0
 SHEET_STRUCTURE_BUCKET_CAPACITY = 2
-BITABLE_STRUCTURE_CONCURRENCY = 3
+BITABLE_STRUCTURE_CONCURRENCY = 10  # QPS 充足但避免 429，适度并发
 SHEET_READ_CONCURRENCY = 6   # sheet API QPS 充足，放宽并发
 BITABLE_READ_CONCURRENCY = 6  # bitable API QPS 充足，放宽并发
 
@@ -239,7 +239,6 @@ class TablePool:
                 return list(self._sheet_struct_cache[token])
             try:
                 client = FeishuClient(user_access_token=self.uat)
-                await asyncio.to_thread(self._sheet_struct_bucket.acquire, 0, 60.0)
                 tabs = await asyncio.to_thread(client.query_all_sheets_metadata, token)
                 visible_tabs = [
                     t for t in tabs

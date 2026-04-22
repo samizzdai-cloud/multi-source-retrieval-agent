@@ -144,13 +144,13 @@ def _focuses_block(focuses: List[Focus]) -> str:
 
 def _chunks_block(
     chunks: List[ChunkEntry],
-    max_chars: int = 240,
+    max_chars: int = 300,
     focuses: Optional[List["Focus"]] = None,
 ) -> str:
     """渲染候选 chunks 列表供 LLM 评估。
 
     表格类 chunk（content 含 markdown 表格）使用更大的摘要窗口（500 字），
-    让 LLM 能看到实际数据行，而不只是表头。
+    让 LLM 能看到实际数据行，而不只是表头。普通 chunk 使用 300 字。
     """
     if not chunks:
         return "(empty)"
@@ -549,16 +549,7 @@ class SourceAgent:
         tiers_map: Dict[str, Dict],
         chunk_pool: Dict[str, ChunkEntry],
     ) -> List[ChunkEntry]:
-        """组装 LLM 选出的 top_k，带两层 call-back 校验（防 LLM 幻觉）。
-
-        Phase 4b：tiers_map[cid] 含 {tier, relevance, answered_focuses}。
-        - ``tier`` → ``ChunkEntry.with_tier``
-        - ``relevance`` → 覆盖 ``ChunkEntry.score``
-        - ``answered_focuses`` → 白名单校验：必须是本 SourceAgent 被分发的 focus_id
-          （即 ``self._current_focus_lookup`` 的 keys），非法 id 过滤掉并告警
-
-        同时：LLM 返回的 chunk_id 必须真实存在 chunk_pool 中（防幻觉 chunk_id）
-        """
+        """组装 LLM 选出的 top_k，带两层 call-back 校验（防 LLM 幻觉）。"""
         allowed_focus_ids = set(self._current_focus_lookup.keys())
         out: List[ChunkEntry] = []
         for cid in top_ids[: self.cfg.source_top_k]:

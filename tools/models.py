@@ -221,11 +221,13 @@ LOOSE_SOURCE_CFG = SourceAgentConfig(
 EvalLayerMode = Literal["rule", "llm_tool"]
 
 # ── RetrieveConfig 一体化档位（Phase 4c）──────────────────────────
-# 档位语义（preset × eval_layer 耦合）：
-#   lite      : STRICT 基底 + eval_layer 关             生产默认，快准低延迟
-#   balanced  : STRICT 基底 + rule eval_layer           需要跨源重排但不烧 LLM
-#   deep_dive : LOOSE  基底 + llm_tool eval_layer       模糊 query + 多源噪声大
-# 其他组合（strict+llm / loose+rule）无有效收益，不提供档位。
+# 档位语义：
+#   lite      : STRICT 基底 + eval_layer 关 + doc 全走 MCP（无 table）
+#               极简快速路径，doc[:8] MCP-only，跳过 table 流水线
+#   balanced  : STRICT 基底 + eval_layer 关 + doc block_api/mcp 混合 + table 标准
+#               当前默认生产模式，质量与速度平衡（原 lite 逻辑）
+#   deep_dive : LOOSE  基底 + llm_tool eval_layer + doc block_api/mcp 混合 + table 宽松
+#               模糊 query + 多源噪声大
 RetrievePreset = Literal["lite", "balanced", "deep_dive"]
 
 
@@ -260,7 +262,7 @@ class RetrieveConfig:
     # ── preset 推导内部表 ───────────────────────────────────────
     _PRESET_DEFAULTS = {
         "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule"},
-        "balanced":  {"source_preset": "strict", "eval_layer_enabled": True,  "eval_layer_mode": "rule"},
+        "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule"},
         "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool"},
     }
 

@@ -192,7 +192,7 @@ COUNTRY_ABBREV_RULE = (
 
 BRAND_ROUTING: Dict[str, List[str]] = {
     "nubia": ["feishu", "bailian"],
-    "REDMAGIC": ["bailian"],        # Feishu 召回差，仅走百炼
+    "REDMAGIC": ["feishu", "bailian"],  # 飞书有月会纪要/KOL进度表，bailian有结构化知识
     "Hypershell": ["feishu", "bailian"],
     "Nothing": ["feishu", "bailian"],
 }
