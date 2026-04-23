@@ -261,9 +261,17 @@ class RetrieveConfig:
 
     # ── preset 推导内部表 ───────────────────────────────────────
     _PRESET_DEFAULTS = {
-        "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule"},
-        "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule"},
-        "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool"},
+        "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
+                      "source_overrides": {}},
+        "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
+                      "source_overrides": {
+                          "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
+                      }},
+        "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
+                      "source_overrides": {
+                          "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
+                          "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
+                      }},
     }
 
     @property
@@ -294,8 +302,8 @@ class RetrieveConfig:
     def effective_config_for(self, source: str) -> SourceAgentConfig:
         """取某源的最终生效配置。
 
-        优先级：``source_configs[source]`` 非默认字段 > ``effective_source_preset``
-        (显式 source_preset 或 preset 推导) > ``SourceAgentConfig()``。
+        优先级：``source_configs[source]`` 显式字段 > preset 内 source_overrides >
+        ``effective_source_preset`` 基底 > ``SourceAgentConfig()``。
         """
         # 1) 基底 = effective preset 或 默认
         sp = self.effective_source_preset
@@ -306,7 +314,13 @@ class RetrieveConfig:
         else:
             base = SourceAgentConfig()
 
-        # 2) 覆写 = source_configs 里显式改过的字段
+        # 2) preset 内 per-source 覆写（如 balanced.bailian.max_loops=2）
+        preset_overrides = (self._PRESET_DEFAULTS.get(self.preset) or {}).get("source_overrides", {})
+        if source in preset_overrides:
+            diff = {k: v for k, v in preset_overrides[source].items()}
+            base = replace(base, **diff)
+
+        # 3) 用户显式 source_configs 覆写（最高优先级）
         override = self.source_configs.get(source)
         if override is None:
             return base
