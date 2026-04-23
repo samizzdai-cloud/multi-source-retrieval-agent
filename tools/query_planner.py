@@ -16,7 +16,7 @@ focus_groups（FG 概念下线，直接 flat focuses）。
 
 import json
 import logging
-from typing import List
+from typing import List, Optional
 
 from tools.llm_client import call_llm, parse_json_response
 from .models import PlanFocus, QueryPlan
@@ -59,11 +59,17 @@ _FOCUS_GUIDE = """每个 focus 必须满足：
   - '销售数据' + '销售表现'（语义重叠，等价重写）"""
 
 
-def _build_source_profiles_block(available_sources: List[str]) -> str:
-    return "\n".join(
-        f"  - {s}: {_SOURCE_PROFILES_BASE.get(s, '(未知源)')}"
-        for s in available_sources
-    )
+def _build_source_profiles_block(
+    available_sources: List[str], 
+    bailian_allowed_indexes: Optional[List[str]] = None
+) -> str:
+    lines = []
+    for s in available_sources:
+        desc = _SOURCE_PROFILES_BASE.get(s, '(未知源)')
+        if s == "bailian" and bailian_allowed_indexes:
+            desc += f"（当前可用限制：{', '.join(bailian_allowed_indexes)}）"
+        lines.append(f"  - {s}: {desc}")
+    return "\n".join(lines)
 
 
 def _build_brand_routing_block(available_sources: List[str]) -> str:
@@ -148,6 +154,7 @@ def _validate_plan(
 def plan_query(
     query: str,
     available_sources: List[str],
+    bailian_allowed_indexes: Optional[List[str]] = None,
     session_context: str = "",
 ) -> QueryPlan:
     """把用户 query 拆成 flat focuses（每个 focus 独立带 targets）。
@@ -155,7 +162,7 @@ def plan_query(
     v2.1：FG 概念下线，直接输出 ``focuses[{text, targets}]``。
     输出 ``QueryPlan`` 只含：``original_query`` + ``focuses``。
     """
-    profiles_block = _build_source_profiles_block(available_sources)
+    profiles_block = _build_source_profiles_block(available_sources, bailian_allowed_indexes)
     brand_block = _build_brand_routing_block(available_sources)
 
     prompt = f"""你是多源检索的「全局规划器」。职责只有两件事：

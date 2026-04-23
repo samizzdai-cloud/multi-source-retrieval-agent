@@ -25,10 +25,10 @@ ALIBABA_CLOUD_ACCESS_KEY_ID = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
 ALIBABA_CLOUD_ACCESS_KEY_SECRET = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
 
 
-def get_configured_indexes() -> Dict[str, str]:
-    """返回当前配置的所有百炼知识库 {index_name: index_id}。
+def get_all_configured_indexes() -> Dict[str, str]:
+    """返回当前配置的所有百炼知识库 {index_name: index_id} (从环境变量读取)。
 
-    优先读取 BAILIAN_INDEX_MAP，fallback 到 BAILIAN_INDEX_ID（单库旧版配置）。
+    读取 BAILIAN_INDEX_MAP 环境变量，最后 fallback 到 BAILIAN_INDEX_ID（单库旧版配置）。
     """
     raw = os.getenv("BAILIAN_INDEX_MAP", "").strip()
     if raw:
@@ -49,8 +49,8 @@ def get_configured_indexes() -> Dict[str, str]:
 
 def _build_client():
     """构建百炼 API 客户端（延迟导入）。"""
-    from alibabacloud_bailian20231229.client import Client
-    from alibabacloud_tea_openapi.models import Config
+    from alibabacloud_bailian20231229.client import Client # type: ignore
+    from alibabacloud_tea_openapi.models import Config # type: ignore
 
     config = Config(
         access_key_id=ALIBABA_CLOUD_ACCESS_KEY_ID,
@@ -115,7 +115,7 @@ def _retrieve_single_index(
         return {"status": "error", "message": "未配置阿里云 AccessKey"}
 
     try:
-        from alibabacloud_bailian20231229.models import RetrieveRequest, RetrieveRequestRerank
+        from alibabacloud_bailian20231229.models import RetrieveRequest, RetrieveRequestRerank # type: ignore
         client = _build_client()
 
         request = RetrieveRequest(
@@ -230,7 +230,7 @@ async def bailian_retrieve_unified(
     每个 chunk.metadata["index_name"] 标注来源知识库名。
     每个 chunk.metadata["filtered_by_tags"] 标注使用的 tag 过滤。
     """
-    all_configured = get_configured_indexes()
+    all_configured = get_all_configured_indexes()
     if not all_configured:
         logger.warning("bailian_retrieve_unified: no indexes configured")
         return []

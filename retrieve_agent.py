@@ -43,7 +43,11 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────
 # Global planner：v2.1 直接返回 flat focuses（FG 下线）
 # ─────────────────────────────────────────────────────────────────────
-def _prepare_focuses(query: str, available_sources: List[str]) -> List[Focus]:
+def _prepare_focuses(
+    query: str, 
+    available_sources: List[str], 
+    bailian_allowed_indexes: Optional[List[str]] = None,
+) -> List[Focus]:
     """调用 query_planner，把 ``QueryPlan.focuses`` 映射到 runtime ``Focus``。
 
     v2.1 QueryPlan 已是 flat 结构（PlanFocus{text, targets}），本函数仅负责：
@@ -54,7 +58,12 @@ def _prepare_focuses(query: str, available_sources: List[str]) -> List[Focus]:
     sub_queries（含 tags / indexes / time_filter），不依赖 planner 下发 hints。
     """
     try:
-        plan = plan_query(query, available_sources, session_context="")
+        plan = plan_query(
+            query, 
+            available_sources, 
+            bailian_allowed_indexes=bailian_allowed_indexes,
+            session_context="",
+        )
     except Exception as e:
         logger.warning("plan_query failed (%s), fallback to single focus", e)
         return [Focus(focus_id="focus_0", text=query, targets=list(available_sources))]
@@ -332,7 +341,14 @@ class RetrieveAgent(BaseAgent):
 
         # 1. Global plan → focuses (v2.1 flat, FG retired)
         plan_started = time.perf_counter()
-        focuses = await asyncio.to_thread(_prepare_focuses, query, enabled)
+        
+        # 将 bailian 的限制名单透传给 Global Planner
+        bailian_allowed = None
+        if "bailian" in self.sources:
+            # self.sources["bailian"] 是 BailianSourceAgent 的实例
+            bailian_allowed = getattr(self.sources["bailian"], "_allowed_indexes", None)
+            
+        focuses = await asyncio.to_thread(_prepare_focuses, query, enabled, bailian_allowed)
         logger.info(
             "TIMING retrieve.prepare_focuses focuses=%d ms=%.1f",
             len(focuses),
@@ -419,24 +435,27 @@ def build_retrieve_agent(
     source_config: Optional[SourceConfig] = None,
     name: str = "retrieve_v1",
 ) -> RetrieveAgent:
-    """按配置装配 SourceAgent 字典。
-
-    v2.1：Global Planner 只出扁平 ``focuses[{text, targets}]``，各源 plan_only LLM
-    自主产出 sub_queries + tags/indexes/time_filter。不再有 tag_strategy 开关。
-    """
+    """按配置装配 SourceAgent 字典。"""
     cfg = config or RetrieveConfig(enabled_sources=["bailian"])
     sc = source_config or SourceConfig(load_from_env=True)
 
     from agents.bailian_source_agent import BailianSourceAgent
     from agents.google_source_agent import GoogleSourceAgent
     from agents.notion_source_agent import NotionSourceAgent
-    from tools.bailian_retrieve import get_configured_indexes
+    from tools.bailian_retrieve import get_all_configured_indexes
 
     sources: Dict[str, SourceAgent] = {}
     for src in cfg.enabled_sources:
         sa_cfg = cfg.effective_config_for(src)
         if src == "bailian":
-            allowed = list(get_configured_indexes().keys())
+            all_configured = get_all_configured_indexes()
+            allowed_str = sc.get("bailian_allowed_indexes", "BAILIAN_ALLOWED_INDEXES")
+            if allowed_str:
+                allowed_names = [n.strip() for n in allowed_str.split(",") if n.strip()]
+                allowed = [name for name in allowed_names if name in all_configured]
+            else:
+                allowed = list(all_configured.keys())
+                
             sources[src] = BailianSourceAgent(
                 cfg=sa_cfg,
                 allowed_indexes=allowed,
@@ -488,4 +507,34 @@ def _build_feishu_source_agent(
         doc_pool=doc_pool,
         table_pool=table_pool,
         preset=preset,
+    )
+
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from tools.models import AgentConfig
+
+def build_retrieve_agent_from_config(
+    agent_config: "AgentConfig",
+    name: str = "retrieve_v1",
+) -> RetrieveAgent:
+    """统一外部入口：从 AgentConfig 一键构建 RetrieveAgent。
+
+    调用方只需传一个 AgentConfig，无需了解内部 RetrieveConfig / SourceConfig 分层。
+
+    示例：
+        from tools.models import AgentConfig
+        from retrieve_agent import build_retrieve_agent_from_config
+
+        agent = build_retrieve_agent_from_config(AgentConfig(
+            preset="balanced",
+            sources=["feishu", "bailian"],
+            feishu_uat="t-xxx",
+            bailian_indexes="nubia:hzu9kj1c5x,hypershell:pdws24t6vm",
+        ))
+    """
+    from tools.models import AgentConfig  # noqa: PLC0415
+    return build_retrieve_agent(
+        config=agent_config.to_retrieve_config(),
+        source_config=agent_config.to_source_config(),
+        name=name,
     )

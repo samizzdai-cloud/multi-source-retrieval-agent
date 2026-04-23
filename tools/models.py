@@ -15,10 +15,7 @@ class SourceConfig:
     - 某个凭证为空 → 对应检索源不可用（不调用）
     """
     feishu_uat: str = ""
-    bailian_index_map: str = ""           # "nubia:id1,hypershell:id2"
-    bailian_workspace_id: str = ""
-    alibaba_cloud_ak: str = ""
-    alibaba_cloud_sk: str = ""
+    bailian_allowed_indexes: str = ""     # "nubia,hypershell"，空时代表不限制，允许所有注册的知识库
     dashscope_api_key: str = ""           # text-embedding-v4
     load_from_env: bool = True            # 开关：True 时空字段 fallback 到 env var
 
@@ -30,6 +27,49 @@ class SourceConfig:
         if self.load_from_env:
             return os.getenv(env_var, "")
         return ""
+
+
+@dataclass
+class AgentConfig:
+    """统一外部配置接口——调用方只需传这一个对象。
+
+    将 RetrieveConfig（行为档位）+ SourceConfig（凭证）合并为单一入口，
+    方便 API / SDK 调用方按需传入，不需要了解内部两层配置结构。
+
+    用法示例：
+        cfg = AgentConfig(
+            preset="balanced",
+            sources=["feishu", "bailian"],
+            feishu_uat="t-xxx",
+            bailian_allowed_indexes="nubia",
+        )
+        agent = build_retrieve_agent_from_config(cfg)
+        result = await run_query(agent, "nubia 日本市场的KOL合作名单")
+    """
+    # ── 行为档位 ──────────────────────────────────────────────
+    preset: str = "balanced"              # "lite" | "balanced" | "deep_dive"
+    sources: List[str] = field(default_factory=lambda: ["feishu", "bailian"])
+
+    # ── 飞书凭证 ──────────────────────────────────────────────
+    feishu_uat: str = ""                  # 空时走 FEISHU_UAT 环境变量
+
+    # ── 百炼凭证 ──────────────────────────────────────────────
+    bailian_allowed_indexes: str = ""     # 允许查询的知识库白名单，如 "nubia,hypershell"，空时走全部
+
+    def to_retrieve_config(self) -> "RetrieveConfig":
+        """转换为 RetrieveConfig（行为配置）。"""
+        return RetrieveConfig(
+            preset=self.preset,           # type: ignore[arg-type]
+            enabled_sources=list(self.sources),
+        )
+
+    def to_source_config(self) -> "SourceConfig":
+        """转换为 SourceConfig（凭证配置）。"""
+        return SourceConfig(
+            feishu_uat=self.feishu_uat,
+            bailian_allowed_indexes=self.bailian_allowed_indexes,
+            load_from_env=True,           # 空字段始终 fallback 到环境变量
+        )
 
 
 @dataclass
