@@ -54,138 +54,6 @@ _WIKI_DOC_TYPES = {"DOC", "DOCX"}      # 文档类
 _WIKI_TABLE_TYPES = {"SHEET", "BITABLE"}  # 表格类
 
 
-def search_feishu_file(
-    query: str,
-    page_size: int = 20,
-    max_pages: int = 1,
-    page_token: Optional[str] = None,
-    owners: Optional[List[str]] = None,
-    sort_rule: Optional[str] = None,
-    create_time: Optional[str] = None,
-    create_time_relative: Optional[str] = None,
-    open_time: Optional[str] = None,
-    open_time_relative: Optional[str] = None,
-    uat: str = "",
-) -> Dict[str, Any]:
-    """
-    搜索当前用户可见的飞书云文档（doc / docx）。
-
-    ── INPUT SCHEMA ────────────────────────────────────────────────────────────
-    必填：
-      query (str): 搜索关键词。可为空字符串，空搜时按最近浏览时间返回。
-
-    分页（选填）：
-      page_size (int): 每页条数，默认 20，最大 20。
-      max_pages (int): 最多自动翻页次数，默认 1（只取第一页）。
-      page_token (str): 起始翻页游标，通常不传（从第一页开始）。
-
-    过滤（选填）：
-      owners (list[str]): 文档创建者 open_id 列表。
-      sort_rule (str): 排序方式（"OPEN_TIME"/"EDIT_TIME"/"EDIT_TIME_ASC"/"CREATE_TIME"）
-      create_time (str): 创建时间绝对范围，格式 "[YYYY-MM-DD, YYYY-MM-DD]"
-      create_time_relative (str): 创建时间相对范围，格式 "last_N_days"
-      open_time (str): 最近打开时间绝对范围
-      open_time_relative (str): 最近打开时间相对范围
-
-    ── OUTPUT SCHEMA ───────────────────────────────────────────────────────────
-    成功时返回：
-    {
-        "status": "success",
-        "has_more": bool,
-        "page_token": str,
-        "total_fetched": int,
-        "items": [{"id": str, "title": str, "doc_type": str, "url": str, ...}]
-    }
-    失败时返回：{"status": "error", "message": str}
-    ────────────────────────────────────────────────────────────────────────────
-    """
-    token = uat or FEISHU_UAT
-    if not token:
-        return {"status": "error", "message": "未配置飞书 User Access Token (FEISHU_UAT)"}
-
-    headers = {
-        "Content-Type": "application/json",
-        "X-Lark-MCP-UAT": token,
-        "X-Lark-MCP-Allowed-Tools": "search-doc",
-    }
-
-    filters: Dict[str, Any] = {}
-    if owners:
-        filters["owners"] = owners
-    if sort_rule:
-        filters["sort_rule"] = sort_rule
-    if create_time:
-        filters["create_time"] = create_time
-    if create_time_relative:
-        filters["create_time_relative"] = create_time_relative
-    if open_time:
-        filters["open_time"] = open_time
-    if open_time_relative:
-        filters["open_time_relative"] = open_time_relative
-
-    all_items: list = []
-    current_token = page_token
-    has_more = False
-    last_token = None
-
-    for _ in range(max_pages):
-        page: Dict[str, Any] = {"size": page_size}
-        if current_token is not None:
-            page["page_token"] = current_token
-
-        arguments: Dict[str, Any] = {"query": query, "page": page}
-        if filters:
-            arguments["filters"] = filters
-
-        payload = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "id": 1,
-            "params": {"name": "search-doc", "arguments": arguments},
-        }
-
-        try:
-            response = requests.post(FEISHU_MCP_ENDPOINT, headers=headers, json=payload, timeout=10)
-            response.raise_for_status()
-            result_data = response.json()
-
-            if "error" in result_data:
-                return {"status": "error", "message": result_data["error"]}
-
-            content = result_data.get("result", {}).get("content", [])
-            if not content:
-                return {"status": "error", "message": "响应体中 content 为空"}
-
-            raw_text = content[0].get("text", "") if content else ""
-            if not raw_text:
-                return {"status": "error", "message": "MCP响应content[0].text为空"}
-            try:
-                inner = json.loads(raw_text)
-            except json.JSONDecodeError as e:
-                return {"status": "error", "message": f"MCP响应JSON解析失败: {e} | raw={raw_text[:200]}"}
-            if inner.get("code") != 0:
-                return {"status": "error", "message": inner.get("msg", "未知错误")}
-
-            data = inner.get("data", {})
-            all_items.extend(data.get("items", []))
-            has_more = data.get("has_more", False)
-            last_token = data.get("page_token")
-
-            if not has_more:
-                break
-            current_token = last_token
-
-        except requests.exceptions.RequestException as e:
-            return {"status": "error", "message": f"请求飞书 MCP 服务失败: {str(e)}"}
-
-    return {
-        "status": "success",
-        "has_more": has_more,
-        "page_token": last_token,
-        "total_fetched": len(all_items),
-        "items": all_items,
-    }
-
 # ── 租户域名推断 ────────────────────────────────────────────────────────────
 
 _inferred_tenant_domain: str = ""
@@ -267,7 +135,7 @@ def _search_direct_non_docx(
         return []
 
 
-# ── 混合搜索入口（对外公开，替换原 search_feishu_file 在需要全类型时使用）──────
+# ── 混合搜索入口（对外公开，全类型搜索）──────
 
 def search_feishu_hybrid(
     query: str,

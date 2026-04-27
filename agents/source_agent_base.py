@@ -10,9 +10,8 @@
                             → 最后一轮 eval_only 收尾
 - 子类只需提供 ``execute_sub_query(sub_query, focus_id) -> list[ChunkEntry]`` 适配器
 
-⚠️ Phase 1 MVP：
-- 本文件只实现 **单 loop 路径**（min=max=1），多 loop 分支留 NotImplementedError
-- LLM 调用走 ``google.adk.Runner`` 单例 + ``InMemorySessionService``（零持久化）
+已实现单 loop（min=max=1）和多 loop（max>1）完整路径。
+LLM 调用走 ``google.adk.Runner`` 单例 + ``InMemorySessionService``（零持久化）。
 """
 
 from __future__ import annotations

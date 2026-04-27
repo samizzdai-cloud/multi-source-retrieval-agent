@@ -1,7 +1,6 @@
 """Shared LLM client — generic Gemini call wrappers.
 
-Used by: tools/query_planner.py, tools/feishu/retrieval_judge.py,
-         tools/feishu/llm_client.py
+Used by: tools/query_planner.py, agents/sub_agents/*.py, answer_agent.py
 """
 
 import json

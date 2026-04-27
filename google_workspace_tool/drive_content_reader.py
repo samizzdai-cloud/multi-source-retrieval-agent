@@ -448,5 +448,121 @@ def read_drive_contents_concurrent(
     return results
 
 
-if __name__ == "__main__":
-    print("Use read_drive_content() or read_drive_contents_concurrent() to read files.")
+def read_drive_chunks(
+    *,
+    mime_type: str,
+    url: Optional[str] = None,
+    file_id: Optional[str] = None,
+    creds=None,
+    max_tabs: Optional[int] = None,
+    auto_outline_threshold: Optional[int] = DEFAULT_AUTO_OUTLINE_THRESHOLD,
+    max_drive_size: Optional[int] = None,
+    max_read_time: Optional[int] = _DEFAULT_MAX_READ_TIME,
+    supports_all_drives: bool = True,
+    max_chunk_tokens: int = 800,
+) -> list:
+    """读取单个 Drive 文件并切分为 chunks。
+
+    Args:
+        mime_type: 文件 MIME 类型（必填）
+        url: Google Drive URL（与 file_id 二选一）
+        file_id: Drive 文件 ID（与 url 二选一）
+        creds: 已授权的 Credentials 对象（必填）
+        max_tabs: Docs 专用，最多保留 N 个 tabs
+        auto_outline_threshold: Docs 专用，超过此大小自动降级为 outline 模式（字节）
+        max_drive_size: 最大 Drive 文件大小限制，超过则跳过（字节）
+        max_read_time: 最大读取时间（秒），超过则返回空列表
+        supports_all_drives: 是否支持共享驱动器
+        max_chunk_tokens: 每个 chunk 的最大 token 数
+
+    Returns:
+        List[GoogleChunk]
+    """
+    from chunkers import GoogleChunk
+
+    if creds is None:
+        raise ValueError("creds 为必填参数。请在外部完成 OAuth2 授权后传入 Credentials 对象。")
+
+    # 校验并解析 file_id
+    try:
+        resolved_id = resolve_file_id(url=url, file_id=file_id)
+    except ValueError as e:
+        raise ValueError(str(e))
+
+    # 获取元数据（size 用于阈值判断）
+    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    metadata = get_file_metadata(
+        file_id=resolved_id,
+        drive_service=drive_service,
+        supports_all_drives=supports_all_drives,
+    )
+    drive_size = metadata.get("size") if metadata else None
+    title = metadata.get("name", "") if metadata else ""
+
+    # Size Gate
+    effective_max_size = max_drive_size
+    if effective_max_size is None:
+        effective_max_size = DEFAULT_MAX_DRIVE_SIZE_BY_TYPE.get(mime_type, DEFAULT_MAX_DRIVE_SIZE)
+
+    if mime_type not in (_MIME_DOCS, _MIME_SHEETS, _MIME_SLIDES):
+        if effective_max_size is not None and drive_size is not None and drive_size > effective_max_size:
+            return []
+
+    # Sheets pre-estimate
+    if mime_type == _MIME_SHEETS and max_read_time:
+        estimated_seconds = _estimate_sheet_read_time(resolved_id, creds)
+        estimated_sheet_count = max(0, int((estimated_seconds - 0.5) / _SHEET_ESTIMATE_SECONDS_PER_SHEET))
+        if estimated_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
+            return []
+
+    reader = _READER_MAP.get(mime_type)
+    if reader is None:
+        return []
+
+    # Route to reader.read_chunks()
+    def _do_read_chunks():
+        if mime_type == _MIME_DOCS:
+            return reader.read_chunks(
+                file_id=resolved_id,
+                creds=creds,
+                max_tabs=max_tabs,
+                auto_outline_threshold=auto_outline_threshold,
+                supports_all_drives=supports_all_drives,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        elif mime_type in (_MIME_WORD, _MIME_WORD_OLD):
+            return reader.read_chunks(
+                file_id=resolved_id,
+                creds=creds,
+                supports_all_drives=supports_all_drives,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        elif mime_type == _MIME_SLIDES:
+            return reader.read_chunks(
+                file_id=resolved_id,
+                creds=creds,
+                supports_all_drives=supports_all_drives,
+            )
+        elif mime_type == _MIME_PDF:
+            return reader.read_chunks(
+                file_id=resolved_id,
+                creds=creds,
+                supports_all_drives=supports_all_drives,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        elif mime_type == _MIME_SHEETS:
+            return reader.read_chunks(
+                file_id=resolved_id,
+                creds=creds,
+                max_chunk_tokens=max_chunk_tokens,
+            )
+        return []
+
+    timeout_seconds = max_read_time or _DEFAULT_MAX_READ_TIME
+    try:
+        result = _run_with_timeout(_do_read_chunks, timeout_seconds)
+        if result is None:
+            return []
+        return result if result else []
+    except Exception:
+        return []

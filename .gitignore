@@ -36,3 +36,10 @@ env/
 
 # Logs
 *.log
+
+# Google Workspace API Credentials
+credentials.json
+token.json
+gmail_token.json
+*token.json
+

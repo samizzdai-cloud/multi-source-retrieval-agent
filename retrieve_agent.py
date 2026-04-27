@@ -9,7 +9,7 @@
 4. **State 写回**: ``retrieval_result`` 兼容 AnswerAgent 的旧 schema
    （chunks[].text / source_name / heading_path / confidence_tier）。
 
-Phase 1：只启用 bailian；eval_layer 关闭；min=max=1。
+Preset 驱动：lite/balanced/deep_dive 三档，支持 feishu + bailian + google + notion 多源并发。
 """
 
 from __future__ import annotations
@@ -463,7 +463,7 @@ def build_retrieve_agent(
         elif src == "feishu":
             sources[src] = _build_feishu_source_agent(sa_cfg, sc, preset=cfg.preset)
         elif src == "google":
-            # Phase 4 骨架：底层 google_retrieve 是 stub，调用会返回空
+            # Google Workspace 检索（Drive 全文搜索 + 分块读取）
             sources[src] = GoogleSourceAgent(cfg=sa_cfg)
         elif src == "notion":
             # Phase 4 骨架：底层 notion_retrieve 是 stub，调用会返回空

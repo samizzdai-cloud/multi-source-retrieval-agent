@@ -1,7 +1,8 @@
-"""chunk_scorer.py — 零 LLM 的 chunk 相关性评分模块
+"""chunk_scorer.py — BM25 + embedding 混合评分模块
 
-提供 BM25 和 BM25+embedding 混合评分，供 feishu pipeline Stage 2/5 使用。
-替代原有 LLM 评分（Stage 2: ~2.5s → <1ms, Stage 5: ~18s → <500ms with embedding）。
+当前主链已由 qwen3-rerank 统一做 candidate/chunk 评分；本模块仅在
+docx_pipeline 的 skip_scoring=False 遗留模式下使用（Stage 2 candidate trim /
+Stage 5 chunk scoring）。
 
 Score 归一化到 [0.3, 0.95]，与 bailian rerank 分数量纲对齐。
 """
@@ -137,7 +138,7 @@ def hybrid_score_chunks(
     return normalize_scores(hybrid)
 
 
-# ── 文档级快速筛选（Stage 2 替代 LLM filter）───────────────────
+# ── 文档级快速筛选（遗留模式，仅在 skip_scoring=False 时使用）──────────────
 
 def bm25_filter_candidates(
     query: str,
@@ -146,7 +147,8 @@ def bm25_filter_candidates(
 ) -> List[str]:
     """用 BM25 对候选文档排序，返回 top-N 的 doc_id 列表。
 
-    替代 retrieval_judge._legacy_filter_candidates（LLM 版）。
+    当前主链已由 qwen3-rerank 做 candidate selection；此函数仅在 docx_pipeline
+    的 skip_scoring=False 遗留模式下使用。
 
     Args:
         query:           搜索查询

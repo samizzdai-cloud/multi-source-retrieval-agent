@@ -578,3 +578,53 @@ def get_spreadsheet_info(
             "sheets": [],
             "error": f"Sheets API 错误: {e}",
         }
+
+
+def read_chunks(
+    file_id: str,
+    creds,
+    range_name: Optional[str] = None,
+    range_names: Optional[list[str]] = None,
+    value_render_option: Optional[str] = None,
+    date_time_render_option: Optional[str] = None,
+    major_dimension: Optional[str] = None,
+    rows_per_chunk: int = 20,
+) -> list:
+    """读取 Google Spreadsheet 并切分为 chunks。
+
+    Returns:
+        List[GoogleChunk]
+    """
+    from chunkers import split_sheet_to_chunks
+    result = read_one(
+        file_id=file_id,
+        creds=creds,
+        range_name=range_name,
+        range_names=range_names,
+        output_format="raw",
+        value_render_option=value_render_option,
+        date_time_render_option=date_time_render_option,
+        major_dimension=major_dimension,
+    )
+    if result.get("error") or not result.get("sheets"):
+        return []
+    title = result.get("title", "")
+    file_url = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
+    all_chunks = []
+    for sheet_title, data in result["sheets"].items():
+        if isinstance(data, dict) and "error" in data:
+            continue
+        values = data.get("values", []) if isinstance(data, dict) else []
+        if not values:
+            continue
+        chunks = split_sheet_to_chunks(
+            rows=values,
+            sheet_title=sheet_title,
+            file_id=file_id,
+            file_title=title,
+            file_url=file_url,
+            rows_per_chunk=rows_per_chunk,
+            metadata={"mime_type": _MIME_SHEETS, "drive_size": result.get("drive_size")},
+        )
+        all_chunks.extend(chunks)
+    return all_chunks

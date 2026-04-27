@@ -132,3 +132,31 @@ def read_concurrent(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(_read, file_ids))
     return results
+
+
+def read_chunks(
+    file_id: str,
+    creds,
+    supports_all_drives: bool = True,
+    max_chunk_tokens: int = 800,
+) -> list:
+    """读取 PDF 并切分为 chunks。"""
+    from chunkers import markdown_to_chunks, GoogleChunk
+    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives)
+    if result.get("error") or not result.get("structured_md"):
+        return []
+    title = result.get("title", "")
+    file_url = f"https://drive.google.com/file/d/{file_id}/view"
+    # PDF 纯文本可能没有 heading，简单包装
+    md = result["structured_md"]
+    if title and not md.startswith("#"):
+        md = f"# {title}\n\n{md}"
+    return markdown_to_chunks(
+        markdown=md,
+        file_id=file_id,
+        file_title=title,
+        file_url=file_url,
+        source_tag="google:pdf",
+        max_chunk_tokens=max_chunk_tokens,
+        metadata={"mime_type": _MIME_PDF, "drive_size": result.get("drive_size")},
+    )

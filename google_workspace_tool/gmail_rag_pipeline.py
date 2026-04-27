@@ -373,3 +373,106 @@ if __name__ == '__main__':
                 print("\n==========================================\n")
     except ImportError:
         print("未找到 auth_utils.py，跳过测试。")
+
+
+class RAGChunkCompilerTool:
+    """工具 6：GoogleChunk 组装工具（每封邮件一个 chunk）。"""
+
+    @staticmethod
+    def to_chunks(thread_id: str, parsed_messages: List[Dict[str, Any]]) -> List:
+        """将解析后的邮件列表转为 GoogleChunk 列表（每封邮件一个 chunk）。"""
+        from chunkers import GoogleChunk, ChunkContentType, estimate_tokens
+        if not parsed_messages:
+            return []
+
+        chunks: List[GoogleChunk] = []
+        for i, msg in enumerate(parsed_messages, 1):
+            meta = msg['metadata']
+            subject = meta.get('Subject', 'No Subject')
+            sender = meta.get('From', 'Unknown')
+            date = meta.get('Date', 'Unknown')
+            to = meta.get('To', 'Unknown')
+            body = msg.get('body_text', '')
+
+            parts = []
+            parts.append(f"**From:** {sender}")
+            parts.append(f"**To:** {to}")
+            parts.append(f"**Date:** {date}")
+            parts.append(f"**Subject:** {subject}")
+            parts.append("")
+            if body:
+                parts.append(body)
+            else:
+                parts.append("*(No text body)*")
+
+            attachments_texts = msg.get('attachments_texts', [])
+            if attachments_texts:
+                parts.append("")
+                parts.append("**Attachments:**")
+                for att_text in attachments_texts:
+                    parts.append("```")
+                    parts.append(att_text)
+                    parts.append("```")
+
+            content = "\n".join(parts)
+            chunk_id = f"google:gmail:{thread_id}:{i}"
+            thread_url = f"https://mail.google.com/mail/u/0/#inbox/{thread_id}"
+
+            chunks.append(GoogleChunk(
+                chunk_id=chunk_id,
+                file_id=thread_id,
+                file_title=subject,
+                file_url=thread_url,
+                heading_path=subject,
+                content_type=ChunkContentType.TEXT,
+                content=content,
+                token_count=estimate_tokens(content),
+                has_table=False,
+                metadata={
+                    "mime_type": "message/rfc822",
+                    "thread_id": thread_id,
+                    "message_index": i,
+                    "sender": sender,
+                    "date": date,
+                },
+            ))
+        return chunks
+
+
+def run_gmail_chunk_pipeline(query: str, creds: Any, max_threads: int = 5) -> List:
+    """主流程编排：返回 GoogleChunk 列表（每封邮件一个 chunk）。"""
+    from chunkers import GoogleChunk
+    thread_ids = GmailQueryTool.execute(query, creds, max_results=max_threads)
+    all_chunks: List[GoogleChunk] = []
+
+    for thread_id in thread_ids:
+        thread_data = ThreadFetcherTool.execute(thread_id, creds)
+        if not thread_data:
+            continue
+
+        messages_data = thread_data.get('messages', [])
+        parsed_messages = []
+
+        for msg in messages_data:
+            parsed = MessageParserTool.execute(msg)
+            attachments_texts = []
+            if parsed['attachments']:
+                with ThreadPoolExecutor(max_workers=5) as executor:
+                    futures = {
+                        executor.submit(AttachmentExtractorTool.execute, parsed['messageId'], att, creds): att['filename']
+                        for att in parsed['attachments']
+                    }
+                    for future in as_completed(futures):
+                        filename = futures[future]
+                        try:
+                            result = future.result()
+                            attachments_texts.append(f"--- 附件: {filename} ---\n{result}")
+                        except Exception as e:
+                            attachments_texts.append(f"--- 附件: {filename} ---\n[提取失败: {e}]")
+            parsed['attachments_texts'] = attachments_texts
+            parsed_messages.append(parsed)
+
+        chunks = RAGChunkCompilerTool.to_chunks(thread_id, parsed_messages)
+        all_chunks.extend(chunks)
+
+    return all_chunks

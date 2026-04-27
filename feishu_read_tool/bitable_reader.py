@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 MAX_RECORDS = 200               # search_records 最大返回条数
 FALLBACK_RECORDS = 100          # contains filter 无命中时 fallback 取前 N 条
 MAX_TABLES_PER_BITABLE = 3     # 每个 bitable 最多处理的 tables
-LLM_THRESHOLD_ROWS = 30        # >30 行触发 LLM 筛选
+BM25_FILTER_THRESHOLD_ROWS = 30  # >30 行触发 BM25 筛选
 LLM_OUTPUT_MAX_ROWS = 20       # LLM 筛选后最多保留行数
 
 # 可文本化的字段类型（参考 API 文档 /reference/bitable-v1/app-table-field/list）
@@ -455,7 +455,7 @@ def _read_single_table(
         return []
 
     # Step 4: Records → output
-    if len(records) > LLM_THRESHOLD_ROWS:
+    if len(records) > BM25_FILTER_THRESHOLD_ROWS:
         # [P2.5] BM25 筛选（替代 LLM，<5ms vs 2-3s）
         selected_indices = _bm25_filter_records(field_names, records, query)
         selected_records = [records[i] for i in selected_indices if i < len(records)]
@@ -478,7 +478,7 @@ def _read_single_table(
     chunk_score = min(1.0, raw_bm25 / 5.0)  # 归一化到 [0, 1]
 
     # O2: 丰富 metadata
-    is_llm_filtered = len(records) > LLM_THRESHOLD_ROWS
+    is_bm25_filtered = len(records) > BM25_FILTER_THRESHOLD_ROWS
     return [UnifiedChunk(
         text=md,
         source_name=bitable_title,
@@ -491,7 +491,7 @@ def _read_single_table(
             "table": table_name,
             "table_id": table_id,
             "record_count": len(records),
-            "is_llm_filtered": is_llm_filtered,
+            "is_bm25_filtered": is_bm25_filtered,  # [P2.5] now BM25, not LLM
             "field_names": field_names[:10],
             "searchable_fields": searchable_fields[:5],
         },

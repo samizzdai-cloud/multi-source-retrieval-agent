@@ -93,7 +93,7 @@ class GoogleSourceAgent(SourceAgent):
     async def execute_sub_query(
         self, sub_query: str, target_focus: str,
     ) -> List[ChunkEntry]:
-        """走 google_retrieve（目前是 stub，返回空列表）。"""
+        """走 google_retrieve（Drive 全文搜索 + 分块读取）。"""
         uc_list = await google_retrieve(query=sub_query)
         if not uc_list:
             return []

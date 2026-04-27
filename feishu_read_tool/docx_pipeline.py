@@ -1,16 +1,18 @@
 """
-Docx Pipeline — doc/docx 文档的 RAG 读取链路（Stage 2-7）
+Docx Pipeline — doc/docx 文档的 block 读取 + chunking 链路（Stage 3-4）
 
-专门处理飞书 doc/docx 类型文档的 block 读取、chunking、评分全流程。
+专门处理飞书 doc/docx 类型文档的 block 读取、chunking 全流程。
 由 feishu_retrieve.py 的 Dispatcher 层按 doc_type 路由调用，
 不直接处理 sheet/bitable/slides（各有独立 reader）。
 
-Stage 2: LLM/BM25 filter candidates（候选文档过滤）
-Stage 3: Fetch document blocks（Block API 并发读取）
-Stage 4: Build chunks（文本 + 表格块切割）
-Stage 5: LLM/BM25 score & summarize → ChunkResult list
-Stage 6: Budget allocation（token 预算分配）
-Stage 7: Assemble RAGResult
+当前主链（DocPool 模式, skip_scoring=True）：
+  · Stage 3: Fetch document blocks（Block API / MCP 并发读取）
+  · Stage 4: Build chunks（文本 + 表格块切割）
+  · Stage 2/5 被跳过；候选过滤和 chunk 评分由上游 / 下游 qwen3-rerank 完成
+
+遗留模式（skip_scoring=False，非主链）：
+  · Stage 2: BM25 candidate trim
+  · Stage 5: BM25+embedding hybrid score
 """
 import asyncio
 import concurrent.futures
@@ -21,10 +23,7 @@ from .client import FeishuClient
 from .pipeline_models import Chunk, ChunkResult, RAGResult, PipelineConfig, ChunkContentType
 from .chunker import build_text_chunks, HeadingStack
 from .table_handler import build_table_chunk, build_sheet_chunk
-# LLM scoring (legacy, kept as fallback)
-from .llm_client import llm_score_and_summarize
-from .retrieval_judge import _legacy_filter_candidates as llm_filter_candidates
-# BM25 + embedding hybrid scoring (D-series: replaces LLM)
+# Optional BM25+embedding scoring（仅在 skip_scoring=False 的遗留模式下使用）
 from tools.chunk_scorer import bm25_filter_candidates, hybrid_score_chunks
 
 def _call_llm_table(prompt: str) -> str:
@@ -232,7 +231,7 @@ def _build_whiteboard_chunk(
     """获取画板节点文字，组装为 Chunk。
 
     调用 Board API 取得所有节点，聚合有文字的节点内容。
-    以 [画板] 前缀标注，便于 LLM/BM25 评分时识别来源。
+    以 [画板] 前缀标注，便于下游评分时识别来源。
 
     Returns:
         Chunk 或 None（画板无文字节点时）
@@ -288,7 +287,7 @@ def allocate_budget(
 
     Args:
         all_chunks: Full scored chunk list from Stage 5.
-        selected_chunk_ids: Chunk IDs chosen by judge_chunk_sufficiency.
+        selected_chunk_ids: Chunk IDs chosen by downstream eval / chunk selection.
         cfg: Pipeline configuration.
 
     Returns:
@@ -480,17 +479,23 @@ def run_rag_pipeline(
     seen_doc_ids: Optional[Set[str]] = None,
 ) -> RAGResult:
     """
-    Runs Stage 3-7 of the RAG pipeline (Stage 2 moved to orchestrator).
+    Runs Stage 3-7 of the RAG pipeline.
+
+    当前主链（DocPool 模式）下：
+      · candidates 已由上游 feishu_retrieve 的 qwen3-rerank 做 candidate selection
+      · skip_scoring=True 时跳过 Stage 2/5，直接返回 raw chunks
+      · chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
 
     Args:
         query: User search query string.
-        candidates: List of dicts already filtered by judge_and_filter.
+        candidates: List of dicts already filtered by upstream candidate selection.
         user_access_token: UAT for Feishu API calls.
         cfg: Pipeline configuration. Uses PipelineConfig() defaults if None.
         seen_doc_ids: Doc IDs already read in prior rounds (skip re-fetching).
 
     Returns:
-        RAGResult with scored_chunks (unclipped). Caller decides how to truncate.
+        RAGResult with scored_chunks (unclipped) or raw chunks (DocPool mode).
+        Caller decides how to truncate.
     """
     if cfg is None:
         cfg = PipelineConfig()
@@ -515,7 +520,7 @@ def run_rag_pipeline(
             chunks=[],
         )
 
-    # ── Stage 2: BM25 filter candidates (D2: replaces LLM filter) ────────────
+    # ── Stage 2: optional candidate trim（遗留模式，DocPool 主链已跳过）────────
     if not cfg.skip_scoring:
         logger.info("Stage 2: filtering %d candidates with BM25 (max_candidates=%d)",
                     len(filtered_docs), cfg.max_candidates)
@@ -791,10 +796,10 @@ def run_rag_pipeline(
             chunks=[],
         )
 
-    # ── Stage 5: BM25 pre-filter + embedding hybrid score ──────────────────
+    # ── Stage 5: optional chunk scoring（遗留模式，DocPool 主链已跳过）───────
     if cfg.skip_scoring:
         # DocPool 模式：跳过 Stage 5，直接将 Chunk 转为 ChunkResult（score=0）
-        # 评分由 DocPool.wait_and_score 用扩展 BM25 完成
+        # chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
         logger.info("Stage 5: SKIP (skip_scoring=True), converting %d chunks directly", len(all_chunks))
         scored_chunks: List[ChunkResult] = []
         for chunk in all_chunks:
@@ -810,17 +815,17 @@ def run_rag_pipeline(
                 token_count=chunk.token_count,
             ))
     else:
-        # [P2.5] BM25 粗筛 → 只对 top-K 做 embedding 精排，节省 ~50% embedding API 时间
+        # 遗留模式：BM25 粗筛 → 只对 top-K 做 embedding 精排
         import os as _os
         dashscope_key = _os.getenv("DASHSCOPE_API_KEY", "")
         use_emb = cfg.use_embedding_score and bool(dashscope_key)
 
-        # Step 5a: BM25 快速粗筛（<1ms for 50 chunks）
+        # Step 5a: BM25 快速粗筛
         from tools.chunk_scorer import bm25_score_batch
         chunk_texts = [c.content for c in all_chunks]
         bm25_raw = bm25_score_batch(query, chunk_texts)
 
-        # 只对 BM25 top-K 做 embedding（K = min(30, total)，覆盖 >95% 有效 chunks）
+        # 只对 BM25 top-K 做 embedding
         _EMB_TOP_K = 30
         if use_emb and len(all_chunks) > _EMB_TOP_K:
             # 按 BM25 排序，取 top-K 的索引
@@ -865,7 +870,7 @@ def run_rag_pipeline(
                 ChunkContentType.TABLE_MD, ChunkContentType.TABLE_JSON) else score
 
             scored_chunks.append(ChunkResult(
-                summary="",  # BM25 mode: no LLM summary
+                summary="",  # skip_scoring=False 模式下无 LLM summary
                 chunks_content=chunk.content,
                 content_type=content_type,
                 file_name=chunk.doc_title,
@@ -884,7 +889,7 @@ def run_rag_pipeline(
                     scored_chunks[0].relevance_score if scored_chunks else 0)
 
     # ── Stage 6-7: Return scored_chunks (unclipped) ─────────────────────────
-    # Budget allocation (Stage 6) is now done by orchestrator after judge_chunk_sufficiency.
+    # Budget allocation 由下游 SourceAgent eval_only 完成。
     logger.info("Stage 5 complete: %d scored chunks, returning to caller for budget decisions",
                 len(scored_chunks))
     return RAGResult(

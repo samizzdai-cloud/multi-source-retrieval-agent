@@ -619,7 +619,7 @@ def build_text_chunks(
       Step 2: Render each pre-chunk's blocks → formatted Segments
       Step 3: Bin-pack Segments into Chunks (max_chunk_tokens budget)
 
-    Backward compatible with docx_pipeline.py and doc_reader.py callers.
+    Backward compatible with docx_pipeline.py callers.
     """
     max_tokens = cfg.max_chunk_tokens
 

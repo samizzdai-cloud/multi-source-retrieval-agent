@@ -2,9 +2,10 @@
 
 提供单文件读取、批量串行读取、批量并发读取三种模式。
 输出格式与 Word reader 统一：返回包含 structured_md 和 content 的字典。
+新增 read_chunks() 返回标准 GoogleChunk 列表。
 """
 
-from typing import Optional
+from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 
@@ -12,6 +13,7 @@ from google_doc_reader.fetcher import BatchDocFetcher
 from google_doc_reader.parser import DocParser, OutlineExtractor
 from google_doc_reader.markdown_renderer import MarkdownRenderer
 from utils.md_utils import strip_md_to_plain
+from chunkers import markdown_to_chunks, GoogleChunk
 
 _MIME_DOCS = "application/vnd.google-apps.document"
 
@@ -182,3 +184,38 @@ def read_concurrent(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(_read, file_ids))
     return results
+
+
+def read_chunks(
+    file_id: str,
+    creds,
+    max_tabs: Optional[int] = None,
+    auto_outline_threshold: Optional[int] = None,
+    supports_all_drives: bool = True,
+    max_chunk_tokens: int = 800,
+) -> List[GoogleChunk]:
+    """读取 Google Doc 并切分为 chunks。"""
+    result = read_one(
+        file_id=file_id,
+        creds=creds,
+        max_tabs=max_tabs,
+        auto_outline_threshold=auto_outline_threshold,
+        supports_all_drives=supports_all_drives,
+    )
+    if result.get("error") or not result.get("structured_md"):
+        return []
+    title = result.get("title", "")
+    file_url = f"https://docs.google.com/document/d/{file_id}/edit"
+    return markdown_to_chunks(
+        markdown=result["structured_md"],
+        file_id=file_id,
+        file_title=title,
+        file_url=file_url,
+        source_tag="google:doc",
+        max_chunk_tokens=max_chunk_tokens,
+        metadata={
+            "mime_type": _MIME_DOCS,
+            "drive_size": result.get("drive_size"),
+            "mode": result.get("mode"),
+        },
+    )

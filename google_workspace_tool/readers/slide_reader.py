@@ -2,12 +2,16 @@
 
 通过 Slides API 读取幻灯片文本内容。
 支持并发读取、矩阵计算空间排序、备注提取、以及删除线文本过滤。
+新增 read_chunks() 返回标准 GoogleChunk 列表。
 """
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from typing import List
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+
+from chunkers import GoogleChunk, ChunkContentType, estimate_tokens
 
 _MIME_SLIDES = "application/vnd.google-apps.presentation"
 
@@ -253,27 +257,18 @@ def _build_pseudo_table(elements_group):
     
     return "\n".join(md_lines)
 
-def _read_one_slide(service, file_id: str) -> tuple[str, str]:
-    """内部：通过 Slides API 读取单个演示文稿，实现 Vibe Coding Pipeline。"""
-    # 环节一：一次性拉取整个 JSON
+def _read_one_slide_chunks(service, file_id: str) -> List[GoogleChunk]:
+    """内部：通过 Slides API 读取单个演示文稿，返回 GoogleChunk 列表。"""
     presentation = service.presentations().get(presentationId=file_id).execute()
     title = presentation.get("title", "")
     pres_id = presentation.get("presentationId", "")
-    
-    # 预处理所有 Notes Pages，建立 map: {objectId: page_data}
-    notes_pages = {}
-    for note_master in presentation.get('notesMaster', []):  # NotesMaster 如果需要
-        pass
-    
-    # TODO: 目前 presentations.get 默认会返回 slides。
-    # 真正的备注页(notesPage)实际关联在各个 slide 内部。
-    
-    chunks = []
-    
+
+    chunks: List[GoogleChunk] = []
+
     for i, slide in enumerate(presentation.get("slides", []), start=1):
         slide_id = slide.get('objectId', '')
-        
-        # 环节二：获取备注
+
+        # 获取备注
         notes_text = ""
         slide_props = slide.get('slideProperties', {})
         notes_page = slide_props.get('notesPage', {})
@@ -284,12 +279,12 @@ def _read_one_slide(service, file_id: str) -> tuple[str, str]:
                     shape_text = elem.get('shape', {}).get('text', {}).get('textElements', [])
                     notes_text = _parse_text_elements(shape_text)
                     break
-        
-        # 环节三 & 四：提取当前页的排版元素
+
+        # 提取当前页的排版元素
         elements = []
         for element in slide.get('pageElements', []):
             elements.extend(_parse_element(element))
-            
+
         # 提取标题
         slide_title = "无标题页面"
         title_elem = None
@@ -297,104 +292,108 @@ def _read_one_slide(service, file_id: str) -> tuple[str, str]:
             if elem['type'] in ('TITLE', 'CENTERED_TITLE'):
                 title_elem = elem
                 break
-                
+
         if title_elem:
             slide_title = title_elem['content'].replace('\n', ' ')
         elif elements:
-            # 回退：如果没有 TITLE，优先寻找左上角面积较大/位置最高的文本作为标题
             elements.sort(key=lambda e: (e['y0'], e['x0']))
-            # 取最上面的非空文本块
             for elem in elements:
                 if elem['content'] and not elem['content'].startswith('['):
-                    slide_title = elem['content'].split('\n')[0][:50] + "..." # 取第一行缩略
+                    slide_title = elem['content'].split('\n')[0][:50] + "..."
                     break
 
-        # 环节三：按 Y 近似分组并排序 (容差 150000 EMU，约 15 像素)
-        # 对于本身就是 TABLE 的元素，不参与 Y 轴近似分组伪表格拼接，独立成组
-        Y_TOLERANCE = 150000 
+        # 按 Y 近似分组并排序
+        Y_TOLERANCE = 150000
         y_groups = {}
-        table_counter = 0  # 避免同 Y 坐标的多个原始 TABLE 相互覆盖
+        table_counter = 0
         for elem in elements:
             if elem['type'] in ('TITLE', 'CENTERED_TITLE') and elem == title_elem:
-                continue # 跳过主标题
+                continue
             if not elem['content']:
                 continue
-                
             if elem['type'] == 'TABLE':
-                # 为确保独立的 TABLE 不被分入同个 Y 分组拼在一起，我们分配特殊的组别键
                 group_key = f"table_{table_counter}_{elem['y0']}"
                 table_counter += 1
             else:
-                # 正常的文本块
                 group_key = elem['y0'] // Y_TOLERANCE
-                
             if group_key not in y_groups:
                 y_groups[group_key] = []
             y_groups[group_key].append(elem)
-            
-        # 根据 Y 键排序
-        # 为确保原本空间坐标不被打乱，按 Y 的坐标（数字部分）进行排序
+
         def get_y_val(key):
             if isinstance(key, str) and key.startswith("table_"):
                 return float(key.split('_')[-1]) // Y_TOLERANCE
             return float(key)
-            
+
         sorted_y_keys = sorted(y_groups.keys(), key=get_y_val)
 
-        # 环节五：组装最终 Markdown RAG Chunk 模板
+        # 组装 Markdown content（简洁版，metadata 进字段）
         file_url = f"https://docs.google.com/presentation/d/{pres_id}/edit#slide=id.{slide_id}"
-        chunk_id = f"{pres_id}_slide_{i}"
-
         chunk_parts = []
-        chunk_parts.append("---")
-        chunk_parts.append("chunk_metadata:")
-        chunk_parts.append(f"  chunk_id: \"{chunk_id}\"")
-        chunk_parts.append(f"  file_url: \"{file_url}\"")
-        chunk_parts.append(f"  title: \"{title}\"")
-        chunk_parts.append("---\n")
-        
-        chunk_parts.append(f"# {slide_title}\n")
-        
+        chunk_parts.append(f"# {slide_title}")
         if notes_text:
-            chunk_parts.append("## 🎤 核心摘要与演讲者备注 (Speaker Notes)")
-            chunk_parts.append(notes_text)
-            chunk_parts.append("\n---\n")
-            
-        chunk_parts.append("## 🖼️ Elements Position")
-        
-        # 遍历 Y 分组处理内容
+            chunk_parts.append(f"\n**Speaker Notes:** {notes_text}")
+        chunk_parts.append("")
+
+        has_table = False
         for y_key in sorted_y_keys:
             group_elems = y_groups[y_key]
-            
-            # 单一元素组，或者本身是 TABLE (被单独分配了特殊组别的)
             if len(group_elems) == 1:
                 elem = group_elems[0]
-                x_pos = int(elem['x0'] / 10000)
-                y_pos = int(elem['y0'] / 10000)
-                chunk_parts.append(f"**[position: x:{x_pos}, y:{y_pos}]**")
                 chunk_parts.append(elem['content'])
+                if elem['type'] == 'TABLE':
+                    has_table = True
                 chunk_parts.append("")
                 continue
-                
-            # 若同一 Y 轴近似区域有多个 X 分布的普通文本块，尝试组装为伪表格
             table_row = _build_pseudo_table(group_elems)
             if table_row:
-                y_pos = int(group_elems[0]['y0'] / 10000)
-                chunk_parts.append(f"**[position: y:{y_pos}]**")
                 chunk_parts.append(table_row)
+                has_table = True
                 chunk_parts.append("")
             else:
-                # 如果没有成功构建表格，则回退分别输出每个元素块
                 for elem in group_elems:
-                    x_pos = int(elem['x0'] / 10000)
-                    y_pos = int(elem['y0'] / 10000)
-                    chunk_parts.append(f"**[position: x:{x_pos}, y:{y_pos}]**")
                     chunk_parts.append(elem['content'])
                     chunk_parts.append("")
-            
-        chunks.append("\n".join(chunk_parts))
 
-    return "\n\n=====\n\n".join(chunks), title
+        content = "\n".join(chunk_parts)
+        chunks.append(GoogleChunk(
+            chunk_id=f"google:slide:{file_id}:{i}",
+            file_id=file_id,
+            file_title=title,
+            file_url=file_url,
+            heading_path=slide_title,
+            content_type=ChunkContentType.TABLE_MD if has_table else ChunkContentType.TEXT,
+            content=content,
+            token_count=estimate_tokens(content),
+            has_table=has_table,
+            metadata={
+                "mime_type": _MIME_SLIDES,
+                "slide_id": slide_id,
+                "slide_index": i,
+            },
+        ))
+
+    return chunks
+
+
+def _read_one_slide(service, file_id: str) -> tuple[str, str]:
+    """内部：通过 Slides API 读取单个演示文稿，返回拼接 Markdown + title。
+    向后兼容：底层调用 _read_one_slide_chunks。
+    """
+    chunks = _read_one_slide_chunks(service, file_id)
+    if not chunks:
+        return "", ""
+    title = chunks[0].file_title
+    md_parts = []
+    for ch in chunks:
+        md_parts.append("---")
+        md_parts.append("chunk_metadata:")
+        md_parts.append(f'  chunk_id: "{ch.chunk_id}"')
+        md_parts.append(f'  file_url: "{ch.file_url}"')
+        md_parts.append(f'  title: "{title}"')
+        md_parts.append("---\n")
+        md_parts.append(ch.content)
+    return "\n\n=====\n\n".join(md_parts), title
 
 
 def read_one(file_id: str, creds, supports_all_drives: bool = True) -> dict:
@@ -470,3 +469,16 @@ def read_concurrent(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         results = list(executor.map(_read, file_ids))
     return results
+
+
+def read_chunks(
+    file_id: str,
+    creds,
+    supports_all_drives: bool = True,
+) -> List[GoogleChunk]:
+    """读取 Google Slides 并切分为 chunks（每页一个 chunk）。"""
+    slides_service = build("slides", "v1", credentials=creds, cache_discovery=False)
+    try:
+        return _read_one_slide_chunks(slides_service, file_id)
+    except HttpError:
+        return []
