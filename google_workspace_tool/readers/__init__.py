@@ -9,7 +9,9 @@
 from . import doc_reader
 from . import word_reader
 from . import slide_reader
-from . import pdf_reader
 from . import sheet_reader
+from . import text_reader
+from . import excel_reader
+from . import pptx_reader
 
-__all__ = ["doc_reader", "word_reader", "slide_reader", "pdf_reader", "sheet_reader"]
+__all__ = ["doc_reader", "word_reader", "slide_reader", "sheet_reader", "text_reader", "excel_reader", "pptx_reader"]

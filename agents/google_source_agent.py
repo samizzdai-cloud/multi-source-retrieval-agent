@@ -11,13 +11,19 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import List, Optional
 
 from tools.google.google_retrieve import google_retrieve
 from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
 from tools.core.source_profiles import get_profile
+from tools.core.rerank import (
+    build_focus_sub_query_question,
+    get_chunk_selection_config,
+    select_reranked_chunks,
+)
 
-from agents.source_agent_base import SourceAgent
+from agents.source_agent_base import SourceAgent, SubQuery
 from agents.sub_agents import (
     build_eval_only_agent,
     build_plan_eval_agent,
@@ -26,6 +32,78 @@ from agents.sub_agents import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _elapsed_ms(start: float) -> float:
+    return (time.perf_counter() - start) * 1000.0
+
+
+def _uc_to_rerank_payload(uc: UnifiedChunk) -> dict:
+    return {
+        "text": uc.text or "",
+        "source_name": uc.source_name or "",
+        "heading_path": uc.heading_path or "",
+    }
+
+
+def _fallback_select(uc_list: List[UnifiedChunk], top_n: int) -> List[UnifiedChunk]:
+    return sorted(uc_list, key=lambda x: float(x.score or 0.0), reverse=True)[:top_n]
+
+
+def _clone_uc_with_score(uc: UnifiedChunk, score: float, rank: int, mode: str) -> UnifiedChunk:
+    meta = dict(uc.metadata or {})
+    meta.setdefault("reader_score", float(uc.score or 0.0))
+    meta["chunk_rerank_score"] = float(score)
+    meta["chunk_rerank_rank"] = int(rank)
+    meta["selection_mode"] = mode
+    return UnifiedChunk(
+        text=uc.text, source_name=uc.source_name, source_url=uc.source_url,
+        source_tool=uc.source_tool, heading_path=uc.heading_path,
+        score=float(score), confidence_tier=uc.confidence_tier, metadata=meta,
+    )
+
+
+def _select_chunks_for_sub_query(
+    query: str, focus_text: str, query_type: str,
+    uc_list: List[UnifiedChunk], top_n: int,
+) -> List[UnifiedChunk]:
+    started = time.perf_counter()
+    if not uc_list:
+        return []
+    cfg = get_chunk_selection_config(query_type)
+    question = build_focus_sub_query_question(focus_text, query)
+    payloads = [_uc_to_rerank_payload(uc) for uc in uc_list]
+    result = select_reranked_chunks(
+        query=question, chunks=payloads,
+        top_n=top_n, score_threshold=float(cfg["score_threshold"]),
+        min_keep=int(cfg["min_keep"]), instruct_template="qa",
+    )
+    if result.get("status") != "success":
+        logger.warning("[google] chunk rerank failed: %s; fallback", result.get("message"))
+        selected = _fallback_select(uc_list, top_n)
+        logger.info("TIMING google.chunk_select mode=fallback query=%.24r input=%d selected=%d ms=%.1f",
+                     query, len(uc_list), len(selected), _elapsed_ms(started))
+        return selected
+    selected_items = result.get("selected_results") or []
+    if not selected_items:
+        selected = _fallback_select(uc_list, top_n)
+        logger.info("TIMING google.chunk_select mode=fallback_empty query=%.24r input=%d selected=%d ms=%.1f",
+                     query, len(uc_list), len(selected), _elapsed_ms(started))
+        return selected
+    selected: List[UnifiedChunk] = []
+    for item in selected_items:
+        idx = item.get("index")
+        if idx is None or idx < 0 or idx >= len(uc_list):
+            continue
+        selected.append(_clone_uc_with_score(
+            uc_list[idx], float(item.get("relevance_score", 0.0)),
+            int(item.get("rank", len(selected) + 1)), "rerank",
+        ))
+    if not selected:
+        selected = _fallback_select(uc_list, top_n)
+    logger.info("TIMING google.chunk_select mode=rerank query=%.24r input=%d selected=%d ms=%.1f",
+                 query, len(uc_list), len(selected), _elapsed_ms(started))
+    return selected
 
 
 def _unified_to_chunk_entry(
@@ -90,14 +168,32 @@ class GoogleSourceAgent(SourceAgent):
             ) if cfg.max_loops > 1 else None,
         )
 
-    async def execute_sub_query(
-        self, sub_query: str, target_focus: str,
-    ) -> List[ChunkEntry]:
-        """走 google_retrieve（Drive 全文搜索 + 分块读取）。"""
-        uc_list = await google_retrieve(query=sub_query)
+    async def execute_sub_query_full(self, sq: SubQuery) -> List[ChunkEntry]:
+        """v2 执行入口：接收完整 SubQuery，执行检索并进行跨文档的 chunk 重排。"""
+        uc_list = await google_retrieve(
+            query=sq.query,
+            download_timeout=int(self.cfg.google_download_timeout_s),
+            native_api_timeout=int(self.cfg.google_api_timeout_s),
+            enable_gmail=self.cfg.google_enable_gmail,
+            enable_gmail_attachments=self.cfg.google_enable_gmail_attachments,
+            enable_sheet_filter=self.cfg.google_enable_sheet_filter,
+            enable_excel_filter=self.cfg.google_enable_excel_filter,
+        )
         if not uc_list:
             return []
 
-        uc_list = sorted(uc_list, key=lambda x: x.score or 0.0, reverse=True)
-        uc_list = uc_list[: self.cfg.sub_query_top_n]
-        return [_unified_to_chunk_entry(uc, sub_query, target_focus) for uc in uc_list]
+        # 确定 focus_text，用于 rerank 打分
+        focus_obj = self._current_focus_lookup.get(sq.target_focus)
+        focus_text = focus_obj.text if focus_obj else sq.target_focus
+        query_type = sq.query_type or "concept"
+
+        # 使用语义重排从所有候选 chunks 中提纯
+        selected = _select_chunks_for_sub_query(
+            query=sq.query,
+            focus_text=focus_text,
+            query_type=query_type,
+            uc_list=uc_list,
+            top_n=self.cfg.sub_query_top_n,
+        )
+        
+        return [_unified_to_chunk_entry(uc, sq.query, sq.target_focus) for uc in selected]

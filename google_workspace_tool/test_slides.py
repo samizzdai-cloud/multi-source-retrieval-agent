@@ -7,7 +7,7 @@ import os
 import time
 from auth_utils import get_credentials
 from drive_search_tool import search_drive
-from readers import slide_reader
+from google_workspace_tool.readers import slide_reader
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive.readonly",

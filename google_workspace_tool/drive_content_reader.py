@@ -27,9 +27,9 @@ from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from utils.url_parser import resolve_file_id
-from utils.metadata_utils import get_file_metadata
-from readers import doc_reader, word_reader, slide_reader, pdf_reader, sheet_reader
+from google_workspace_tool.utils.url_parser import resolve_file_id
+from google_workspace_tool.utils.metadata_utils import get_file_metadata
+from google_workspace_tool.readers import doc_reader, word_reader, slide_reader, sheet_reader, text_reader, excel_reader, pptx_reader
 
 # MIME 类型常量
 _MIME_DOCS = "application/vnd.google-apps.document"
@@ -37,7 +37,12 @@ _MIME_SHEETS = "application/vnd.google-apps.spreadsheet"
 _MIME_SLIDES = "application/vnd.google-apps.presentation"
 _MIME_WORD = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _MIME_WORD_OLD = "application/msword"
-_MIME_PDF = "application/pdf"
+_MIME_TXT = "text/plain"
+_MIME_CSV = "text/csv"
+_MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+_MIME_XLS = "application/vnd.ms-excel"
+_MIME_XLSM = "application/vnd.ms-excel.sheet.macroEnabled.12"
+_MIME_PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 
 # MIME → reader module 映射
 _READER_MAP = {
@@ -46,13 +51,17 @@ _READER_MAP = {
     _MIME_SLIDES: slide_reader,
     _MIME_WORD: word_reader,
     _MIME_WORD_OLD: word_reader,
-    _MIME_PDF: pdf_reader,
+    _MIME_TXT: text_reader,
+    _MIME_CSV: text_reader,
+    _MIME_XLSX: excel_reader,
+    _MIME_XLS: excel_reader,
+    _MIME_XLSM: excel_reader,
+    _MIME_PPTX: pptx_reader,
 }
 
 # 默认阈值（按文件类型可覆盖）
 # 原生 Docs: 56MB Drive size -> ~30s API fetch. 建议 10MB outline, 15MB skip.
 # Word: 48MB -> ~13s (download + parse). 下载比 API 快，阈值可放宽.
-# PDF: 下载后本地解析，视 PyPDF2 速度，建议保守.
 DEFAULT_AUTO_OUTLINE_THRESHOLD = 10 * 1024 * 1024   # 10 MB (Docs only)
 DEFAULT_MAX_DRIVE_SIZE = 15 * 1024 * 1024           # 15 MB (global default)
 
@@ -67,9 +76,14 @@ DEFAULT_MAX_DRIVE_SIZE_BY_TYPE = {
     _MIME_DOCS: 15 * 1024 * 1024,      # 15 MB — API fetch 慢
     _MIME_WORD: 50 * 1024 * 1024,      # 50 MB — 下载+解析很快
     _MIME_WORD_OLD: 50 * 1024 * 1024,
-    _MIME_PDF: 20 * 1024 * 1024,       # 20 MB — PyPDF2 解析可能慢
     _MIME_SLIDES: 15 * 1024 * 1024,    # 15 MB — Slides API
     _MIME_SHEETS: 15 * 1024 * 1024,    # 15 MB — Sheets API
+    _MIME_XLSX: 50 * 1024 * 1024,
+    _MIME_XLS: 50 * 1024 * 1024,
+    _MIME_XLSM: 50 * 1024 * 1024,
+    _MIME_PPTX: 50 * 1024 * 1024,
+    _MIME_TXT: 50 * 1024 * 1024,
+    _MIME_CSV: 50 * 1024 * 1024,
 }
 
 
@@ -165,7 +179,8 @@ def read_drive_content(
     max_tabs: Optional[int] = None,
     auto_outline_threshold: Optional[int] = DEFAULT_AUTO_OUTLINE_THRESHOLD,
     max_drive_size: Optional[int] = None,
-    max_read_time: Optional[int] = _DEFAULT_MAX_READ_TIME,
+    download_timeout: int = 12,
+    native_api_timeout: int = 12,
     supports_all_drives: bool = True,
     include_metadata: bool = True,
 ) -> dict:
@@ -232,17 +247,17 @@ def read_drive_content(
             return result
 
     # --- Sheets 预估算（Layer 1: 快速跳过明显过大的文件）---
-    if mime_type == _MIME_SHEETS and max_read_time:
+    if mime_type == _MIME_SHEETS and native_api_timeout:
         estimated_seconds = _estimate_sheet_read_time(resolved_id, creds)
         estimated_sheet_count = max(0, int((estimated_seconds - 0.5) / _SHEET_ESTIMATE_SECONDS_PER_SHEET))
         if estimated_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
             result = _error_result(
                 resolved_id,
-                f"预估读取时间过长（约 {estimated_seconds:.1f}s > {max_read_time}s，{estimated_sheet_count} 个 sheet），跳过获取",
+                f"预估读取时间过长（约 {estimated_seconds:.1f}s > {native_api_timeout}s，{estimated_sheet_count} 个 sheet），跳过获取",
                 drive_size=drive_size,
             )
             result["mode"] = "skipped"
-            result["skip_reason"] = f"estimated_time={estimated_seconds:.1f}s exceeds max_read_time={max_read_time}s"
+            result["skip_reason"] = f"estimated_time={estimated_seconds:.1f}s exceeds max_read_time={native_api_timeout}s"
             result["mime_type"] = mime_type
             result["title"] = title
             if metadata:
@@ -260,7 +275,8 @@ def read_drive_content(
         return result
 
     # --- Layer 2: API 调用超时兜底 ---
-    timeout_seconds = max_read_time or _DEFAULT_MAX_READ_TIME
+    # 对保护线程依然保留最大超时（防止极少数底层死锁），取两者的最大值作为线程最大寿命
+    max_timeout = max(download_timeout, native_api_timeout) + 2
 
     def _do_read():
         if mime_type == _MIME_DOCS:
@@ -271,36 +287,38 @@ def read_drive_content(
                 auto_outline_threshold=auto_outline_threshold,
                 drive_size=drive_size,
                 supports_all_drives=supports_all_drives,
+                native_api_timeout=native_api_timeout,
             )
-        elif mime_type in (_MIME_WORD, _MIME_WORD_OLD):
+        elif mime_type in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT, _MIME_CSV, _MIME_XLSX, _MIME_XLS, _MIME_XLSM, _MIME_PPTX):
             return reader.read_one(
                 file_id=resolved_id,
                 creds=creds,
                 supports_all_drives=supports_all_drives,
+                download_timeout=download_timeout,
             )
         elif mime_type == _MIME_SLIDES:
             return reader.read_one(
                 file_id=resolved_id,
                 creds=creds,
                 supports_all_drives=supports_all_drives,
-            )
-        elif mime_type == _MIME_PDF:
-            return reader.read_one(
-                file_id=resolved_id,
-                creds=creds,
-                supports_all_drives=supports_all_drives,
+                native_api_timeout=native_api_timeout,
             )
         elif mime_type == _MIME_SHEETS:
-            return reader.read_one(file_id=resolved_id, creds=creds, drive_size=drive_size)
+            return reader.read_one(
+                file_id=resolved_id, 
+                creds=creds, 
+                drive_size=drive_size,
+                native_api_timeout=native_api_timeout,
+            )
         else:
             return _error_result(resolved_id, f"不支持的 MIME 类型: {mime_type}", drive_size=drive_size)
 
     try:
-        result = _run_with_timeout(_do_read, timeout_seconds)
+        result = _run_with_timeout(_do_read, max_timeout)
         if result is None:
             # 超时
             result = _timeout_result(
-                resolved_id, mime_type, title, drive_size, timeout_seconds
+                resolved_id, mime_type, title, drive_size, max_timeout
             )
     except Exception as e:
         result = _error_result(resolved_id, f"读取失败: {e}", drive_size=drive_size)
@@ -368,11 +386,9 @@ def read_drive_contents_batch(
         try:
             if mime == _MIME_DOCS:
                 batch_results = reader.read_batch(file_ids=file_ids, creds=creds)
-            elif mime in (_MIME_WORD, _MIME_WORD_OLD):
+            elif mime in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT, _MIME_CSV, _MIME_XLSX, _MIME_XLS, _MIME_XLSM, _MIME_PPTX):
                 batch_results = reader.read_batch(file_ids=file_ids, creds=creds, supports_all_drives=supports_all_drives)
             elif mime == _MIME_SLIDES:
-                batch_results = reader.read_batch(file_ids=file_ids, creds=creds, supports_all_drives=supports_all_drives)
-            elif mime == _MIME_PDF:
                 batch_results = reader.read_batch(file_ids=file_ids, creds=creds, supports_all_drives=supports_all_drives)
             else:
                 batch_results = reader.read_batch(file_ids=file_ids, creds=creds)
@@ -397,7 +413,8 @@ def read_drive_contents_concurrent(
     max_workers: int = 5,
     max_drive_size: Optional[int] = None,
     auto_outline_threshold: Optional[int] = None,
-    max_read_time: Optional[int] = None,
+    download_timeout: int = 12,
+    native_api_timeout: int = 12,
     supports_all_drives: bool = True,
 ) -> list[dict]:
     """并发批量读取多个 Drive 文件。
@@ -433,7 +450,8 @@ def read_drive_contents_concurrent(
                 creds=creds,
                 max_drive_size=max_drive_size,
                 auto_outline_threshold=auto_outline_threshold,
-                max_read_time=max_read_time,
+                download_timeout=download_timeout,
+                native_api_timeout=native_api_timeout,
                 supports_all_drives=supports_all_drives,
             )
         except Exception as e:
@@ -457,9 +475,13 @@ def read_drive_chunks(
     max_tabs: Optional[int] = None,
     auto_outline_threshold: Optional[int] = DEFAULT_AUTO_OUTLINE_THRESHOLD,
     max_drive_size: Optional[int] = None,
-    max_read_time: Optional[int] = _DEFAULT_MAX_READ_TIME,
+    download_timeout: int = 12,
+    native_api_timeout: int = 12,
     supports_all_drives: bool = True,
     max_chunk_tokens: int = 800,
+    range_names: Optional[list[str]] = None,
+    query: Optional[str] = None,
+    enable_excel_filter: bool = False,
 ) -> list:
     """读取单个 Drive 文件并切分为 chunks。
 
@@ -478,7 +500,7 @@ def read_drive_chunks(
     Returns:
         List[GoogleChunk]
     """
-    from chunkers import GoogleChunk
+    from google_workspace_tool.chunkers import GoogleChunk
 
     if creds is None:
         raise ValueError("creds 为必填参数。请在外部完成 OAuth2 授权后传入 Credentials 对象。")
@@ -509,7 +531,7 @@ def read_drive_chunks(
             return []
 
     # Sheets pre-estimate
-    if mime_type == _MIME_SHEETS and max_read_time:
+    if mime_type == _MIME_SHEETS and native_api_timeout:
         estimated_seconds = _estimate_sheet_read_time(resolved_id, creds)
         estimated_sheet_count = max(0, int((estimated_seconds - 0.5) / _SHEET_ESTIMATE_SECONDS_PER_SHEET))
         if estimated_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
@@ -518,6 +540,8 @@ def read_drive_chunks(
     reader = _READER_MAP.get(mime_type)
     if reader is None:
         return []
+
+    max_timeout = max(download_timeout, native_api_timeout) + 2
 
     # Route to reader.read_chunks()
     def _do_read_chunks():
@@ -529,38 +553,42 @@ def read_drive_chunks(
                 auto_outline_threshold=auto_outline_threshold,
                 supports_all_drives=supports_all_drives,
                 max_chunk_tokens=max_chunk_tokens,
+                native_api_timeout=native_api_timeout,
             )
-        elif mime_type in (_MIME_WORD, _MIME_WORD_OLD):
+        elif mime_type in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT, _MIME_CSV, _MIME_XLSX, _MIME_XLS, _MIME_XLSM, _MIME_PPTX):
+            kwargs = {}
+            if mime_type in (_MIME_CSV, _MIME_XLSX, _MIME_XLS, _MIME_XLSM):
+                kwargs["range_names"] = range_names
+                kwargs["query"] = query
+                kwargs["enable_excel_filter"] = enable_excel_filter
             return reader.read_chunks(
                 file_id=resolved_id,
                 creds=creds,
                 supports_all_drives=supports_all_drives,
                 max_chunk_tokens=max_chunk_tokens,
+                download_timeout=download_timeout,
+                **kwargs
             )
         elif mime_type == _MIME_SLIDES:
             return reader.read_chunks(
                 file_id=resolved_id,
                 creds=creds,
                 supports_all_drives=supports_all_drives,
-            )
-        elif mime_type == _MIME_PDF:
-            return reader.read_chunks(
-                file_id=resolved_id,
-                creds=creds,
-                supports_all_drives=supports_all_drives,
-                max_chunk_tokens=max_chunk_tokens,
+                native_api_timeout=native_api_timeout,
             )
         elif mime_type == _MIME_SHEETS:
             return reader.read_chunks(
                 file_id=resolved_id,
                 creds=creds,
+                range_names=range_names,
+                query=query,
                 max_chunk_tokens=max_chunk_tokens,
+                native_api_timeout=native_api_timeout,
             )
         return []
 
-    timeout_seconds = max_read_time or _DEFAULT_MAX_READ_TIME
     try:
-        result = _run_with_timeout(_do_read_chunks, timeout_seconds)
+        result = _run_with_timeout(_do_read_chunks, max_timeout)
         if result is None:
             return []
         return result if result else []

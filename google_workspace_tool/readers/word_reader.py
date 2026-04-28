@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from utils.download_utils import download_file
+from google_workspace_tool.utils.download_utils import download_file
 
 _MIME_WORD = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _MIME_WORD_OLD = "application/msword"
@@ -28,7 +28,7 @@ def _extract_comments(raw_bytes: bytes) -> dict[str, tuple[str, str]]:
         if "word/comments.xml" not in zf.namelist():
             return {}
 
-        from lxml import etree
+        import xml.etree.ElementTree as etree
 
         with zf.open("word/comments.xml") as f:
             tree = etree.parse(f)
@@ -57,7 +57,7 @@ def _extract_numbering(raw_bytes: bytes) -> dict[str, dict]:
         if "word/numbering.xml" not in zf.namelist():
             return {}
 
-        from lxml import etree
+        import xml.etree.ElementTree as etree
 
         with zf.open("word/numbering.xml") as f:
             tree = etree.parse(f)
@@ -196,7 +196,8 @@ def _try_extract_word_text(raw_bytes: bytes) -> Optional[str]:
         return None
     try:
         import re
-        from docx.text.paragraph import Paragraph
+        import collections
+        from docx.text.paragraph import Paragraph  # type: ignore
 
         document = docx.Document(io.BytesIO(raw_bytes))
         parts = []
@@ -205,52 +206,77 @@ def _try_extract_word_text(raw_bytes: bytes) -> Optional[str]:
         comments = _extract_comments(raw_bytes)
         numbering = _extract_numbering(raw_bytes)
 
-        # 列表计数器（按 body 遍历顺序维护）
-        list_counters = _reset_list_counters()
-        last_list_numId = None
+        # ---------------------------------------------------------
+        # 字号统计与层级推断 (Font size based heading detection)
+        # ---------------------------------------------------------
+        def _get_para_font_size(para) -> float:
+            """尝试获取段落的最突出（最大）字号，降级获取 style 字号"""
+            sizes = []
+            for run in para.runs:
+                if run.font.size is not None:
+                    sizes.append(run.font.size.pt)
+            if sizes:
+                return max(sizes)
+            style = para.style
+            while style is not None:
+                if style.font.size is not None:
+                    return style.font.size.pt
+                style = style.base_style
+            return 11.0  # 默认兜底大小
 
-        def _looks_like_heading_text(text: str) -> bool:
-            if len(text) < 10:
-                return False
-            if text.isupper() and len(text) < 40:
-                return False
-            if re.search(r"https?://|www\.|\.[a-z]{2,}$", text, re.IGNORECASE):
-                return False
-            words = text.split()
-            if len(words) < 3:
-                return False
-            return True
+        size_counter = collections.Counter()
+        all_paras = []
+        for child in document.element.body:
+            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+            if tag == "p" and not _is_in_table(child):
+                para = Paragraph(child, document.part)
+                text = para.text.strip()
+                if len(text) > 1: # 只统计实质性段落
+                    sz = _get_para_font_size(para)
+                    size_counter[sz] += len(text)  # 按照字符数统计基础字号更准
+                    all_paras.append((para, sz))
+
+        # 分析字号分布
+        base_size = 11.0
+        if size_counter:
+            base_size = size_counter.most_common(1)[0][0]
+
+        # 找出比正文更大的所有字号，从大到小排序
+        unique_sizes = sorted([sz for sz in size_counter.keys() if sz > base_size + 0.5], reverse=True)
+        
+        # 定义标题字号
+        size_title = unique_sizes[0] if len(unique_sizes) > 0 else None
+        size_heading = unique_sizes[1] if len(unique_sizes) > 1 else None
+
+        seen_title = [False]
 
         def _is_heading(para) -> tuple[bool, int]:
+            """返回 (is_heading, heading_level)"""
             text = para.text.strip()
-            style = para.style.name if para.style else "Normal"
-            style_lower = style.lower()
-
-            if style_lower.startswith("heading"):
-                words = text.split()
-                if len(words) >= 2 or len(text) >= 15:
-                    level_str = style.split()[-1]
-                    if level_str.isdigit():
-                        return True, int(level_str)
-                    return True, 1
+            if not text or len(text) < 2:
                 return False, 0
-
-            if len(text) < 5:
+                
+            # 如果字号完全一致，不作为 heading
+            if not size_title:
                 return False, 0
-            if re.search(r"https?://|www\.", text):
-                return False, 0
-
-            if len(para.runs) == 1 and len(text) < 80:
-                run = para.runs[0]
-                if run.bold and not run.italic and _looks_like_heading_text(text):
-                    return True, 1
-
-            non_empty = [r for r in para.runs if r.text.strip()]
-            if non_empty and all(r.bold for r in non_empty) and len(text) < 100:
-                if _looks_like_heading_text(text):
-                    return True, 1
-
+                
+            sz = _get_para_font_size(para)
+            if sz == size_title:
+                if not seen_title[0]:
+                    seen_title[0] = True
+                    return True, 1 # 第一位作为 Title (H1)
+                else:
+                    return True, 2 # 其余相同大小作为 Heading (H2)
+            elif sz == size_heading:
+                return True, 2
+                
             return False, 0
+
+        # ---------------------------------------------------------
+        # 列表与渲染逻辑
+        # ---------------------------------------------------------
+        list_counters = _reset_list_counters()
+        last_list_numId = None
 
         def _render_paragraph_text(para_element, list_counters, last_numId_ref) -> str:
             """渲染单个段落的文本，包括列表前缀。"""
@@ -450,12 +476,13 @@ def read_one(
     file_id: str,
     creds,
     supports_all_drives: bool = True,
+    download_timeout: int = 15,
 ) -> dict:
     """读取单个 Word 文档。"""
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     try:
-        raw_bytes = download_file(drive_service, file_id, supports_all_drives)
+        raw_bytes = download_file(drive_service, file_id, supports_all_drives, timeout=download_timeout)
     except HttpError as e:
         return {
             "file_id": file_id,
@@ -561,10 +588,11 @@ def read_chunks(
     creds,
     supports_all_drives: bool = True,
     max_chunk_tokens: int = 800,
+    download_timeout: int = 15,
 ) -> list:
     """读取 Word 文档并切分为 chunks。"""
     from chunkers import markdown_to_chunks, GoogleChunk
-    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives)
+    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout)
     if result.get("error") or not result.get("structured_md"):
         return []
     title = result.get("title", "")

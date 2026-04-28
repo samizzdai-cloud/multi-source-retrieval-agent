@@ -274,11 +274,13 @@ def _bin_pack_segments(
         if not current_parts:
             return
         body = "\n\n".join(current_parts)
-        if heading_path:
+        
+        # 智能补充 heading：如果当前 chunk 正文不以标题开头，且存在 heading_path，则补齐上下文
+        if heading_path and not re.match(r'^#{1,9}\s+', current_parts[0].strip()):
             content = f"## {heading_path}\n\n{body}"
         else:
             content = body
-        chunk_counter[0] += 1
+            
         chunks_contents.append((content, estimate_tokens(content), current_has_table))
         current_parts, current_tokens, current_has_table = [], 0, False
 
@@ -301,7 +303,6 @@ def _bin_pack_segments(
                     current_has_table = True
             else:
                 # Oversized atomic segment → emit as its own chunk
-                chunk_counter[0] += 1
                 chunks_contents.append((seg.content, seg.token_count, _is_table_line(seg.content)))
             continue
 

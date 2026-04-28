@@ -1,47 +1,42 @@
-"""PDF 专用读取器。
+"""Text (.txt, .csv) 专用读取器。
 
-通过 Drive API 下载后，用 PyPDF2 提取文本。
+通过 Drive API 下载文件后，作为纯文本处理。
 """
 
-import io
-from typing import Optional
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from utils.download_utils import download_file
+from google_workspace_tool.utils.download_utils import download_file
 
-_MIME_PDF = "application/pdf"
+_MIME_TXT = "text/plain"
+_MIME_CSV = "text/csv"
 
 
-def _try_extract_pdf_text(raw_bytes: bytes) -> Optional[str]:
-    """尝试用 PyPDF2 提取 PDF 文本。"""
+def _extract_text(raw_bytes: bytes) -> Optional[str]:
+    """尝试提取文本。"""
     try:
-        import PyPDF2  # type: ignore
-    except ImportError:
-        return None
-    try:
-        reader = PyPDF2.PdfReader(io.BytesIO(raw_bytes))
-        texts = []
-        for page in reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                texts.append(page_text)
-        return "\n".join(texts)
+        return raw_bytes.decode('utf-8', errors='replace')
     except Exception:
         return None
 
 
-def read_one(file_id: str, creds, supports_all_drives: bool = True) -> dict:
-    """读取单个 PDF 文件。"""
+def read_one(
+    file_id: str,
+    creds,
+    supports_all_drives: bool = True,
+    download_timeout: int = 15,
+) -> dict:
+    """读取单个文本文件。"""
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
     try:
-        raw_bytes = download_file(drive_service, file_id, supports_all_drives)
+        raw_bytes = download_file(drive_service, file_id, supports_all_drives, timeout=download_timeout)
     except HttpError as e:
         return {
             "file_id": file_id,
-            "mime_type": _MIME_PDF,
+            "mime_type": _MIME_TXT,
             "title": "",
             "content": None,
             "structured_md": None,
@@ -54,19 +49,21 @@ def read_one(file_id: str, creds, supports_all_drives: bool = True) -> dict:
         }
 
     title = ""
+    mime_type = _MIME_TXT
     try:
         meta = drive_service.files().get(
-            fileId=file_id, fields="name", supportsAllDrives=supports_all_drives
+            fileId=file_id, fields="name,mimeType", supportsAllDrives=supports_all_drives
         ).execute()
         title = meta.get("name", "")
+        mime_type = meta.get("mimeType", _MIME_TXT)
     except HttpError:
         pass
 
-    text = _try_extract_pdf_text(raw_bytes)
+    text = _extract_text(raw_bytes)
     if text is not None:
         return {
             "file_id": file_id,
-            "mime_type": _MIME_PDF,
+            "mime_type": mime_type,
             "title": title,
             "content": text,
             "structured_md": text,
@@ -80,21 +77,25 @@ def read_one(file_id: str, creds, supports_all_drives: bool = True) -> dict:
     else:
         return {
             "file_id": file_id,
-            "mime_type": _MIME_PDF,
+            "mime_type": mime_type,
             "title": title,
             "content": None,
             "structured_md": None,
             "content_type": "bytes",
             "raw_bytes": raw_bytes,
-            "error": "无法解析 PDF 内容（PyPDF2 未安装或解析失败）",
+            "error": "无法解析文本内容",
             "mode": None,
             "drive_size": None,
             "skip_reason": None,
         }
 
 
-def read_batch(file_ids: list[str], creds, supports_all_drives: bool = True) -> list[dict]:
-    """串行批量读取多个 PDF。"""
+def read_batch(
+    file_ids: list[str],
+    creds,
+    supports_all_drives: bool = True,
+) -> list[dict]:
+    """串行批量读取多个文本文件。"""
     results = []
     for fid in file_ids:
         try:
@@ -102,7 +103,7 @@ def read_batch(file_ids: list[str], creds, supports_all_drives: bool = True) -> 
         except Exception as e:
             results.append({
                 "file_id": fid,
-                "mime_type": _MIME_PDF,
+                "mime_type": _MIME_TXT,
                 "error": str(e),
                 "content": None,
                 "structured_md": None,
@@ -116,14 +117,14 @@ def read_concurrent(
     max_workers: int = 5,
     supports_all_drives: bool = True,
 ) -> list[dict]:
-    """并发批量读取多个 PDF。"""
+    """并发批量读取多个文本文件。"""
     def _read(fid):
         try:
             return read_one(file_id=fid, creds=creds, supports_all_drives=supports_all_drives)
         except Exception as e:
             return {
                 "file_id": fid,
-                "mime_type": _MIME_PDF,
+                "mime_type": _MIME_TXT,
                 "error": str(e),
                 "content": None,
                 "structured_md": None,
@@ -139,24 +140,33 @@ def read_chunks(
     creds,
     supports_all_drives: bool = True,
     max_chunk_tokens: int = 800,
+    download_timeout: int = 15,
 ) -> list:
-    """读取 PDF 并切分为 chunks。"""
+    """读取文本并切分为 chunks。"""
     from chunkers import markdown_to_chunks, GoogleChunk
-    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives)
+    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout)
     if result.get("error") or not result.get("structured_md"):
         return []
     title = result.get("title", "")
     file_url = f"https://drive.google.com/file/d/{file_id}/view"
-    # PDF 纯文本可能没有 heading，简单包装
+    
     md = result["structured_md"]
-    if title and not md.startswith("#"):
-        md = f"# {title}\n\n{md}"
-    return markdown_to_chunks(
+        
+    chunks = markdown_to_chunks(
         markdown=md,
         file_id=file_id,
         file_title=title,
         file_url=file_url,
-        source_tag="google:pdf",
+        source_tag="google:txt",
         max_chunk_tokens=max_chunk_tokens,
-        metadata={"mime_type": _MIME_PDF, "drive_size": result.get("drive_size")},
+        metadata={"mime_type": result.get("mime_type"), "drive_size": result.get("drive_size")},
     )
+    
+    # Text files usually don't have markdown headings.
+    # The user requested heading_path to be set to the filename WITHOUT modifying the chunk content.
+    if title:
+        for c in chunks:
+            if not c.heading_path:
+                c.heading_path = title
+                
+    return chunks

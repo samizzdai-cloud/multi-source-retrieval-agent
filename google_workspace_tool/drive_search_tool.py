@@ -39,7 +39,7 @@ from googleapiclient.errors import HttpError
 DEFAULT_FIELDS = (
     "nextPageToken, files("
     "id, name, mimeType, description, createdTime, modifiedTime, viewedByMeTime, "
-    "starred, trashed, hidden, parents, "
+    "starred, trashed, parents, "
     "owners(displayName, emailAddress), lastModifyingUser(displayName, emailAddress), "
     "webViewLink, webContentLink, iconLink, thumbnailLink, "
     "size, md5Checksum, shared, permissions(id, type, role, emailAddress), "

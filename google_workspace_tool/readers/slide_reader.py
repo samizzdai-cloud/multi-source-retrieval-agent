@@ -11,7 +11,7 @@ from typing import List
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from chunkers import GoogleChunk, ChunkContentType, estimate_tokens
+from google_workspace_tool.chunkers import GoogleChunk, ChunkContentType, estimate_tokens
 
 _MIME_SLIDES = "application/vnd.google-apps.presentation"
 
@@ -128,12 +128,29 @@ def _parse_element(element, parent_transform=None):
         if text:
             text_content = _parse_text_elements(text.get('textElements', []))
             if text_content:
-                parsed_elements.append({
-                    'x0': x0, 'y0': y0,
-                    'area': (x1-x0)*(y1-y0),
-                    'content': text_content,
-                    'type': ph_type or 'SHAPE'
-                })
+                lines = [l.strip() for l in text_content.strip().split('\n') if l.strip()]
+                if len(lines) <= 1:
+                    parsed_elements.append({
+                        'x0': x0, 'y0': y0,
+                        'x1': x1, 'y1': y1,
+                        'area': (x1-x0)*(y1-y0),
+                        'content': text_content,
+                        'type': ph_type or 'SHAPE',
+                        'shape_id': element.get('objectId')
+                    })
+                else:
+                    line_height = (y1 - y0) / len(lines)
+                    for i, line in enumerate(lines):
+                        l_y0 = y0 + i * line_height
+                        l_y1 = l_y0 + line_height
+                        parsed_elements.append({
+                            'x0': x0, 'y0': l_y0,
+                            'x1': x1, 'y1': l_y1,
+                            'area': (x1-x0)*(l_y1-l_y0),
+                            'content': line,
+                            'type': ph_type or 'SHAPE',
+                            'shape_id': element.get('objectId')
+                        })
         return parsed_elements
 
     # 2. 组 (递归)
@@ -164,6 +181,7 @@ def _parse_element(element, parent_transform=None):
         if table_md:
             parsed_elements.append({
                 'x0': x0, 'y0': y0,
+                'x1': x1, 'y1': y1,
                 'area': (x1-x0)*(y1-y0),
                 'content': "\n".join(table_md),
                 'type': 'TABLE'
@@ -180,6 +198,7 @@ def _parse_element(element, parent_transform=None):
     if element.get('sheetsChart'):
         parsed_elements.append({
             'x0': x0, 'y0': y0,
+            'x1': x1, 'y1': y1,
             'area': (x1-x0)*(y1-y0),
             'content': f"[SheetsChart: {alt_text}]" if alt_text else "[SheetsChart]",
             'type': 'CHART'
@@ -190,58 +209,56 @@ def _parse_element(element, parent_transform=None):
 
 def _build_pseudo_table(elements_group):
     """
-    尝试将按 Y 对齐但具有多个离散 X 位置的元素合并为真正的多行 Markdown 表格。
-    通过拆分各列内元素的换行符，将原先同一列但跨越多行的内容对应到表格的多行中。
-    如果只有一列或者所有列都只有极少内容，则不作为表格返回，让上层按普通元素处理。
+    将同一 Y-Band 内的散落文本框转置合并为 Markdown 表格。
+    引入 X 轴相交聚类算法：将水平方向上有重叠的文本框编为同一列，垂直连接内容，然后再转置。
     """
     if not elements_group or len(elements_group) <= 1:
         return None
     
-    # 将这些文本块按 X 排序，确保列顺序正确 (从左到右)
+    # 1. 按 X 坐标聚类，生成列 (Column Grouping)
     elements_group.sort(key=lambda e: e['x0'])
-    
-    # 将每个列的内容按照换行符拆分成独立的列表
-    columns = []
+    cols_groups = [] # [{'min_x': min_x, 'max_x': max_x, 'elems': [...]}]
+    X_TOLERANCE = 500000 
     for elem in elements_group:
-        # 移除前导和后缀的无关空白，然后按换行符切分
-        lines = [line.replace('|', '\\|').strip() for line in elem['content'].strip().split('\n')]
-        # 过滤掉完全空白的行，但尽量保持原始节奏。为简化，这里直接保留空行以便对齐。
-        # 如果末尾有连续空行，去掉。
-        while lines and not lines[-1]:
-            lines.pop()
-        if lines:
-            columns.append(lines)
+        x0 = elem['x0']
+        x1 = x0 + X_TOLERANCE
+        merged = False
+        for cg in cols_groups:
+            if not (x1 < cg['min_x'] or x0 > cg['max_x']):
+                cg['elems'].append(elem)
+                cg['min_x'] = min(cg['min_x'], x0)
+                cg['max_x'] = max(cg['max_x'], x1)
+                merged = True
+                break
+        if not merged:
+            cols_groups.append({'min_x': x0, 'max_x': x1, 'elems': [elem]})
             
-    if not columns:
+    if not cols_groups or len(cols_groups) <= 1:
         return None
         
-    # 如果实际上并没有形成真正的表格行/列关系（例如单列多行），这里避免强行转表格
-    if len(columns) <= 1:
+    # 2. 组装每列的行数据
+    columns = []
+    for cg in cols_groups:
+        cg['elems'].sort(key=lambda e: e['y0']) # 每一列内从上到下排序
+        col_texts = []
+        for elem in cg['elems']:
+            lines = [line.replace('|', '\\|').strip() for line in elem['content'].strip().split('\n')]
+            # 移除空行
+            lines = [l for l in lines if l]
+            if lines:
+                col_texts.extend(lines)
+        if col_texts:
+            # 属于同一个单元格的内容，用 ; 连接
+            columns.append([" ; ".join(col_texts)])
+        else:
+            columns.append([" "])
+            
+    if not columns or len(columns) <= 1:
         return None
         
-    # 提取表头：将各列的第一行作为表头提取，并从各列的数据中移除第一行
-    headers = []
-    for col in columns:
-        headers.append(col[0] if col else " ")
-        if col:
-            col.pop(0)
-            
-    # 计算除去表头后需要多少行：找出最长的列
-    max_rows = max(len(col) for col in columns) if columns else 0
+    # 因为所有列都合并为 1 行，直接提取表头即可
+    headers = [col[0] for col in columns]
     
-    # 补齐所有列到同样的长度
-    for col in columns:
-        while len(col) < max_rows:
-            col.append("")
-            
-    # 转置：将列数据转置为行数据
-    # rows[i] 包含了第 i 行的所有列内容
-    rows = []
-    for i in range(max_rows):
-        row_data = [col[i] for col in columns]
-        rows.append(row_data)
-
-    # 构建表头和表格行
     md_lines = []
     col_count = len(columns)
     
@@ -250,10 +267,6 @@ def _build_pseudo_table(elements_group):
     
     md_lines.append(header_str)
     md_lines.append(sep_str)
-    
-    for row in rows:
-        row_str = "| " + " | ".join(row) + " |"
-        md_lines.append(row_str)
     
     return "\n".join(md_lines)
 
@@ -299,61 +312,135 @@ def _read_one_slide_chunks(service, file_id: str) -> List[GoogleChunk]:
             elements.sort(key=lambda e: (e['y0'], e['x0']))
             for elem in elements:
                 if elem['content'] and not elem['content'].startswith('['):
-                    slide_title = elem['content'].split('\n')[0][:50] + "..."
+                    lines = elem['content'].split('\n')
+                    slide_title = lines[0][:50] + "..."
+                    if len(lines) == 1:
+                        elements.remove(elem)
+                    else:
+                        elem['content'] = '\n'.join(lines[1:]).strip()
                     break
-
-        # 按 Y 近似分组并排序
-        Y_TOLERANCE = 150000
-        y_groups = {}
-        table_counter = 0
-        for elem in elements:
-            if elem['type'] in ('TITLE', 'CENTERED_TITLE') and elem == title_elem:
-                continue
-            if not elem['content']:
-                continue
-            if elem['type'] == 'TABLE':
-                group_key = f"table_{table_counter}_{elem['y0']}"
-                table_counter += 1
-            else:
-                group_key = elem['y0'] // Y_TOLERANCE
-            if group_key not in y_groups:
-                y_groups[group_key] = []
-            y_groups[group_key].append(elem)
-
-        def get_y_val(key):
-            if isinstance(key, str) and key.startswith("table_"):
-                return float(key.split('_')[-1]) // Y_TOLERANCE
-            return float(key)
-
-        sorted_y_keys = sorted(y_groups.keys(), key=get_y_val)
 
         # 组装 Markdown content（简洁版，metadata 进字段）
         file_url = f"https://docs.google.com/presentation/d/{pres_id}/edit#slide=id.{slide_id}"
         chunk_parts = []
-        chunk_parts.append(f"# {slide_title}")
-        if notes_text:
-            chunk_parts.append(f"\n**Speaker Notes:** {notes_text}")
-        chunk_parts.append("")
+        if slide_title:
+            chunk_parts.append(f"## {slide_title}")
+        else:
+            chunk_parts.append(f"## Slide {i}")
 
         has_table = False
-        for y_key in sorted_y_keys:
-            group_elems = y_groups[y_key]
+        
+        # 移除 title 元素，避免重复输出
+        work_elems = [e for e in elements if e != title_elem and e['content']]
+
+        # 分组构建表格 (二维边界碰撞/Y-Overlap 连通图算法)
+        # 将 y 轴方向有重叠的文本框划为同一组 (Row Band)
+        y_groups = []  # [{'min_y': min_y, 'max_y': max_y, 'elems': []}]
+        
+        native_tables = [e for e in work_elems if e['type'] == 'TABLE']
+        text_elements = [e for e in work_elems if e['type'] != 'TABLE']
+        
+        # 按 Y 坐标从上到下排序
+        text_elements.sort(key=lambda e: e['y0'])
+        
+        for elem in text_elements:
+            y0 = elem.get('y0', 0)
+            # slide API 有时只有 y0, y1 没有提取的话，估算一个高度
+            area = elem.get('area', 0)
+            w = elem.get('x1', elem.get('x0', 0)) - elem.get('x0', 0)
+            h = area / w if w > 0 and area > 0 else 200000
+            y1 = elem.get('y1', y0 + h)
+            
+            merged = False
+            for g in y_groups:
+                # 判断相交条件：重叠部分至少要达到较小者高度的 20%
+                overlap = max(0, min(y1, g['max_y']) - max(y0, g['min_y']))
+                min_height = min(y1 - y0, g['max_y'] - g['min_y'])
+                if overlap > min_height * 0.2:
+                    g['elems'].append(elem)
+                    g['min_y'] = min(g['min_y'], y0)
+                    g['max_y'] = max(g['max_y'], y1)
+                    merged = True
+                    break
+            if not merged:
+                y_groups.append({'min_y': y0, 'max_y': y1, 'elems': [elem]})
+                
+        for tbl in native_tables:
+            y0 = tbl.get('y0', 0)
+            y1 = tbl.get('y1', y0)
+            y_groups.append({'min_y': y0, 'max_y': y1, 'elems': [tbl]})
+            
+        y_groups.sort(key=lambda g: g['min_y'])
+        
+        parsed_parts = []
+        for g in y_groups:
+            group_elems = g['elems']
             if len(group_elems) == 1:
                 elem = group_elems[0]
-                chunk_parts.append(elem['content'])
+                parsed_parts.append({'type': 'text', 'content': elem['content']})
                 if elem['type'] == 'TABLE':
                     has_table = True
-                chunk_parts.append("")
                 continue
+                
             table_row = _build_pseudo_table(group_elems)
             if table_row:
-                chunk_parts.append(table_row)
+                parsed_parts.append({'type': 'table', 'content': table_row})
                 has_table = True
-                chunk_parts.append("")
             else:
+                # 降级：如果不能构成表格，就按 X 排序从左到右输出
+                group_elems.sort(key=lambda e: e.get('x0', 0))
                 for elem in group_elems:
-                    chunk_parts.append(elem['content'])
-                    chunk_parts.append("")
+                    parsed_parts.append({'type': 'text', 'content': elem['content']})
+
+        # 同构表格粘合器 (Table Merger)
+        merged_parts = []
+        for part in parsed_parts:
+            if part['type'] == 'table' and merged_parts and merged_parts[-1]['type'] == 'table':
+                prev_table = merged_parts[-1]['content']
+                curr_table = part['content']
+                
+                prev_lines = prev_table.strip().split('\n')
+                curr_lines = curr_table.strip().split('\n')
+                
+                # 至少包含 header 和 separator
+                if len(prev_lines) >= 2 and len(curr_lines) >= 2:
+                    prev_cols = prev_lines[1].count('|') - 1
+                    curr_cols = curr_lines[1].count('|') - 1
+                    
+                    if prev_cols > 0 and curr_cols > 0:
+                        max_cols = max(prev_cols, curr_cols)
+                        
+                        # 补全 prev_lines
+                        if prev_cols < max_cols:
+                            diff = max_cols - prev_cols
+                            for i in range(len(prev_lines)):
+                                if i != 1:
+                                    prev_lines[i] = prev_lines[i] + "   |" * diff
+                                else:
+                                    prev_lines[i] = prev_lines[i] + "---|" * diff
+                                    
+                        # 补全 curr_lines
+                        if curr_cols < max_cols:
+                            diff = max_cols - curr_cols
+                            for i in range(len(curr_lines)):
+                                if i != 1:
+                                    curr_lines[i] = curr_lines[i] + "   |" * diff
+                                else:
+                                    curr_lines[i] = curr_lines[i] + "---|" * diff
+                                    
+                        # 合并：保留 curr_lines[0] 作为数据行追加，并追加剩余数据行(如果有)
+                        merged_table = "\n".join(prev_lines + [curr_lines[0]] + curr_lines[2:])
+                        merged_parts[-1]['content'] = merged_table
+                        continue
+            merged_parts.append(part)
+
+        for part in merged_parts:
+            chunk_parts.append(part['content'])
+            chunk_parts.append("")
+
+        if notes_text and notes_text != "Click to add text" and notes_text != "Click here to add text":
+            chunk_parts.append(f"\n**Speaker Notes**: {notes_text}")
+            chunk_parts.append("")
 
         content = "\n".join(chunk_parts)
         chunks.append(GoogleChunk(
@@ -396,9 +483,16 @@ def _read_one_slide(service, file_id: str) -> tuple[str, str]:
     return "\n\n=====\n\n".join(md_parts), title
 
 
-def read_one(file_id: str, creds, supports_all_drives: bool = True) -> dict:
+def read_one(file_id: str, creds, supports_all_drives: bool = True, native_api_timeout: int = 10) -> dict:
     """读取单个 Google Slides 演示文稿。"""
-    slides_service = build("slides", "v1", credentials=creds, cache_discovery=False)
+    import httplib2
+    http_client = httplib2.Http(timeout=native_api_timeout)
+    if hasattr(creds, "authorize"):
+        authed_http = creds.authorize(http_client)
+    else:
+        import google_auth_httplib2
+        authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http_client)
+    slides_service = build("slides", "v1", http=authed_http, cache_discovery=False)
     try:
         text, title = _read_one_slide(slides_service, file_id)
         return {
@@ -475,9 +569,17 @@ def read_chunks(
     file_id: str,
     creds,
     supports_all_drives: bool = True,
+    native_api_timeout: int = 10,
 ) -> List[GoogleChunk]:
     """读取 Google Slides 并切分为 chunks（每页一个 chunk）。"""
-    slides_service = build("slides", "v1", credentials=creds, cache_discovery=False)
+    import httplib2
+    http_client = httplib2.Http(timeout=native_api_timeout)
+    if hasattr(creds, "authorize"):
+        authed_http = creds.authorize(http_client)
+    else:
+        import google_auth_httplib2
+        authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http_client)
+    slides_service = build("slides", "v1", http=authed_http, cache_discovery=False)
     try:
         return _read_one_slide_chunks(slides_service, file_id)
     except HttpError:

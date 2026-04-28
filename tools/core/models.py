@@ -235,6 +235,12 @@ class SourceAgentConfig:
     max_loops: int = 1
     source_timeout_s: float = 25.0         # SourceAgent 整体软超时
     sub_query_top_n: int = 8               # 每个 sub_query 原始召回上限
+    google_download_timeout_s: float = 12.0 # 非原生文件流式下载强制打断时间
+    google_api_timeout_s: float = 12.0      # 原生文件单次 API 请求底层 Socket 超时
+    google_enable_gmail: bool = False       # 是否开启 Gmail 检索
+    google_enable_gmail_attachments: bool = False # 是否开启 Gmail 附件读取
+    google_enable_sheet_filter: bool = False # 是否开启 Google Sheets LLM/Rerank 过滤
+    google_enable_excel_filter: bool = False # 是否开启 Excel/CSV LLM/Rerank 过滤
 
 
 # ── SourceAgent 预设（Phase 4b）────────────────────────────────────
@@ -302,15 +308,19 @@ class RetrieveConfig:
     # ── preset 推导内部表 ───────────────────────────────────────
     _PRESET_DEFAULTS = {
         "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
-                      "source_overrides": {}},
+                      "source_overrides": {
+                          "google": {"google_download_timeout_s": 8.0, "google_api_timeout_s": 8.0},
+                      }},
         "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
+                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0},
                       }},
         "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
+                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0},
                       }},
     }
 
@@ -370,6 +380,9 @@ class RetrieveConfig:
         for f in (
             "source_top_k", "min_loops", "max_loops",
             "source_timeout_s", "sub_query_top_n",
+            "google_download_timeout_s", "google_api_timeout_s",
+            "google_enable_gmail", "google_enable_gmail_attachments",
+            "google_enable_sheet_filter", "google_enable_excel_filter",
         ):
             if getattr(override, f) != getattr(defaults, f):
                 diff[f] = getattr(override, f)

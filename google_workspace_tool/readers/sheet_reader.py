@@ -30,9 +30,16 @@ _MIME_SHEETS = "application/vnd.google-apps.spreadsheet"
 # 内部辅助函数
 # ---------------------------------------------------------------------------
 
-def _build_service(creds) -> Any:
+def _build_service(creds, native_api_timeout: int = 10) -> Any:
     """构建 Sheets API v4 service 对象。"""
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    import httplib2
+    http_client = httplib2.Http(timeout=native_api_timeout)
+    if hasattr(creds, "authorize"):
+        authed_http = creds.authorize(http_client)
+    else:
+        import google_auth_httplib2
+        authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http_client)
+    return build("sheets", "v4", http=authed_http, cache_discovery=False)
 
 
 def _get_spreadsheet_metadata(service, spreadsheet_id: str) -> dict:
@@ -287,6 +294,7 @@ def read_one(
     date_time_render_option: Optional[str] = None,
     major_dimension: Optional[str] = None,
     drive_size: Optional[int] = None,
+    native_api_timeout: int = 10,
 ) -> dict:
     """读取单个 Google Spreadsheet。
 
@@ -316,7 +324,7 @@ def read_one(
         >>> result = read_one(file_id="1xxx", creds=creds,
         ...                   range_names=["Sheet1!A1:C3", "Sheet2!A1:C3"])
     """
-    service = _build_service(creds)
+    service = _build_service(creds, native_api_timeout=native_api_timeout)
     kwargs = {}
     if value_render_option:
         kwargs["valueRenderOption"] = value_render_option
@@ -527,6 +535,7 @@ def get_spreadsheet_info(
     file_id: str,
     creds,
     fields: Optional[str] = None,
+    native_api_timeout: int = 10,
 ) -> dict:
     """获取 Spreadsheet 的元数据信息（标题、Sheet 列表、行列数等）。
 
@@ -536,11 +545,12 @@ def get_spreadsheet_info(
         fields: 指定返回字段，默认返回全部常用字段。
                 精简字段示例: "properties.title,sheets.properties.title"
                 完整字段示例: "properties(title,locale,timeZone),sheets.properties(title,gridProperties)"
+        native_api_timeout: Socket 超时时间（秒）
 
     Returns:
         dict 包含 title, sheets 列表, locale, timeZone 等信息
     """
-    service = _build_service(creds)
+    service = _build_service(creds, native_api_timeout=native_api_timeout)
     try:
         if fields:
             metadata = service.spreadsheets().get(
@@ -585,17 +595,21 @@ def read_chunks(
     creds,
     range_name: Optional[str] = None,
     range_names: Optional[list[str]] = None,
+    query: Optional[str] = None,
+    max_chunk_tokens: int = 800,
     value_render_option: Optional[str] = None,
     date_time_render_option: Optional[str] = None,
     major_dimension: Optional[str] = None,
-    rows_per_chunk: int = 20,
+    native_api_timeout: int = 10,
 ) -> list:
     """读取 Google Spreadsheet 并切分为 chunks。
 
     Returns:
         List[GoogleChunk]
     """
-    from chunkers import split_sheet_to_chunks
+    from chunkers import GoogleChunk
+    from utils.table_utils import split_sections, process_section_to_markdown
+    
     result = read_one(
         file_id=file_id,
         creds=creds,
@@ -605,26 +619,57 @@ def read_chunks(
         value_render_option=value_render_option,
         date_time_render_option=date_time_render_option,
         major_dimension=major_dimension,
+        native_api_timeout=native_api_timeout,
     )
     if result.get("error") or not result.get("sheets"):
         return []
     title = result.get("title", "")
     file_url = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
     all_chunks = []
+    
     for sheet_title, data in result["sheets"].items():
         if isinstance(data, dict) and "error" in data:
             continue
         values = data.get("values", []) if isinstance(data, dict) else []
         if not values:
             continue
-        chunks = split_sheet_to_chunks(
-            rows=values,
-            sheet_title=sheet_title,
-            file_id=file_id,
-            file_title=title,
-            file_url=file_url,
-            rows_per_chunk=rows_per_chunk,
-            metadata={"mime_type": _MIME_SHEETS, "drive_size": result.get("drive_size")},
-        )
-        all_chunks.extend(chunks)
+            
+        sections = split_sections(values)
+        for sec_idx, (start_idx, end_idx) in enumerate(sections):
+            section_rows = values[start_idx:end_idx + 1]
+            md, is_bm25_filtered, effective_row_count, cov_score = process_section_to_markdown(
+                section_rows=section_rows,
+                query=query,
+                merges=None,  # Google Sheets read_one 暂时没有返回 merges
+                section_start_global=start_idx,
+            )
+            
+            if not md.strip():
+                continue
+                
+            heading = f"Sheet: {title} > {sheet_title}"
+            
+            chunk = GoogleChunk(
+                file_id=file_id,
+                chunk_id=f"{file_id}_{sheet_title}_s{sec_idx}",
+                file_title=title,
+                file_url=file_url,
+                content=md,
+                content_type="table_md",
+                heading_path=heading,
+                has_table=True,
+                metadata={
+                    "mime_type": _MIME_SHEETS,
+                    "drive_size": result.get("drive_size"),
+                    "sheet_title": sheet_title,
+                    "section_idx": sec_idx,
+                    "row_start": start_idx,
+                    "row_end": end_idx,
+                    "table_rows": effective_row_count,
+                    "header_coverage": round(cov_score, 3),
+                    "is_bm25_filtered": is_bm25_filtered,
+                }
+            )
+            all_chunks.append(chunk)
+            
     return all_chunks

@@ -9,11 +9,11 @@ from typing import Optional, List
 from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 
-from google_doc_reader.fetcher import BatchDocFetcher
-from google_doc_reader.parser import DocParser, OutlineExtractor
-from google_doc_reader.markdown_renderer import MarkdownRenderer
-from utils.md_utils import strip_md_to_plain
-from chunkers import markdown_to_chunks, GoogleChunk
+from google_workspace_tool.google_doc_reader.fetcher import BatchDocFetcher
+from google_workspace_tool.google_doc_reader.parser import DocParser, OutlineExtractor
+from google_workspace_tool.google_doc_reader.markdown_renderer import MarkdownRenderer
+from google_workspace_tool.utils.md_utils import strip_md_to_plain
+from google_workspace_tool.chunkers import markdown_to_chunks, GoogleChunk
 
 _MIME_DOCS = "application/vnd.google-apps.document"
 
@@ -61,6 +61,7 @@ def read_one(
     auto_outline_threshold: Optional[int] = None,
     drive_size: Optional[int] = None,
     supports_all_drives: bool = True,  # 保留以保持向后兼容，但 Docs API 不支持此参数
+    native_api_timeout: int = 10,
 ) -> dict:
     """读取单个 Google Doc。
 
@@ -71,13 +72,22 @@ def read_one(
         auto_outline_threshold: 超过此大小自动降级为 outline 模式（字节）
         drive_size: Drive 文件大小（用于阈值判断，不传则内部查询）
         supports_all_drives: 保留参数（Docs API 不支持 supportsAllDrives，此参数不影响行为）
+        native_api_timeout: 底层 Socket 超时时间（秒）
 
     Returns:
         统一格式的 dict，包含 structured_md, content, mode 等
     """
     from googleapiclient.discovery import build
+    import httplib2
+    
+    http_client = httplib2.Http(timeout=native_api_timeout)
+    if hasattr(creds, "authorize"):
+        authed_http = creds.authorize(http_client)
+    else:
+        import google_auth_httplib2
+        authed_http = google_auth_httplib2.AuthorizedHttp(creds, http=http_client)
 
-    docs_service = build("docs", "v1", credentials=creds, cache_discovery=False)
+    docs_service = build("docs", "v1", http=authed_http, cache_discovery=False)
 
     # 自动 outline 判断
     use_outline = (

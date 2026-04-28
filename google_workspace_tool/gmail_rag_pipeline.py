@@ -211,7 +211,13 @@ class AttachmentExtractorTool:
         'text/csv',
         'text/markdown',
         'application/json',
-        'text/html'
+        'text/html',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/msword',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.ms-excel',
+        'application/vnd.ms-excel.sheet.macroEnabled.12',
+        'application/vnd.openxmlformats-officedocument.presentationml.presentation',
     }
     
     @classmethod
@@ -239,6 +245,20 @@ class AttachmentExtractorTool:
                 data_b64 += "=" * padding
             data_b64 = data_b64.replace("-", "+").replace("_", "/")
             raw_bytes = base64.b64decode(data_b64)
+            
+            # 路由到高级解析器
+            if mime_type in ('application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'application/msword'):
+                from readers.word_reader import _try_extract_word_text
+                text = _try_extract_word_text(raw_bytes)
+                return text if text else f"[Word解析失败: {filename}]"
+            elif mime_type in ('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'application/vnd.ms-excel.sheet.macroEnabled.12'):
+                from readers.excel_reader import _try_extract_excel_text
+                text = _try_extract_excel_text(raw_bytes)
+                return text if text else f"[Excel解析失败: {filename}]"
+            elif mime_type == 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+                from readers.pptx_reader import _try_extract_pptx_text
+                text = _try_extract_pptx_text(raw_bytes)
+                return text if text else f"[PPTX解析失败: {filename}]"
             
             decoded_text = raw_bytes.decode('utf-8', errors='replace')
             
@@ -381,7 +401,7 @@ class RAGChunkCompilerTool:
     @staticmethod
     def to_chunks(thread_id: str, parsed_messages: List[Dict[str, Any]]) -> List:
         """将解析后的邮件列表转为 GoogleChunk 列表（每封邮件一个 chunk）。"""
-        from chunkers import GoogleChunk, ChunkContentType, estimate_tokens
+        from google_workspace_tool.chunkers import GoogleChunk, ChunkContentType, estimate_tokens
         if not parsed_messages:
             return []
 
@@ -439,9 +459,9 @@ class RAGChunkCompilerTool:
         return chunks
 
 
-def run_gmail_chunk_pipeline(query: str, creds: Any, max_threads: int = 5) -> List:
+def run_gmail_chunk_pipeline(query: str, creds: Any, max_threads: int = 5, enable_attachments: bool = False) -> List:
     """主流程编排：返回 GoogleChunk 列表（每封邮件一个 chunk）。"""
-    from chunkers import GoogleChunk
+    from google_workspace_tool.chunkers import GoogleChunk
     thread_ids = GmailQueryTool.execute(query, creds, max_results=max_threads)
     all_chunks: List[GoogleChunk] = []
 
@@ -456,7 +476,7 @@ def run_gmail_chunk_pipeline(query: str, creds: Any, max_threads: int = 5) -> Li
         for msg in messages_data:
             parsed = MessageParserTool.execute(msg)
             attachments_texts = []
-            if parsed['attachments']:
+            if enable_attachments and parsed['attachments']:
                 with ThreadPoolExecutor(max_workers=5) as executor:
                     futures = {
                         executor.submit(AttachmentExtractorTool.execute, parsed['messageId'], att, creds): att['filename']
