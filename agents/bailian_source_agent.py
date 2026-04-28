@@ -20,10 +20,10 @@ import json
 import logging
 from typing import List, Optional
 
-from tools.bailian_retrieve import bailian_retrieve_unified
-from tools.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
-from tools.source_profiles import get_profile
-from tools.source_query_config import (
+from tools.bailian.bailian_retrieve import bailian_retrieve_unified
+from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
+from tools.core.source_profiles import get_profile
+from tools.core.source_query_config import (
     BAILIAN_L2_TAGS,
     COUNTRY_ABBREV_RULE,
     SOURCE_QUERY_RULES,

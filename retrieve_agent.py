@@ -30,8 +30,8 @@ from google.adk.events.event_actions import EventActions
 from google.genai import types as genai_types
 from typing_extensions import override
 
-from tools.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, SourceConfig
-from tools.query_planner import plan_query
+from tools.core.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, SourceConfig
+from tools.core.query_planner import plan_query
 
 from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult
 from agents.sub_agents.eval_layer import build_eval_layer
@@ -442,7 +442,7 @@ def build_retrieve_agent(
     from agents.bailian_source_agent import BailianSourceAgent
     from agents.google_source_agent import GoogleSourceAgent
     from agents.notion_source_agent import NotionSourceAgent
-    from tools.bailian_retrieve import get_all_configured_indexes
+    from tools.bailian.bailian_retrieve import get_all_configured_indexes
 
     sources: Dict[str, SourceAgent] = {}
     for src in cfg.enabled_sources:
@@ -488,8 +488,8 @@ def _build_feishu_source_agent(
 ) -> SourceAgent:
     """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。"""
     from agents.feishu_source_agent import FeishuSourceAgent
-    from tools.feishu_doc_pool import FeishuDocPool
-    from tools.table_pool import TablePool
+    from tools.feishu.feishu_doc_pool import FeishuDocPool
+    from tools.feishu.table_pool import TablePool
 
     uat = sc.get("feishu_uat", "FEISHU_UAT")
 
@@ -511,7 +511,7 @@ def _build_feishu_source_agent(
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
-    from tools.models import AgentConfig
+    from tools.core.models import AgentConfig
 
 def build_retrieve_agent_from_config(
     agent_config: "AgentConfig",
@@ -522,7 +522,7 @@ def build_retrieve_agent_from_config(
     调用方只需传一个 AgentConfig，无需了解内部 RetrieveConfig / SourceConfig 分层。
 
     示例：
-        from tools.models import AgentConfig
+        from tools.core.models import AgentConfig
         from retrieve_agent import build_retrieve_agent_from_config
 
         agent = build_retrieve_agent_from_config(AgentConfig(
@@ -532,7 +532,7 @@ def build_retrieve_agent_from_config(
             bailian_indexes="nubia:hzu9kj1c5x,hypershell:pdws24t6vm",
         ))
     """
-    from tools.models import AgentConfig  # noqa: PLC0415
+    from tools.core.models import AgentConfig  # noqa: PLC0415
     return build_retrieve_agent(
         config=agent_config.to_retrieve_config(),
         source_config=agent_config.to_source_config(),

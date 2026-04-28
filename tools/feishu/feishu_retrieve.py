@@ -28,8 +28,8 @@ from dotenv import load_dotenv
 
 from feishu_read_tool.search import search_feishu_docs, search_feishu_tables
 from feishu_read_tool.pipeline_models import ChunkContentType
-from .models import UnifiedChunk
-from .rerank import (
+from tools.core.models import UnifiedChunk
+from tools.core.rerank import (
     build_focus_sub_query_question,
     get_doc_candidate_selection_config,
     select_search_candidates,

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Set
 from feishu_read_tool.pipeline_models import Chunk, PipelineConfig
 
 if TYPE_CHECKING:
-    from tools.models import UnifiedChunk
+    from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,7 @@ class FeishuDocPool:
     ) -> "List[UnifiedChunk]":
         """等待指定文档就绪，返回原始 UnifiedChunks。"""
         started = time.perf_counter()
-        from .models import UnifiedChunk
+        from tools.core.models import UnifiedChunk
 
         pending = set(doc_ids)
         collected_by_doc: Dict[str, List[UnifiedChunk]] = {}

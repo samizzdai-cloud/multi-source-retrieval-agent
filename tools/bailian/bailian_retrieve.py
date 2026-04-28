@@ -14,7 +14,7 @@ from typing import Dict, Any, List, Optional
 
 from dotenv import load_dotenv
 
-from .models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 load_dotenv()
 

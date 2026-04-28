@@ -20,7 +20,7 @@ from feishu_read_tool.client import FeishuClient
 from feishu_read_tool.basic_tool.bitable_read import list_tables
 from feishu_read_tool.rate_limiter import PriorityTokenBucket
 
-from .models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 

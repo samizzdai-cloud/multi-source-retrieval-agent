@@ -52,12 +52,12 @@ async def _run_one(
     config: "ExperimentConfig",
 ) -> Dict[str, Any]:
     """Run a single query through the full pipeline, returning a rich trace."""
-    from tools.query_planner import plan_query
-    from tools.models import UnifiedChunk
-    from tools.feishu_retrieve import feishu_retrieve
-    from tools.bailian_retrieve import bailian_retrieve_unified
-    from tools.google_retrieve import google_retrieve
-    from tools.notion_retrieve import notion_retrieve
+    from tools.core.query_planner import plan_query
+    from tools.core.models import UnifiedChunk
+    from tools.feishu.feishu_retrieve import feishu_retrieve
+    from tools.bailian.bailian_retrieve import bailian_retrieve_unified
+    from tools.google.google_retrieve import google_retrieve
+    from tools.notion.notion_retrieve import notion_retrieve
 
     SOURCE_REGISTRY = {
         "feishu": feishu_retrieve,
@@ -96,7 +96,7 @@ async def _run_one(
 
     if feishu_uat and "feishu" in available_sources:
         try:
-            from tools.feishu_doc_pool import FeishuDocPool, PoolConfig
+            from tools.feishu.feishu_doc_pool import FeishuDocPool, PoolConfig
             # Build overridden PoolConfig if any feishu_* keys exist
             base_cfg = PoolConfig.for_query_type(plan.query_type)
             if any(k.startswith("feishu_") for k in ro):
@@ -111,7 +111,7 @@ async def _run_one(
             pass
         if plan.query_type == "structured":
             try:
-                from tools.table_pool import TablePool
+                from tools.feishu.table_pool import TablePool
                 tb = ro.get("feishu_table_budget")
                 feishu_table_pool = TablePool(
                     uat=feishu_uat,

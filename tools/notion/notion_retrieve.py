@@ -3,7 +3,7 @@
 import logging
 from typing import List
 
-from .models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 

@@ -16,7 +16,7 @@ Qwen3-Rerank 是阿里云提供的文档重排序模型，用于对召回的文�
 ### 1. 基础用法
 
 ```python
-from tools.rerank import rerank_documents
+from tools.core.rerank import rerank_documents
 
 # QA 模式：找答案
 result = rerank_documents(
@@ -39,7 +39,7 @@ for item in result['results']:
 ### 2. RAG 场景
 
 ```python
-from tools.rerank import rerank_for_rag
+from tools.core.rerank import rerank_for_rag
 
 # 对检索到的 chunks 进行重排序
 chunks = [
@@ -64,7 +64,7 @@ for chunk in reranked:
 ### 3. FAQ 匹配
 
 ```python
-from tools.rerank import rerank_for_faq
+from tools.core.rerank import rerank_for_faq
 
 # 找到与用户问题最相似的标准问题
 matches = rerank_for_faq(
@@ -155,7 +155,7 @@ result = rerank_documents(
 
 **预定义模板**：
 ```python
-from tools.rerank import INSTRUCT_TEMPLATES
+from tools.core.rerank import INSTRUCT_TEMPLATES
 
 print(INSTRUCT_TEMPLATES)
 # {

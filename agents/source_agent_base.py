@@ -28,14 +28,14 @@ from google.adk.agents.llm_agent import LlmAgent
 from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
-from tools.llm_contracts import (
+from tools.core.llm_contracts import (
     enforce_loop_bounds,
     needs_eval,
     tiers_list_to_map,
     validate_plan_eval_output,
 )
-from tools.models import ChunkEntry, SourceAgentConfig
-from tools.source_profiles import SourceProfile
+from tools.core.models import ChunkEntry, SourceAgentConfig
+from tools.core.source_profiles import SourceProfile
 
 
 logger = logging.getLogger(__name__)

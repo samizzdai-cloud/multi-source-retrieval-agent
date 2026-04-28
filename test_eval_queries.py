@@ -26,7 +26,7 @@ if not UAT:
 from google.adk.runners import InMemoryRunner
 from google.genai import types
 from retrieve_agent import build_retrieve_agent
-from tools.models import RetrieveConfig, SourceAgentConfig, SourceConfig
+from tools.core.models import RetrieveConfig, SourceAgentConfig, SourceConfig
 
 # 从 eval_queries.json 选 4 个有代表性的 query
 QUERIES = [

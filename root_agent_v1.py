@@ -20,7 +20,7 @@ from google.adk.agents import SequentialAgent
 
 from answer_agent import answer_agent
 from retrieve_agent import build_retrieve_agent
-from tools.models import RetrieveConfig, SourceAgentConfig, SourceConfig
+from tools.core.models import RetrieveConfig, SourceAgentConfig, SourceConfig
 
 
 # Phase 4c：用 preset="lite" 走 STRICT 基底 + eval_layer 关（生产默认）

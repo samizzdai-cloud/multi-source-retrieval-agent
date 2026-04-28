@@ -16,7 +16,7 @@ Tier 口径提示给 LLM（非严格）：
 
 from google.adk.agents.llm_agent import LlmAgent
 
-from tools.llm_contracts import MODEL, build_eval_only_model
+from tools.core.llm_contracts import MODEL, build_eval_only_model
 
 
 _INSTRUCTION = """你是检索评估器。对给定 chunks 打分并选出 top_k。

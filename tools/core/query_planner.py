@@ -18,9 +18,9 @@ import json
 import logging
 from typing import List, Optional
 
-from tools.llm_client import call_llm, parse_json_response
-from .models import PlanFocus, QueryPlan
-from .source_query_config import BRAND_ROUTING
+from tools.core.llm_client import call_llm, parse_json_response
+from tools.core.models import PlanFocus, QueryPlan
+from tools.core.source_query_config import BRAND_ROUTING
 
 logger = logging.getLogger(__name__)
 

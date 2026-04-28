@@ -34,7 +34,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Protocol
 
-from tools.models import ChunkEntry
+from tools.core.models import ChunkEntry
 
 
 logger = logging.getLogger(__name__)

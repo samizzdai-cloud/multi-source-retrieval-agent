@@ -16,7 +16,7 @@ import logging
 import math
 from typing import Any, Dict, List, Optional
 
-from tools.llm_client import call_llm, parse_json_response
+from tools.core.llm_client import call_llm, parse_json_response
 from eval.config import GRADER_MODEL
 
 logger = logging.getLogger(__name__)

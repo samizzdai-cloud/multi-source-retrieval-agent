@@ -11,7 +11,7 @@
 
 from google.adk.agents.llm_agent import LlmAgent
 
-from tools.llm_contracts import MODEL, PlanOnlyOutput
+from tools.core.llm_contracts import MODEL, PlanOnlyOutput
 
 
 _INSTRUCTION = """你是检索规划器。针对给定的 source，按 focuses 拆解 sub_queries，

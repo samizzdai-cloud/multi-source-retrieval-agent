@@ -13,9 +13,9 @@ import hashlib
 import logging
 from typing import List, Optional
 
-from tools.google_retrieve import google_retrieve
-from tools.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
-from tools.source_profiles import get_profile
+from tools.google.google_retrieve import google_retrieve
+from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
+from tools.core.source_profiles import get_profile
 
 from agents.source_agent_base import SourceAgent
 from agents.sub_agents import (

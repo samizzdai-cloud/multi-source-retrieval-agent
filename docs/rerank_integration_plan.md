@@ -67,7 +67,7 @@ async def submit_and_read(
     
     # ── Rerank 重排序 ────────────────────────────────────────────
     if use_rerank and len(candidates) > 1:
-        from tools.rerank import rerank_documents
+        from tools.core.rerank import rerank_documents
         
         # 准备输入：组合 title + summary
         rerank_docs = []
@@ -142,7 +142,7 @@ async def execute_sub_query_full(self, sq: SubQuery) -> List[ChunkEntry]:
     
     # ── Rerank 精排和过滤 ────────────────────────────────────────
     if len(uc_list) > 1:
-        from tools.rerank import rerank_for_rag
+        from tools.core.rerank import rerank_for_rag
         
         # 转换为 rerank_for_rag 需要的格式
         chunks_for_rerank = [

@@ -19,7 +19,7 @@ import time
 import random
 from .url_tool import parse_feishu_url
 from .basic_tool.sheet_utils import number_to_column
-from tools.models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +269,7 @@ def _bm25_filter_rows(
     替代 LLM 筛选：BM25 评分 <5ms（vs LLM 2-3s），且不存在 token 超限问题。
     测试验证：BM25 对行级文本有足够区分度（score 0-5.34 范围）。
     """
-    from tools.chunk_scorer import bm25_score
+    from tools.core.chunk_scorer import bm25_score
 
     header_text = " ".join(str(c).strip() for c in header_row if c is not None)
     scored: List[tuple] = []
@@ -604,8 +604,8 @@ def _read_single_tab(
                 heading += f" > {first_text[:50]}"
 
         # O3: 修正分数公式——使用关键词泛化扩展的 BM25，与下游 RSF 对齐
-        from tools.chunk_scorer import bm25_score
-        from tools.kw_generalization import expand_keywords
+        from tools.core.chunk_scorer import bm25_score
+        from tools.core.kw_generalization import expand_keywords
         _raw_kw = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
         _expanded_q = " ".join(expand_keywords(_raw_kw))
         score_text = f"{sheet_title} {tab_title} {first_text} {md[:500]}"

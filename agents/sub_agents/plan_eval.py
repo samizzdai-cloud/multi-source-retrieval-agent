@@ -15,7 +15,7 @@
 
 from google.adk.agents.llm_agent import LlmAgent
 
-from tools.llm_contracts import MODEL, build_plan_eval_model
+from tools.core.llm_contracts import MODEL, build_plan_eval_model
 
 
 _INSTRUCTION = """你是检索评估与规划器。判断是否继续 replan，若停止则给出 top_k。

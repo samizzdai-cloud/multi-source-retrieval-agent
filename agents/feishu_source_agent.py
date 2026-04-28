@@ -20,21 +20,21 @@ import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
-from tools.feishu_retrieve import (
+from tools.feishu.feishu_retrieve import (
     search_and_read_feishu_tables,
     search_and_select_feishu_doc_candidates,
     search_and_select_feishu_table_candidates,
     TABLE_CHILD_SELECT_TOP_K,
     _table_candidate_key,
 )
-from tools.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
-from tools.rerank import (
+from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
+from tools.core.rerank import (
     build_focus_sub_query_question,
     get_chunk_selection_config,
     select_reranked_chunks,
 )
-from tools.source_profiles import get_profile
-from tools.source_query_config import SOURCE_QUERY_RULES
+from tools.core.source_profiles import get_profile
+from tools.core.source_query_config import SOURCE_QUERY_RULES
 
 from agents.source_agent_base import Focus, SourceAgent, SubQuery
 from agents.sub_agents import (
@@ -994,7 +994,7 @@ class FeishuSourceAgent(SourceAgent):
                 if not raw:
                     simplified = None
                     try:
-                        from tools.feishu_retrieve import _simplify_feishu_query
+                        from tools.feishu.feishu_retrieve import _simplify_feishu_query
                         simplified = _simplify_feishu_query(sq.query)
                     except Exception:
                         pass

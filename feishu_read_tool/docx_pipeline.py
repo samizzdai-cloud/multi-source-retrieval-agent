@@ -26,7 +26,7 @@ from .table_handler import build_table_chunk, build_sheet_chunk
 
 def _call_llm_table(prompt: str) -> str:
     """Wrapper so table/sheet LLM calls carry a recognizable caller_tag."""
-    from tools.llm_client import call_llm  # noqa: PLC0415 (lazy import, breaks circular)
+    from tools.core.llm_client import call_llm  # noqa: PLC0415 (lazy import, breaks circular)
     return call_llm(prompt, _caller_tag="table")
 
 

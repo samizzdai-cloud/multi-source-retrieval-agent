@@ -19,7 +19,7 @@ import logging
 import os
 from typing import List, Optional
 
-from .models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 

@@ -19,7 +19,7 @@ from .url_tool import parse_feishu_url
 from .client import FeishuClient
 import time
 import random
-from tools.models import UnifiedChunk
+from tools.core.models import UnifiedChunk
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ def _bm25_filter_records(
 
     替代 LLM 筛选：BM25 评分 <5ms（vs LLM 2-3s），无 token 超限问题。
     """
-    from tools.chunk_scorer import bm25_score
+    from tools.core.chunk_scorer import bm25_score
 
     header_text = " ".join(field_names)
     scored: List[tuple] = []
@@ -469,8 +469,8 @@ def _read_single_table(
 
     heading = f"Bitable: {bitable_title} > {table_name}"
     # O3: 使用关键词泛化扩展的 BM25，与下游 RSF 对齐
-    from tools.chunk_scorer import bm25_score
-    from tools.kw_generalization import expand_keywords
+    from tools.core.chunk_scorer import bm25_score
+    from tools.core.kw_generalization import expand_keywords
     _raw_kw = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
     _expanded_q = " ".join(expand_keywords(_raw_kw))
     score_text = f"{bitable_title} {table_name} {md[:500]}"
