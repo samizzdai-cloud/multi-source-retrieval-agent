@@ -53,10 +53,7 @@ async def _run_one(
 ) -> Dict[str, Any]:
     """Run a single query through the full pipeline, returning a rich trace."""
     from tools.query_planner import plan_query
-    from tools.evaluator import EvaluationLayer
-    from tools.reranker import rerank_and_filter
     from tools.models import UnifiedChunk
-    from tools.embedding import EmbeddingCache
     from tools.feishu_retrieve import feishu_retrieve
     from tools.bailian_retrieve import bailian_retrieve_unified
     from tools.google_retrieve import google_retrieve
@@ -83,11 +80,7 @@ async def _run_one(
 
     focuses = [f for fg in plan.focus_groups for f in fg.focuses if f]
 
-    # ── Phase 2: Fan-out + EvaluationLayer ───────────────────────────────
-    dashscope_key = os.getenv("DASHSCOPE_API_KEY", "")
-    cache = EmbeddingCache(api_key=dashscope_key, enabled=bool(dashscope_key))
-    focus_embed_task = asyncio.create_task(cache.precompute_focuses(focuses))
-
+    # ── Phase 2: Fan-out ───────────────────────────────
     task_map: Dict[asyncio.Task, str] = {}
     task_group_map: Dict[asyncio.Task, int] = {}
     # Sub-query tracking: task -> (sq_query, target, fg_idx, sq_idx)
@@ -114,8 +107,6 @@ async def _run_one(
                 uat=feishu_uat, query_type=plan.query_type,
                 pool_config_override=base_cfg,
             )
-            # 注入 EmbeddingCache → DocPool 混合评分可用
-            feishu_doc_pool.set_embedding_cache(cache, focuses)
         except Exception:
             pass
         if plan.query_type == "structured":
@@ -171,15 +162,16 @@ async def _run_one(
                 }
 
     t_retrieve = time.monotonic()
-    evaluator = EvaluationLayer(ec, verbose=False)
-    all_chunks, source_stats, focus_hits, task_results = await evaluator.collect(
-        task_map,
-        focuses=focuses,
-        task_group_map=task_group_map,
-        embedding_cache=cache,
-        focus_groups=plan.focus_groups,
-        query_type=plan.query_type,
-    )
+    # ── [V2 框架已废弃 EvaluationLayer] 临时 Dummy 替代 ─────────────────
+    # 根据 spec_plan.md，eval/runner.py 早已对 v2 schema 破，等后续重写
+    # 此处只提供空结果以消除 Pylance 报错和维持基本骨架不崩
+    all_chunks = []
+    source_stats = {}
+    focus_hits = {}
+    task_results = {}
+    # 等待所有的 retriever 结束
+    if task_map:
+        await asyncio.gather(*task_map.keys(), return_exceptions=True)
     retrieve_ms = int((time.monotonic() - t_retrieve) * 1000)
 
     # Build per-sub_query results
@@ -205,24 +197,13 @@ async def _run_one(
             "is_zero": chunk_count == 0,
         })
 
-    # ── Phase 3: Rerank ──────────────────────────────────────────────────
+    # ── Phase 3: Rerank (Deprecated in V2) ──────────────────────────────────
     t_rerank = time.monotonic()
-    await focus_embed_task
-    if cache.enabled:
-        await cache.wait_pending()
-    sim_matrix = cache.get_sim_matrix(focuses, all_chunks) if cache.enabled else None
-
-    reranker_kw = {
-        "top_k": config.reranker_overrides.get("top_k_chunks", ec.top_k_chunks),
-        "focuses": focuses or None,
-        "min_per_focus": config.reranker_overrides.get("min_per_focus_select", ec.min_per_focus_select),
-        "precomputed_sim_matrix": sim_matrix,
-        "emb_weight": config.reranker_overrides.get("emb_weight", ec.emb_weight),
-        "kw_weight": config.reranker_overrides.get("kw_weight", ec.kw_weight),
-        "query_type": plan.query_type,
-        "source_weight": config.reranker_overrides.get("source_weight", ec.source_weight),
-    }
-    final_chunks, focus_coverages = rerank_and_filter(all_chunks, **reranker_kw)
+    
+    # 临时 Dummy 替代
+    final_chunks = []
+    focus_coverages = []
+    
     rerank_ms = int((time.monotonic() - t_rerank) * 1000)
     total_ms = int((time.monotonic() - t0) * 1000)
 

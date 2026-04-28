@@ -6,10 +6,6 @@
 
 外部入口函数：
   expand_keywords(words)             — 扩展关键词集，加入已知同义词
-  get_generalization_entry(term)     — 查看某个词的全部等价词
-  add_generalization(term, synonyms) — 动态新增/扩展条目（测试用）
-  list_all_terms()                   — 列出所有收录主词（debug 用）
-  show_coverage_for_focuses(focuses) — 展示 focus 列表中哪些词会被扩展（调试）
 """
 
 from typing import Dict, Set
@@ -278,51 +274,3 @@ def expand_keywords(words: Set[str], passes: int = 2) -> Set[str]:
             break
         expanded |= new_words
     return expanded
-
-
-def get_generalization_entry(term: str) -> Set[str]:
-    """查询一个词的全部等价词（正向 + 反向查找）。"""
-    result: Set[str] = set()
-    t = term.lower()
-    if t in _KW_GENERALIZATION:
-        result |= _KW_GENERALIZATION[t]
-    if t in _REVERSE_MAP:
-        result |= _REVERSE_MAP[t]
-    return result
-
-
-def add_generalization(term: str, synonyms: Set[str]) -> None:
-    """动态新增/扩展泛化条目（运行时有效，重启后失效）。
-    测试稳定后请写回 _KW_GENERALIZATION 常量。
-    """
-    t = term.lower()
-    if t not in _KW_GENERALIZATION:
-        _KW_GENERALIZATION[t] = set()
-    _KW_GENERALIZATION[t] |= synonyms
-    for syn in synonyms:
-        s = syn.lower()
-        if s not in _REVERSE_MAP:
-            _REVERSE_MAP[s] = set()
-        _REVERSE_MAP[s].add(t)
-
-
-def list_all_terms() -> list:
-    """列出所有已收录主词（debug / 维护用）。"""
-    return sorted(_KW_GENERALIZATION.keys())
-
-
-def show_coverage_for_focuses(focuses: list) -> dict:
-    """展示 focus 列表中哪些词会被泛化扩展（调试用）。
-
-    Returns:
-        {原始词: 扩展词集合}
-    """
-    import re
-    result = {}
-    for focus in focuses:
-        tokens = re.findall(r'[\w\u4e00-\u9fff]+', focus.lower())
-        for token in tokens:
-            expansions = get_generalization_entry(token)
-            if expansions:
-                result[token] = expansions
-    return result

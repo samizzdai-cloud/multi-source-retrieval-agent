@@ -1,10 +1,9 @@
 # tools/ — Multi-source retrieval toolkit
-# Shared: models, llm_client, reranker, evaluator, query_planner
+# Shared: models, llm_client, query_planner
 # Per-source entry points: feishu_retrieve.py (→ feishu_read_tool/), bailian_retrieve.py, stubs
 
 from .models import UnifiedChunk, QueryPlan, RetrievalResult
 from .llm_client import call_llm, parse_json_response
-from .reranker import rerank_and_filter
 from .query_planner import plan_query
 from .bailian_retrieve import bailian_retrieve_unified
 from .google_retrieve import google_retrieve

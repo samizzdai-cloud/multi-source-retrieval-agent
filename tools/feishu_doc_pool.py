@@ -67,10 +67,6 @@ class FeishuDocPool:
         # doc_id → 第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM 提取）
         self._doc_query: Dict[str, str] = {}
 
-    def set_embedding_cache(self, cache: object, focuses: List[str]) -> None:
-        """兼容旧调用；chunk 评分已前移到 SourceAgent rerank。"""
-        _ = (cache, focuses)
-
     def _get_doc_id(self, candidate: dict) -> str:
         return candidate.get("id", candidate.get("document_id", candidate.get("doc_id", "")))
 

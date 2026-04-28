@@ -23,8 +23,6 @@ from .client import FeishuClient
 from .pipeline_models import Chunk, ChunkResult, RAGResult, PipelineConfig, ChunkContentType
 from .chunker import build_text_chunks, HeadingStack
 from .table_handler import build_table_chunk, build_sheet_chunk
-# Optional BM25+embedding scoring（仅在 skip_scoring=False 的遗留模式下使用）
-from tools.chunk_scorer import bm25_filter_candidates, hybrid_score_chunks
 
 def _call_llm_table(prompt: str) -> str:
     """Wrapper so table/sheet LLM calls carry a recognizable caller_tag."""
@@ -521,18 +519,7 @@ def run_rag_pipeline(
         )
 
     # ── Stage 2: optional candidate trim（遗留模式，DocPool 主链已跳过）────────
-    if not cfg.skip_scoring:
-        logger.info("Stage 2: filtering %d candidates with BM25 (max_candidates=%d)",
-                    len(filtered_docs), cfg.max_candidates)
-        filtered_doc_ids = bm25_filter_candidates(query, filtered_docs, cfg.max_candidates)
-        id_set = set(filtered_doc_ids)
-        filtered_docs = [
-            c for c in filtered_docs
-            if c.get("id", c.get("document_id", c.get("doc_id", ""))) in id_set
-        ]
-        logger.info("Stage 2: %d docs retained after BM25 filter", len(filtered_docs))
-    else:
-        logger.info("Stage 2: SKIP (skip_scoring=True), passing %d candidates through", len(filtered_docs))
+    logger.info("Stage 2: SKIP (scoring disabled), passing %d candidates through", len(filtered_docs))
 
     if not filtered_docs:
         logger.warning("run_rag_pipeline: no docs remain after filter")
@@ -796,97 +783,23 @@ def run_rag_pipeline(
             chunks=[],
         )
 
-    # ── Stage 5: optional chunk scoring（遗留模式，DocPool 主链已跳过）───────
-    if cfg.skip_scoring:
-        # DocPool 模式：跳过 Stage 5，直接将 Chunk 转为 ChunkResult（score=0）
-        # chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
-        logger.info("Stage 5: SKIP (skip_scoring=True), converting %d chunks directly", len(all_chunks))
-        scored_chunks: List[ChunkResult] = []
-        for chunk in all_chunks:
-            scored_chunks.append(ChunkResult(
-                summary="",
-                chunks_content=chunk.content,
-                content_type=chunk.content_type,
-                file_name=chunk.doc_title,
-                file_url=chunk.doc_url,
-                chunk_id=chunk.chunk_id,
-                heading_path=chunk.heading_path,
-                relevance_score=0.0,
-                token_count=chunk.token_count,
-            ))
-    else:
-        # 遗留模式：BM25 粗筛 → 只对 top-K 做 embedding 精排
-        import os as _os
-        dashscope_key = _os.getenv("DASHSCOPE_API_KEY", "")
-        use_emb = cfg.use_embedding_score and bool(dashscope_key)
-
-        # Step 5a: BM25 快速粗筛
-        from tools.chunk_scorer import bm25_score_batch
-        chunk_texts = [c.content for c in all_chunks]
-        bm25_raw = bm25_score_batch(query, chunk_texts)
-
-        # 只对 BM25 top-K 做 embedding
-        _EMB_TOP_K = 30
-        if use_emb and len(all_chunks) > _EMB_TOP_K:
-            # 按 BM25 排序，取 top-K 的索引
-            indexed_scores = sorted(enumerate(bm25_raw), key=lambda x: x[1], reverse=True)
-            top_indices = set(i for i, _ in indexed_scores[:_EMB_TOP_K])
-            top_texts = [chunk_texts[i] for i in sorted(top_indices)]
-
-            logger.info("Stage 5: BM25 pre-filter %d → %d chunks for embedding",
-                         len(all_chunks), len(top_texts))
-
-            # 对 top-K 做 embedding 精排
-            top_scores = hybrid_score_chunks(
-                query=query, chunk_texts=top_texts,
-                use_embedding=True, bm25_weight=cfg.bm25_weight,
-                emb_weight=cfg.emb_weight_score, api_key=dashscope_key,
-            )
-
-            # 对未进入 top-K 的 chunks 用纯 BM25 归一化
-            from tools.chunk_scorer import normalize_scores
-            bm25_only_scores = normalize_scores(bm25_raw)
-
-            # 合并分数：top-K 用 hybrid, 其余用 BM25
-            scores = list(bm25_only_scores)  # 默认全部用 BM25
-            top_sorted = sorted(top_indices)
-            for rank, orig_idx in enumerate(top_sorted):
-                scores[orig_idx] = top_scores[rank]
-        else:
-            logger.info("Stage 5: scoring %d chunks with %s",
-                         len(all_chunks),
-                         "BM25+embedding" if use_emb else "BM25-only")
-            scores = hybrid_score_chunks(
-                query=query, chunk_texts=chunk_texts,
-                use_embedding=use_emb, bm25_weight=cfg.bm25_weight,
-                emb_weight=cfg.emb_weight_score, api_key=dashscope_key,
-            )
-
-        scored_chunks: List[ChunkResult] = []
-        for chunk, score in zip(all_chunks, scores):
-            content_type = chunk.content_type
-            # Apply table score boost (×1.1)
-            effective_score = score * 1.1 if content_type in (
-                ChunkContentType.TABLE_MD, ChunkContentType.TABLE_JSON) else score
-
-            scored_chunks.append(ChunkResult(
-                summary="",  # skip_scoring=False 模式下无 LLM summary
-                chunks_content=chunk.content,
-                content_type=content_type,
-                file_name=chunk.doc_title,
-                file_url=chunk.doc_url,
-                chunk_id=chunk.chunk_id,
-                heading_path=chunk.heading_path,
-                relevance_score=effective_score,
-                token_count=chunk.token_count,
-            ))
-
-        # Sort by effective score descending
-        scored_chunks.sort(key=lambda r: r.relevance_score, reverse=True)
-
-        logger.info("Stage 5: %d chunks scored (top score=%.3f)",
-                    len(scored_chunks),
-                    scored_chunks[0].relevance_score if scored_chunks else 0)
+    # ── Stage 5: Score and Select (DEPRECATED in main chain) ─────────────────
+    # DocPool 模式：跳过 Stage 5，直接将 Chunk 转为 ChunkResult（score=0）
+    # chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
+    logger.info("Stage 5: SKIP (scoring disabled), converting %d chunks directly", len(all_chunks))
+    scored_chunks: List[ChunkResult] = []
+    for chunk in all_chunks:
+        scored_chunks.append(ChunkResult(
+            summary="",
+            chunks_content=chunk.content,
+            content_type=chunk.content_type,
+            file_name=chunk.doc_title,
+            file_url=chunk.doc_url,
+            chunk_id=chunk.chunk_id,
+            heading_path=chunk.heading_path,
+            relevance_score=0.0,
+            token_count=chunk.token_count,
+        ))
 
     # ── Stage 6-7: Return scored_chunks (unclipped) ─────────────────────────
     # Budget allocation 由下游 SourceAgent eval_only 完成。

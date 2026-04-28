@@ -220,19 +220,9 @@ def plan_query(
         )
         result = parse_json_response(response_text)
 
-        # 兼容兜底：若 LLM 仍旧按老 schema 输出 focus_groups，扁平化后再走校验
         raw_focuses: List[dict] = []
         if isinstance(result.get("focuses"), list):
             raw_focuses = list(result["focuses"])
-        elif isinstance(result.get("focus_groups"), list):
-            logger.info("plan_query: LLM returned legacy focus_groups, flattening")
-            for fg in result["focus_groups"]:
-                if not isinstance(fg, dict):
-                    continue
-                fg_targets = fg.get("targets") or []
-                for text in fg.get("focuses") or []:
-                    if isinstance(text, str) and text.strip():
-                        raw_focuses.append({"text": text, "targets": fg_targets})
 
         focuses = _validate_plan(raw_focuses, available_sources)
 
