@@ -126,7 +126,7 @@ class MarkdownRenderer:
             return "\n---\n"
 
         if elem.type in ("equation", "equation_symbol"):
-            return f" [equation] {text} " if text else ""
+            return f"${text}$" if text else ""
 
         if elem.type == "footnote_ref":
             return text  # 已经是 [^n] 格式
@@ -139,7 +139,7 @@ class MarkdownRenderer:
 
         if elem.type == "rich_link":
             if elem.link_url:
-                return f"[{text}]({elem.link_url})"
+                return f"{text}({elem.link_url})"
             return text
 
         if elem.type == "date":
@@ -152,7 +152,7 @@ class MarkdownRenderer:
         elif elem.baseline_offset == "SUBSCRIPT":
             text = f"<sub>{text}</sub>"
         if elem.link_url:
-            text = f"[{text}]({elem.link_url})"
+            text = f"{text}({elem.link_url})"
 
         return text
 
@@ -234,17 +234,20 @@ class MarkdownRenderer:
         return text
 
     def _render_nested_table(self, block: Block, indent: str) -> str:
-        """将嵌套表格渲染为缩进文本描述。"""
-        lines = [f"{indent}[嵌套表格]"]
+        """将嵌套表格压扁降级为单行文本，使用类似 [cell:A1{text}] 格式表示子表单元格关系。"""
+        parts = []
         if block.cells:
-            for row in block.cells:
-                cell_texts = []
-                for cell_blocks in row:
-                    cell_text = self._render_cell(cell_blocks, indent + "  ")
-                    cell_texts.append(cell_text)
-                lines.append(f"{indent}  | " + " | ".join(cell_texts) + " |")
-        lines.append(f"{indent}[/嵌套表格]")
-        return "\n".join(lines)
+            for r_idx, row in enumerate(block.cells):
+                for c_idx, cell_blocks in enumerate(row):
+                    cell_text = self._render_cell(cell_blocks, "").strip()
+                    # 只有有内容才拼进去
+                    if cell_text:
+                        # 用 A, B, C 表示列
+                        col_letter = chr(ord('A') + c_idx) if c_idx < 26 else str(c_idx + 1)
+                        # r_idx + 1 表示行
+                        cell_id = f"{col_letter}{r_idx + 1}"
+                        parts.append(f"[cell:{cell_id}{{{cell_text}}}]")
+        return " ".join(parts)
 
     # ------------------------------------------------------------------
     # 目录渲染

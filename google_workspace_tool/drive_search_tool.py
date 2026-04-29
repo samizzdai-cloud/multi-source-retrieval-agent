@@ -35,15 +35,11 @@ from typing import Optional
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# 默认返回字段：覆盖常用元数据
+# 默认返回字段：覆盖常用元数据（严格收束以提升性能并保留重排所需关键特征）
 DEFAULT_FIELDS = (
     "nextPageToken, files("
-    "id, name, mimeType, description, createdTime, modifiedTime, viewedByMeTime, "
-    "starred, trashed, parents, "
-    "owners(displayName, emailAddress), lastModifyingUser(displayName, emailAddress), "
-    "webViewLink, webContentLink, iconLink, thumbnailLink, "
-    "size, md5Checksum, shared, permissions(id, type, role, emailAddress), "
-    "driveId, teamDriveId, shortcutDetails, contentHints"
+    "id, name, mimeType, description, modifiedTime, createdTime, viewedByMeTime, "
+    "owners(displayName, emailAddress)"
     ")"
 )
 

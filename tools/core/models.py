@@ -241,6 +241,8 @@ class SourceAgentConfig:
     google_enable_gmail_attachments: bool = False # 是否开启 Gmail 附件读取
     google_enable_sheet_filter: bool = False # 是否开启 Google Sheets LLM/Rerank 过滤
     google_enable_excel_filter: bool = False # 是否开启 Excel/CSV LLM/Rerank 过滤
+    google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
+    google_order_by_mode: Optional[str] = None # Drive API 排序，如 "modifiedTime desc", "viewedByMeTime desc"
 
 
 # ── SourceAgent 预设（Phase 4b）────────────────────────────────────
@@ -383,6 +385,7 @@ class RetrieveConfig:
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_filter", "google_enable_excel_filter",
+            "google_enable_fulltext_search", "google_order_by_mode",
         ):
             if getattr(override, f) != getattr(defaults, f):
                 diff[f] = getattr(override, f)

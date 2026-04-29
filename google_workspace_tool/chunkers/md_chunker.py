@@ -134,7 +134,7 @@ def _render_pre_chunk_to_segments(pc_lines: List[str]) -> List[_Segment]:
     def flush_bullets():
         nonlocal bullet_items
         if bullet_items:
-            content = "list{" + "; ".join(f"- {item}" for item in bullet_items) + "}"
+            content = "list{" + "; ".join(item for item in bullet_items) + "}"
             segments.append(_Segment(content, estimate_tokens(content), False))
             bullet_items = []
 
@@ -189,21 +189,33 @@ def _render_pre_chunk_to_segments(pc_lines: List[str]) -> List[_Segment]:
             continue
 
         # ── Bullet list ──
-        bm = re.match(r'^[-*]\s+', stripped)
+        # 匹配任意前导空格，保留缩进层级
+        bm = re.match(r'^(\s*)[-*]\s+', line)
         if bm:
             flush_ordered()
-            item = re.sub(r'^[-*]\s+', '', stripped)
-            bullet_items.append(item)
+            indent = bm.group(1)
+            item = re.sub(r'^\s*[-*]\s+', '', line).strip()
+            # 保留前面的缩进空格，并且统一用 `-`
+            bullet_items.append(f"{indent}- {item}")
             i += 1
             continue
 
         # ── Ordered list ──
-        om = re.match(r'^(\d+)\.\s+', stripped)
+        om = re.match(r'^(\s*)(\d+)\.\s+', line)
         if om:
             flush_bullets()
-            ordered_seq += 1
-            item = re.sub(r'^\d+\.\s+', '', stripped)
-            ordered_items.append((ordered_seq, item))
+            indent = om.group(1)
+            seq_num = int(om.group(2))
+            
+            # 如果是无缩进的 1. 开头，重置序号
+            if not indent and seq_num == 1:
+                ordered_seq = 1
+            else:
+                ordered_seq += 1
+                
+            item = re.sub(r'^\s*\d+\.\s+', '', line).strip()
+            # 保留前面的缩进空格
+            ordered_items.append((ordered_seq, f"{indent}{item}"))
             i += 1
             continue
 
@@ -296,14 +308,41 @@ def _bin_pack_segments(
         # Case 2: doesn't fit + non-splittable → flush current, put seg alone
         if not seg.splittable:
             flush_chunk()
-            if seg.token_count <= max_chunk_tokens:
-                current_parts.append(seg.content)
-                current_tokens = seg.token_count
-                if _is_table_line(seg.content):
-                    current_has_table = True
+            
+            # Check if this atomic segment is an oversized table
+            if _is_table_line(seg.content) and seg.token_count > max_chunk_tokens:
+                # Large table splitting logic
+                table_lines = seg.content.split('\n')
+                if len(table_lines) > 3: # header + separator + at least one data row
+                    header = table_lines[0]
+                    separator = table_lines[1]
+                    data_rows = table_lines[2:]
+                    
+                    rows_per_batch = max(5, int(max_chunk_tokens / max(1, estimate_tokens(header + separator)) * 0.8)) # heuristic
+                    
+                    for idx in range(0, len(data_rows), rows_per_batch):
+                        batch_rows = data_rows[idx:idx+rows_per_batch]
+                        batch_content = "\n".join([header, separator] + batch_rows)
+                        
+                        # 智能补充 heading
+                        if heading_path:
+                            final_content = f"## {heading_path}\n\n{batch_content}"
+                        else:
+                            final_content = batch_content
+                            
+                        chunks_contents.append((final_content, estimate_tokens(final_content), True))
+                else:
+                    # Not splittable even though it's a table (e.g. single giant row)
+                    chunks_contents.append((seg.content, seg.token_count, True))
             else:
-                # Oversized atomic segment → emit as its own chunk
-                chunks_contents.append((seg.content, seg.token_count, _is_table_line(seg.content)))
+                if seg.token_count <= max_chunk_tokens:
+                    current_parts.append(seg.content)
+                    current_tokens = seg.token_count
+                    if _is_table_line(seg.content):
+                        current_has_table = True
+                else:
+                    # Oversized atomic non-table segment (e.g. giant code block)
+                    chunks_contents.append((seg.content, seg.token_count, _is_table_line(seg.content)))
             continue
 
         # Case 3: doesn't fit + splittable (plain text)

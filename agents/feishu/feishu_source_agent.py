@@ -37,11 +37,7 @@ from tools.core.source_profiles import get_profile
 from tools.core.source_query_config import SOURCE_QUERY_RULES
 
 from agents.source_agent_base import Focus, SourceAgent, SubQuery
-from agents.sub_agents import (
-    build_eval_only_agent,
-    build_plan_eval_agent,
-    build_plan_only_agent,
-)
+from google.adk.agents.llm_agent import LlmAgent
 
 logger = logging.getLogger(__name__)
 
@@ -613,18 +609,26 @@ class FeishuSourceAgent(SourceAgent):
         profile = get_profile("feishu")
         super().__init__(
             profile=profile, cfg=cfg,
-            plan_only_agent=build_plan_only_agent(name="feishu_plan_only"),
-            eval_only_agent=build_eval_only_agent(source_top_k=cfg.source_top_k, name="feishu_eval_only"),
-            plan_eval_agent=(
-                build_plan_eval_agent(source_top_k=cfg.source_top_k, name="feishu_plan_eval")
-                if cfg.max_loops > 1 else None
-            ),
         )
         self._uat = uat
         self._default_query_type = default_query_type
         self._doc_pool = doc_pool
         self._table_pool = table_pool
         self._preset = preset
+
+    def _build_plan_only_agent(self) -> Optional[LlmAgent]:
+        from .feishu_retrieve_llm_build import build_feishu_plan_only_agent
+        return build_feishu_plan_only_agent()
+
+    def _build_eval_only_agent(self) -> LlmAgent:
+        from .feishu_retrieve_llm_build import build_feishu_eval_only_agent
+        return build_feishu_eval_only_agent(self.cfg.source_top_k)
+
+    def _build_plan_eval_agent(self) -> Optional[LlmAgent]:
+        if self.cfg.max_loops <= 1:
+            return None
+        from .feishu_retrieve_llm_build import build_feishu_plan_eval_agent
+        return build_feishu_plan_eval_agent(self.cfg.source_top_k)
 
     # ── plan_only prompt 注入 ─────────────────────────────────
     def _source_query_rules_block(self) -> str:

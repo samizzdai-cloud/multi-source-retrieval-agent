@@ -17,11 +17,7 @@ from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
 from tools.core.source_profiles import get_profile
 
 from agents.source_agent_base import SourceAgent
-from agents.sub_agents import (
-    build_eval_only_agent,
-    build_plan_eval_agent,
-    build_plan_only_agent,
-)
+from google.adk.agents.llm_agent import LlmAgent
 
 
 logger = logging.getLogger(__name__)
@@ -80,14 +76,21 @@ class NotionSourceAgent(SourceAgent):
         super().__init__(
             profile=profile,
             cfg=cfg,
-            plan_only_agent=build_plan_only_agent(name="notion_plan_only"),
-            eval_only_agent=build_eval_only_agent(
-                source_top_k=cfg.source_top_k, name="notion_eval_only",
-            ),
-            plan_eval_agent=build_plan_eval_agent(
-                source_top_k=cfg.source_top_k, name="notion_plan_eval",
-            ) if cfg.max_loops > 1 else None,
         )
+
+    def _build_plan_only_agent(self) -> Optional[LlmAgent]:
+        from .notion_retrieve_llm_build import build_notion_plan_only_agent
+        return build_notion_plan_only_agent()
+
+    def _build_eval_only_agent(self) -> LlmAgent:
+        from .notion_retrieve_llm_build import build_notion_eval_only_agent
+        return build_notion_eval_only_agent(self.cfg.source_top_k)
+
+    def _build_plan_eval_agent(self) -> Optional[LlmAgent]:
+        if self.cfg.max_loops <= 1:
+            return None
+        from .notion_retrieve_llm_build import build_notion_plan_eval_agent
+        return build_notion_plan_eval_agent(self.cfg.source_top_k)
 
     async def execute_sub_query(
         self, sub_query: str, target_focus: str,

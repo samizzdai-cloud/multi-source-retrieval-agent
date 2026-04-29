@@ -62,11 +62,11 @@ class Focus:
 class SubQuery:
     """plan_only / plan_eval 产出的一条子查询（v2：支持源特有参数）。
 
-    ``tags`` / ``indexes`` / ``time_filter`` / ``query_type`` 为可选字段：
+    ``tags`` / ``indexes`` / ``time_filter`` / ``query_type`` 等为可选字段：
     - bailian 的 plan_only LLM 会填 tags (L2 + 时效) 和 indexes
     - feishu 的 plan_only LLM 会填 time_filter（"last_N_days" 或 None）和
       query_type（"structured"/"concept"，驱动 Feishu reader 路由与召回数量）
-    - google / notion 保持空
+    - google 的 plan_only LLM 可以动态产出 google_enable_fulltext (bool) 与 google_order_by (str)
     """
     query: str
     target_focus: str
@@ -74,6 +74,8 @@ class SubQuery:
     indexes: List[str] = field(default_factory=list)
     time_filter: Optional[str] = None
     query_type: Optional[str] = None
+    google_enable_fulltext: Optional[bool] = None
+    google_order_by: Optional[str] = None
     sub_query_id: str = ""
 
 
@@ -274,26 +276,35 @@ class SourceAgent:
         self,
         profile: SourceProfile,
         cfg: SourceAgentConfig,
-        plan_only_agent: Optional[LlmAgent],
-        eval_only_agent: LlmAgent,
-        plan_eval_agent: Optional[LlmAgent] = None,
         execute_fn: Optional[ExecuteFn] = None,
     ):
         """构造 SourceAgent 基类。
 
-        Phase 4b Step D：``plan_only_agent`` 允许为 None——此时子类必须覆写
-        ``_plan_sub_queries(focuses)`` 用确定性逻辑直接把 focus 映射成 sub_queries
-        （典型 bailian/feishu 场景：plan_query 已做全局拆解，不需再来一次 LLM 规划）。
+        子类需要覆写 _build_xxx_agent 钩子来提供源特定的 LLM Agents。
+        若 _build_plan_only_agent 返回 None，此时子类必须覆写
+        ``_plan_sub_queries(focuses)`` 用确定性逻辑直接把 focus 映射成 sub_queries。
         """
         self.profile = profile
         self.cfg = cfg
-        self.plan_only = plan_only_agent
-        self.eval_only = eval_only_agent
-        self.plan_eval = plan_eval_agent
+        self.plan_only = self._build_plan_only_agent()
+        self.eval_only = self._build_eval_only_agent()
+        self.plan_eval = self._build_plan_eval_agent()
         self._execute_fn = execute_fn
         # 运行时注入：execute_sub_query 通过 target_focus 回查对应 Focus 对象
         self._current_focus_lookup: Dict[str, Focus] = {}
         self._sub_query_seq: int = 0
+
+    def _build_plan_only_agent(self) -> Optional[LlmAgent]:
+        """构造用于第一轮规划的 LLM Agent，子类覆写。"""
+        return None
+
+    def _build_eval_only_agent(self) -> LlmAgent:
+        """构造用于结果收尾评估的 LLM Agent，子类必须覆写。"""
+        raise NotImplementedError("SourceAgent must implement _build_eval_only_agent")
+
+    def _build_plan_eval_agent(self) -> Optional[LlmAgent]:
+        """构造用于多轮中间评估的 LLM Agent，子类按需覆写。"""
+        return None
 
     async def execute_sub_query(
         self, sub_query: str, target_focus: str,
@@ -381,6 +392,8 @@ class SourceAgent:
                 indexes=list(q.get("indexes") or []),
                 time_filter=q.get("time_filter"),
                 query_type=q.get("query_type"),
+                google_enable_fulltext=q.get("google_enable_fulltext"),
+                google_order_by=q.get("google_order_by"),
             )
             for q in out.get("sub_queries", [])
         ])
@@ -494,6 +507,8 @@ class SourceAgent:
                         indexes=list(q.get("indexes") or []),
                         time_filter=q.get("time_filter"),
                         query_type=q.get("query_type"),
+                        google_enable_fulltext=q.get("google_enable_fulltext"),
+                        google_order_by=q.get("google_order_by"),
                     )
                     for q in (pe_out.get("replan_queries") or [])
                 ]

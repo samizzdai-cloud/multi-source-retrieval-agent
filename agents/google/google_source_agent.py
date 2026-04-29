@@ -24,11 +24,7 @@ from tools.core.rerank import (
 )
 
 from agents.source_agent_base import SourceAgent, SubQuery
-from agents.sub_agents import (
-    build_eval_only_agent,
-    build_plan_eval_agent,
-    build_plan_only_agent,
-)
+from google.adk.agents.llm_agent import LlmAgent
 
 
 logger = logging.getLogger(__name__)
@@ -159,17 +155,46 @@ class GoogleSourceAgent(SourceAgent):
         super().__init__(
             profile=profile,
             cfg=cfg,
-            plan_only_agent=build_plan_only_agent(name="google_plan_only"),
-            eval_only_agent=build_eval_only_agent(
-                source_top_k=cfg.source_top_k, name="google_eval_only",
-            ),
-            plan_eval_agent=build_plan_eval_agent(
-                source_top_k=cfg.source_top_k, name="google_plan_eval",
-            ) if cfg.max_loops > 1 else None,
+        )
+
+    def _build_plan_only_agent(self) -> Optional[LlmAgent]:
+        from .google_retrieve_llm_build import build_google_plan_only_agent
+        return build_google_plan_only_agent()
+
+    def _build_eval_only_agent(self) -> LlmAgent:
+        from .google_retrieve_llm_build import build_google_eval_only_agent
+        return build_google_eval_only_agent(self.cfg.source_top_k)
+
+    def _build_plan_eval_agent(self) -> Optional[LlmAgent]:
+        if self.cfg.max_loops <= 1:
+            return None
+        from .google_retrieve_llm_build import build_google_plan_eval_agent
+        return build_google_plan_eval_agent(self.cfg.source_top_k)
+
+    def _source_query_rules_block(self) -> str:
+        """为大模型注入 Google 专属的检索规划指南。"""
+        return (
+            "【Google Workspace 专属规划指南】\n"
+            "Google 源支持强大的全文与标题检索切换，你需要根据用户的时效性诉求做出精准调度：\n"
+            "1. 默认情况下，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配（由 Google 算法按相关度评分）。\n"
+            "2. 如果用户在寻找近期刚刚编写、修改、阅读的文件（如：'最新的预算'、'刚看完的材料'），你应该设置 `google_enable_fulltext = false`（退化为标题检索），"
+            "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` (最近阅读) 或 `'modifiedTime desc'` (最近修改)。\n"
+            "3. 即使开启了 false，query 也要足够精确，不要带 '最新' 等口语化修饰词。\n"
+            "4. tags/indexes/time_filter/query_type 字段对 Google 源无效，始终留空。"
         )
 
     async def execute_sub_query_full(self, sq: SubQuery) -> List[ChunkEntry]:
         """v2 执行入口：接收完整 SubQuery，执行检索并进行跨文档的 chunk 重排。"""
+        
+        # 优先使用大模型在单条 SubQuery 中生成的动态配置，如果为 None 则使用 Agent 全局默认配置
+        enable_fulltext = sq.google_enable_fulltext if sq.google_enable_fulltext is not None else self.cfg.google_enable_fulltext_search
+        order_by = sq.google_order_by if sq.google_order_by is not None else self.cfg.google_order_by_mode
+
+        logger.info(
+            "[google] execute sub_query: %r, enable_fulltext: %s, order_by: %s", 
+            sq.query, enable_fulltext, order_by
+        )
+
         uc_list = await google_retrieve(
             query=sq.query,
             download_timeout=int(self.cfg.google_download_timeout_s),
@@ -178,6 +203,8 @@ class GoogleSourceAgent(SourceAgent):
             enable_gmail_attachments=self.cfg.google_enable_gmail_attachments,
             enable_sheet_filter=self.cfg.google_enable_sheet_filter,
             enable_excel_filter=self.cfg.google_enable_excel_filter,
+            enable_fulltext_search=enable_fulltext,
+            order_by_mode=order_by,
         )
         if not uc_list:
             return []

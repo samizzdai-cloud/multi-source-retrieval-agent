@@ -34,7 +34,7 @@ from tools.core.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, Sou
 from tools.core.query_planner import plan_query
 
 from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult
-from agents.sub_agents.eval_layer import build_eval_layer
+from tools.core.eval_layer import build_eval_layer
 
 
 logger = logging.getLogger(__name__)
@@ -439,9 +439,9 @@ def build_retrieve_agent(
     cfg = config or RetrieveConfig(enabled_sources=["bailian"])
     sc = source_config or SourceConfig(load_from_env=True)
 
-    from agents.bailian_source_agent import BailianSourceAgent
-    from agents.google_source_agent import GoogleSourceAgent
-    from agents.notion_source_agent import NotionSourceAgent
+    from agents.bailian.bailian_source_agent import BailianSourceAgent
+    from agents.google.google_source_agent import GoogleSourceAgent
+    from agents.notion.notion_source_agent import NotionSourceAgent
     from tools.bailian.bailian_retrieve import get_all_configured_indexes
 
     sources: Dict[str, SourceAgent] = {}
@@ -463,6 +463,16 @@ def build_retrieve_agent(
         elif src == "feishu":
             sources[src] = _build_feishu_source_agent(sa_cfg, sc, preset=cfg.preset)
         elif src == "google":
+            # 提前检查并获取 Google OAuth2 Token
+            try:
+                from google_workspace_tool.auth_utils import get_credentials
+                from tools.google.google_retrieve import _SCOPES
+                get_credentials(scopes=_SCOPES)
+                logger.info("Google credentials validated successfully.")
+            except Exception as e:
+                logger.error("Failed to initialize Google credentials: %s", e)
+                raise RuntimeError("Google Workspace auth failed. Please authorize in terminal.") from e
+
             # Google Workspace 检索（Drive 全文搜索 + 分块读取）
             sources[src] = GoogleSourceAgent(cfg=sa_cfg)
         elif src == "notion":
@@ -487,7 +497,7 @@ def _build_feishu_source_agent(
     sa_cfg: SourceAgentConfig, sc: SourceConfig, preset: str = "balanced",
 ) -> SourceAgent:
     """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。"""
-    from agents.feishu_source_agent import FeishuSourceAgent
+    from agents.feishu.feishu_source_agent import FeishuSourceAgent
     from tools.feishu.feishu_doc_pool import FeishuDocPool
     from tools.feishu.table_pool import TablePool
 

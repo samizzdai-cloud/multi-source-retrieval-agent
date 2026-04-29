@@ -41,13 +41,23 @@ class ThreadFetcherTool:
     """工具 2：会话详情拉取工具。"""
     
     @staticmethod
-    def execute(thread_id: str, creds: Any) -> Optional[Dict[str, Any]]:
+    def execute(thread_id: str, creds: Any, enable_attachments: bool = False) -> Optional[Dict[str, Any]]:
         service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
         try:
-            # format='full' 获取完整详情，包括所有 Message 和附件元数据
-            thread_data = service.users().threads().get(
-                userId='me', id=thread_id, format='full'
-            ).execute()
+            # 精细化过滤，如果不需要附件，使用 metadata 格式以提升性能
+            if enable_attachments:
+                # 即使是 full，也严格限制 fields
+                fields = "id,messages(id,snippet,payload/headers,payload/body,payload/mimeType,payload/parts(filename,mimeType,body/attachmentId,body/data,parts))"
+                thread_data = service.users().threads().get(
+                    userId='me', id=thread_id, format='full', fields=fields
+                ).execute()
+            else:
+                fields = "id,messages(id,snippet,payload/headers)"
+                thread_data = service.users().threads().get(
+                    userId='me', id=thread_id, format='metadata', 
+                    metadataHeaders=["Subject", "From", "Date", "To"],
+                    fields=fields
+                ).execute()
             return thread_data
         except HttpError as e:
             print(f"ThreadFetcherTool Error for {thread_id}: {e}")
@@ -91,8 +101,12 @@ class MessageParserTool:
         best_mime = 'text/plain' if body_texts['text/plain'] else 'text/html'
         raw_text = body_texts.get(best_mime, '')
         
-        body_text = cls._clean_text(raw_text, best_mime)
+        body_text = cls._clean_text(raw_text, best_mime) if raw_text else ""
         
+        # 如果 body_text 仍为空（例如 format='metadata' 时无正文），则退退回使用 snippet
+        if not body_text:
+            body_text = message.get('snippet', '')
+            
         return {
             "messageId": message.get('id', ''),
             "metadata": metadata,
@@ -332,7 +346,7 @@ def run_gmail_rag_pipeline(query: str, creds: Any, max_threads: int = 5, output_
     
     for idx, thread_id in enumerate(thread_ids, 1):
         print(f"2. 拉取 Thread 详情 ({idx}/{len(thread_ids)}): {thread_id}")
-        thread_data = ThreadFetcherTool.execute(thread_id, creds)
+        thread_data = ThreadFetcherTool.execute(thread_id, creds, enable_attachments=True)
         if not thread_data:
             continue
             
@@ -466,7 +480,7 @@ def run_gmail_chunk_pipeline(query: str, creds: Any, max_threads: int = 5, enabl
     all_chunks: List[GoogleChunk] = []
 
     for thread_id in thread_ids:
-        thread_data = ThreadFetcherTool.execute(thread_id, creds)
+        thread_data = ThreadFetcherTool.execute(thread_id, creds, enable_attachments=enable_attachments)
         if not thread_data:
             continue
 

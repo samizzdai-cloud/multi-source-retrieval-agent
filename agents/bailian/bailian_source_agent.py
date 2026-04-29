@@ -31,11 +31,7 @@ from tools.core.source_query_config import (
 )
 
 from agents.source_agent_base import Focus, SourceAgent, SubQuery
-from agents.sub_agents import (
-    build_eval_only_agent,
-    build_plan_eval_agent,
-    build_plan_only_agent,
-)
+from google.adk.agents.llm_agent import LlmAgent
 
 
 logger = logging.getLogger(__name__)
@@ -98,15 +94,22 @@ class BailianSourceAgent(SourceAgent):
         super().__init__(
             profile=profile,
             cfg=cfg,
-            plan_only_agent=build_plan_only_agent(name="bailian_plan_only"),
-            eval_only_agent=build_eval_only_agent(
-                source_top_k=cfg.source_top_k, name="bailian_eval_only",
-            ),
-            plan_eval_agent=build_plan_eval_agent(
-                source_top_k=cfg.source_top_k, name="bailian_plan_eval",
-            ) if cfg.max_loops > 1 else None,
         )
         self._allowed_indexes = list(allowed_indexes or [])
+
+    def _build_plan_only_agent(self) -> Optional[LlmAgent]:
+        from .bailian_retrieve_llm_build import build_bailian_plan_only_agent
+        return build_bailian_plan_only_agent()
+
+    def _build_eval_only_agent(self) -> LlmAgent:
+        from .bailian_retrieve_llm_build import build_bailian_eval_only_agent
+        return build_bailian_eval_only_agent(self.cfg.source_top_k)
+
+    def _build_plan_eval_agent(self) -> Optional[LlmAgent]:
+        if self.cfg.max_loops <= 1:
+            return None
+        from .bailian_retrieve_llm_build import build_bailian_plan_eval_agent
+        return build_bailian_plan_eval_agent(self.cfg.source_top_k)
 
     # ── 注入百炼专业规则到 plan_only prompt ────────────────────
     def _source_query_rules_block(self) -> str:

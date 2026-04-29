@@ -52,7 +52,7 @@ def _get_credentials():
     return get_credentials(scopes=_SCOPES)
 
 
-def _build_search_q(query: str) -> str:
+def _build_search_q(query: str, enable_fulltext: bool = True) -> str:
     """Build Drive search query with MIME type filter.
 
     Example:
@@ -61,7 +61,8 @@ def _build_search_q(query: str) -> str:
     mime_clauses = [f"mimeType='{mt}'" for mt in _SUPPORTED_MIMETYPES]
     mime_filter = " or ".join(mime_clauses)
     escaped = query.replace("'", "\\'")
-    return f"fullText contains '{escaped}' and ({mime_filter})"
+    search_field = "fullText" if enable_fulltext else "name"
+    return f"{search_field} contains '{escaped}' and ({mime_filter})"
 
 
 def _google_chunk_to_unified(gc, query: str = "") -> UnifiedChunk:
@@ -150,10 +151,27 @@ def _select_drive_candidates(query: str, files: List[dict], top_n: int = 5) -> L
 
     candidates = []
     for f in files:
+        # 构建丰富的摘要用于 LLM 排序
+        desc = f.get("description") or f.get("mimeType", "")
+        owners = ", ".join([o.get("displayName", "") for o in f.get("owners", []) if o.get("displayName")])
+        modified_time = f.get("modifiedTime") or f.get("createdTime", "Unknown")
+        viewed_time = f.get("viewedByMeTime", "Not viewed")
+        
+        summary_parts = [
+            f"Type: {f.get('mimeType', 'Unknown')}",
+            f"Desc: {desc}",
+        ]
+        if owners:
+            summary_parts.append(f"Owners: {owners}")
+        summary_parts.append(f"Modified: {modified_time}")
+        summary_parts.append(f"Last Viewed: {viewed_time}")
+        
+        rich_summary = " | ".join(summary_parts)
+
         candidates.append({
             "id": f.get("id"),
             "title": f.get("name", ""),
-            "summary": f.get("description") or f.get("mimeType", ""),
+            "summary": rich_summary,
             "_file": f
         })
 
@@ -185,6 +203,8 @@ def _sync_google_retrieve(
     native_api_timeout: int = 12,
     enable_sheet_filter: bool = False,
     enable_excel_filter: bool = False,
+    enable_fulltext_search: bool = True,
+    order_by_mode: Optional[str] = None,
 ) -> List[UnifiedChunk]:
     """同步版本的 google_retrieve（内部使用）。"""
     from google_workspace_tool.drive_search_tool import search_drive
@@ -197,8 +217,12 @@ def _sync_google_retrieve(
         logger.warning("google_retrieve: credentials not available: %s", e)
         return []
 
-    q = _build_search_q(query)
-    logger.info("google_retrieve: query=%r, drive_q=%.80r", query, q)
+    q = _build_search_q(query, enable_fulltext=enable_fulltext_search)
+    
+    # 仅在非全文搜索时允许自定义排序
+    order_by = order_by_mode if not enable_fulltext_search else None
+    
+    logger.info("google_retrieve: query=%r, drive_q=%.80r, order_by=%r", query, q, order_by)
 
     try:
         # 初次召回更多文件
@@ -206,6 +230,7 @@ def _sync_google_retrieve(
             q=q,
             page_size=min(max_results * 2, 100),
             max_pages=1,
+            order_by=order_by,
             supports_all_drives=True,
             include_items_from_all_drives=True,
             creds=creds,
@@ -283,6 +308,8 @@ async def google_retrieve(
     enable_gmail_attachments: bool = False,
     enable_sheet_filter: bool = False,
     enable_excel_filter: bool = False,
+    enable_fulltext_search: bool = True,
+    order_by_mode: Optional[str] = None,
     **kwargs,
 ) -> List[UnifiedChunk]:
     """Google Workspace 检索入口。
@@ -295,6 +322,8 @@ async def google_retrieve(
         native_api_timeout: 原生文件 API 请求等待时间（秒）
         enable_gmail: 是否启用 Gmail 检索
         enable_gmail_attachments: 是否在 Gmail 中检索提取附件
+        enable_fulltext_search: 是否启用 Drive 全文检索 (True: fullText contains, False: name contains)
+        order_by_mode: 非全文检索时的排序方式 (e.g. "modifiedTime desc", "viewedByMeTime desc")
 
     Returns:
         List[UnifiedChunk]
@@ -308,6 +337,8 @@ async def google_retrieve(
         native_api_timeout,
         enable_sheet_filter,
         enable_excel_filter,
+        enable_fulltext_search,
+        order_by_mode,
     )
 
     gmail_unified_chunks = []
