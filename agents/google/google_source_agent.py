@@ -173,30 +173,28 @@ class GoogleSourceAgent(SourceAgent):
 
     def _source_query_rules_block(self) -> str:
         """为大模型注入 Google 专属的检索规划指南。"""
-        return (
-            "【Google Workspace 专属规划指南】\n"
-            "Google 源支持强大的全文与标题检索切换，你需要根据用户的时效性诉求做出精准调度：\n"
-            "1. 默认情况下，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配（由 Google 算法按相关度评分）。\n"
-            "2. 如果用户在寻找近期刚刚编写、修改、阅读的文件（如：'最新的预算'、'刚看完的材料'），你应该设置 `google_enable_fulltext = false`（退化为标题检索），"
-            "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` (最近阅读) 或 `'modifiedTime desc'` (最近修改)。\n"
-            "3. 即使开启了 false，query 也要足够精确，不要带 '最新' 等口语化修饰词。\n"
-            "4. tags/indexes/time_filter/query_type 字段对 Google 源无效，始终留空。"
-        )
+        from tools.core.source_query_config import get_source_query_rules
+        return get_source_query_rules("google")
 
     async def execute_sub_query_full(self, sq: SubQuery) -> List[ChunkEntry]:
         """v2 执行入口：接收完整 SubQuery，执行检索并进行跨文档的 chunk 重排。"""
+        from tools.core.kw_generalization import generate_grouped_keywords
         
         # 优先使用大模型在单条 SubQuery 中生成的动态配置，如果为 None 则使用 Agent 全局默认配置
         enable_fulltext = sq.google_enable_fulltext if sq.google_enable_fulltext is not None else self.cfg.google_enable_fulltext_search
         order_by = sq.google_order_by if sq.google_order_by is not None else self.cfg.google_order_by_mode
 
+        # 生成二维泛化词组
+        keyword_groups = generate_grouped_keywords(sq.query)
+
         logger.info(
-            "[google] execute sub_query: %r, enable_fulltext: %s, order_by: %s", 
-            sq.query, enable_fulltext, order_by
+            "[google] execute sub_query: %r, keyword_groups: %s, enable_fulltext: %s, order_by: %s", 
+            sq.query, keyword_groups, enable_fulltext, order_by
         )
 
         uc_list = await google_retrieve(
             query=sq.query,
+            keyword_groups=keyword_groups,
             download_timeout=int(self.cfg.google_download_timeout_s),
             native_api_timeout=int(self.cfg.google_api_timeout_s),
             enable_gmail=self.cfg.google_enable_gmail,

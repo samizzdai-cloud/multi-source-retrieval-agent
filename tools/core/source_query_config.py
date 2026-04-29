@@ -132,7 +132,7 @@ def enforce_tag_caps(tags: List[str]) -> List[str]:
 
 SOURCE_QUERY_RULES: Dict[str, str] = {
     "feishu": (
-        "feishu query 规则：\n"
+        "【Feishu 专属规划指南】\n"
         "  · 格式：「品牌 + 国家(可选) + 核心动作词」，2-3 词，AND 精确匹配\n"
         "  · 长度：严格控制 5-15 字，过长会导致零召回\n"
         "  · 禁止：不包含具体月份（「12月」「Q1」），不包含过专业词（「邮件」「线下」「Google Ads」）\n"
@@ -140,14 +140,20 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
         "  · 动作词：从 [销售, 运营, 策略, KOL, 推广, 发布, 计划, 表现, 营销, 合作, 进度, 市场, 产品, 定价] 中选择\n"
         "  · 优先策略：先「品牌 + 动作词」（2词），必要时加国家（3词）\n"
         "  · tags 始终为 []、indexes 始终为 []\n"
-        "  · time_filter：相对时间词（今年/本月/本周/最新/近期）→ \"last_N_days\"；其余 → null\n"
-        "  · query_type（必填，影响 DocPool API/MCP 路由和召回量）：\n"
+        "  · time_filter：支持 \">YYYY-MM-DD\" 的格式或者相对时间词（如 \"last_30_days\"）。\n"
+        "  · 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 time_filter 设置为提前的时间点，例如 '>2025-09-01'。如果是某年终总结，可设置 '>2025-11-01'。如果不涉及时效，留空即可。\n"
+        "  · 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 'me'。\n"
+        "  · query_type（必填，影响底层路由和极速查询）：\n"
         "      - \"structured\"：focus 问的是结构化、可核对、可追踪的事实载体\n"
         "                     包括：指标/数字/排名/销量/GMV/转化率/库存，以及流程/项目管理/进度/\n"
         "                     owner/里程碑/任务状态/执行记录/排期/checklist\n"
-        "                   → top_n_docs=6, max_per_doc=5, max_output=22，全 Block API（表格开启）\n"
+        "                   → 将开启 Table API 深度解析表单和多标签页结构\n"
         "      - \"concept\" ：focus 问的是策略/原因/背景/定位/市场分析/方法论等文本理解\n"
-        "                   → top_n_docs=8, max_per_doc=5, max_output=25，concept-only 文档按预算走 MCP 分流\n"
+        "                   → concept-only 文档按预算走常规文档解析\n"
+        "      - \"personal_recent\"：focus 问的是极其空泛、与个人动作高度相关的近期查询\n"
+        "                     例如：「我最近做了啥」「我最近写的文档」「我的近期规划」\n"
+        "                     一旦判定为这类意图，必须使用此类型，并同时将 `author_filter` 设为 \"me\"。\n"
+        "                     系统将启动专属极速纯 MCP 检索通道，实现秒级回复。\n"
         "  · 如果同一 focus 既需要结构化事实又需要背景解释，必须拆成两条 sub_query；禁止输出混合类型\n"
         "  · 正确示例：「nubia 销售」「hypershell 策略」「nubia 日本 运营」"
     ),
@@ -170,11 +176,29 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
         "  · tags 始终为 []、indexes 始终为 []、time_filter 始终为 null"
     ),
     "google": (
-        "google query 规则：\n"
-        "  · 自然语言搜索，关键词或完整句子均可\n"
-        "  · tags 始终为 []、indexes 始终为 []、time_filter 始终为 null"
+        "【Google Workspace 专属规划指南】\n"
+        "Google 源支持强大的全文与标题检索切换以及高级过滤，你需要根据诉求做出精准调度：\n"
+        "1. 默认情况，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配。\n"
+        "2. 如果用户寻找近期修改或阅读的文件，设置 `google_enable_fulltext = false`（退化为纯标题检索），"
+        "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` 或 `'modifiedTime desc'`。\n"
+        "3. 【极其重要】你的 `query` 必须提取为 2 到 3 个最核心的名词或专有名词，必须用空格隔开（例如：'REDMAGIC 营销 上市'）。系统会在底层自动为你做同义词泛化，绝对不能输出长句。\n"
+        "4. 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 `time_filter` 设置为提前的时间点，例如 `'>2025-09-01'`。如果是某年终总结，可设置 `'>2025-11-01'`。如果不涉及时效，留空即可。\n"
+        "5. 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 `'me'`。"
     ),
 }
+
+def get_source_query_rules(source_name: str) -> str:
+    """动态获取格式化后的 source query rules。
+    
+    自动注入当前的时间等动态上下文变量供 LLM 高级推断使用。
+    """
+    import datetime
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    template = SOURCE_QUERY_RULES.get(source_name, "")
+    # 如果模板中存在 {now_str} 占位符，则进行格式化，否则原样返回
+    if "{now_str}" in template:
+        return template.format(now_str=now_str)
+    return template
 
 # 国家/地区缩写展开规则（bailian 专用）
 COUNTRY_ABBREV_RULE = (
@@ -188,20 +212,3 @@ COUNTRY_ABBREV_RULE = (
     "    JP/日本/Japan、DE/德国/Germany、FR/法国/France、IT/意大利/Italy"
 )
 
-# ── 品牌路由配置（供 Global Planner 参考）───────────────────────────────────
-
-BRAND_ROUTING: Dict[str, List[str]] = {
-    "nubia": ["feishu", "bailian"],
-    "REDMAGIC": ["feishu", "bailian"],  # 飞书有月会纪要/KOL进度表，bailian有结构化知识
-    "Hypershell": ["feishu", "bailian"],
-    "Nothing": ["feishu", "bailian"],
-}
-
-
-def get_brand_targets(query: str, default_targets: List[str]) -> List[str]:
-    """根据 query 中的品牌名返回应使用的 targets 列表。"""
-    query_lower = query.lower()
-    for brand, targets in BRAND_ROUTING.items():
-        if brand.lower() in query_lower:
-            return targets
-    return default_targets

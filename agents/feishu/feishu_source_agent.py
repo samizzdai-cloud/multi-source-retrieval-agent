@@ -55,7 +55,9 @@ def _strip_feishu_prefix(s: str) -> str:
 
 
 def _normalize_query_type(qt: Optional[str]) -> str:
-    return "concept" if qt == "concept" else "structured"
+    if qt in ("concept", "personal_recent"):
+        return qt
+    return "structured"
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -364,9 +366,10 @@ def _merge_doc_demands(batches: List[dict]) -> tuple:
 
 
 def _assign_doc_route_hints(doc_list: List[dict], *, min_block: int = 2) -> None:
-    """lite 模式：选择性分配 route_hint（block_api vs mcp）。
+    """选择性分配 route_hint（block_api vs mcp）。
 
     策略（优先级高→低）：
+    0. personal_recent 生成的强制全走 mcp
     1. multi-hit（被 2+ 个 sq 命中）→ block_api
     2. 每个 sq 的 rank-1 doc → block_api
     3. 保底：至少 min_block 篇走 block_api（按 score 降序补足）
@@ -374,6 +377,8 @@ def _assign_doc_route_hints(doc_list: List[dict], *, min_block: int = 2) -> None
     """
     block_keys: set = set()
     for c in doc_list:
+        if "personal_recent" in (c.get("selected_query_types") or []):
+            continue
         key = _candidate_doc_key(c)
         if c.get("_sq_hit_count", 1) >= 2 or c.get("_is_top1", False):
             block_keys.add(key)
@@ -632,8 +637,10 @@ class FeishuSourceAgent(SourceAgent):
 
     # ── plan_only prompt 注入 ─────────────────────────────────
     def _source_query_rules_block(self) -> str:
+        from tools.core.source_query_config import get_source_query_rules
+        base_rules = get_source_query_rules("feishu")
         return (
-            SOURCE_QUERY_RULES["feishu"]
+            base_rules
             + "\n\n提醒：tags / indexes 必须留空 []；time_filter 仅相对时间用 "
             + "\"last_N_days\"，季度/月份等具体时间点请并入 query 本身或留 null。"
             + "\n"
@@ -724,43 +731,70 @@ class FeishuSourceAgent(SourceAgent):
         # ── Step 1: 并行搜索 doc + table candidates ──────────
         async def _prepare_one(sq: SubQuery) -> dict:
             started = time.perf_counter()
-            qt = _normalize_query_type(sq.query_type or self._default_query_type)
+            qt = sq.query_type or self._default_query_type
+            if qt not in ("personal_recent", "structured", "concept"):
+                qt = "concept"
             focus_obj = self._current_focus_lookup.get(sq.target_focus)
             focus_text = focus_obj.text if focus_obj else sq.target_focus
 
-            # doc 和 table search 完全并行
-            doc_task = search_and_select_feishu_doc_candidates(
-                sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
-                query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
-                sub_query_id=sq.sub_query_id,
-            )
-            table_task: asyncio.Task = None
-            if qt == "structured":
-                table_task = search_and_select_feishu_table_candidates(
-                    sq.query, token=self._uat, page_size=20,
-                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
-                    sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
-                    direct_limit=3 if self._preset in ("lite", "balanced") else 6,
-                    wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
-                )
+            owner_ids = [getattr(self, "_current_open_id", None)] if sq.author_filter == "me" and getattr(self, "_current_open_id", None) else None
 
-            if table_task is not None:
-                doc_cands, table_cands = await asyncio.gather(
-                    doc_task, table_task, return_exceptions=True,
-                )
-                if isinstance(doc_cands, Exception):
-                    logger.warning("[feishu] doc search failed for %r: %s", sq.query, doc_cands)
-                    doc_cands = []
-                if isinstance(table_cands, Exception):
-                    logger.warning("[feishu] table search failed for %r: %s", sq.query, table_cands)
-                    table_cands = []
-            else:
+            if qt == "personal_recent":
+                # 个人极速通道：走专用的纯 MCP 搜索，并强制 route_hint="mcp"
                 try:
-                    doc_cands = await doc_task
+                    from feishu_read_tool.search import search_feishu_mcp_pure
+                    raw_result = await asyncio.to_thread(
+                        search_feishu_mcp_pure,
+                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
+                        owner_ids=owner_ids, sort_rule="EDIT_TIME"
+                    )
+                    doc_cands = raw_result.get("items", [])
+                    # 标记来源与强制 route_hint
+                    for rank, cand in enumerate(doc_cands, start=1):
+                        cand["selected_focus_ids"] = [sq.target_focus]
+                        cand["selected_sub_query_ids"] = [sq.sub_query_id]
+                        cand["selected_query_types"] = [qt]
+                        cand["candidate_rerank_score"] = max(0.0, 1.0 - (rank - 1) * 0.05)
+                        cand["candidate_rerank_rank"] = rank
+                        cand["route_hint"] = "mcp"
                 except Exception as e:
-                    logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
+                    logger.warning("[feishu] personal_recent search failed for %r: %s", sq.query, e)
                     doc_cands = []
                 table_cands = []
+            else:
+                # doc 和 table search 完全并行
+                doc_task = search_and_select_feishu_doc_candidates(
+                    sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
+                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                    sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
+                )
+                table_task: asyncio.Task = None
+                if qt == "structured":
+                    table_task = search_and_select_feishu_table_candidates(
+                        sq.query, token=self._uat, page_size=20,
+                        query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                        sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
+                        direct_limit=3 if self._preset in ("lite", "balanced") else 6,
+                        wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
+                    )
+
+                if table_task is not None:
+                    doc_cands, table_cands = await asyncio.gather(
+                        doc_task, table_task, return_exceptions=True,
+                    )
+                    if isinstance(doc_cands, Exception):
+                        logger.warning("[feishu] doc search failed for %r: %s", sq.query, doc_cands)
+                        doc_cands = []
+                    if isinstance(table_cands, Exception):
+                        logger.warning("[feishu] table search failed for %r: %s", sq.query, table_cands)
+                        table_cands = []
+                else:
+                    try:
+                        doc_cands = await doc_task
+                    except Exception as e:
+                        logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
+                        doc_cands = []
+                    table_cands = []
 
             logger.info("TIMING feishu.prepare_one sub_query_id=%s doc=%d table=%d ms=%.1f",
                          sq.sub_query_id or "unknown", len(doc_cands), len(table_cands),
@@ -983,30 +1017,46 @@ class FeishuSourceAgent(SourceAgent):
         # Step 1: 并行搜索 doc（直接取搜索结果，不做 candidate rerank）
         async def _search_docs_lite(sq: SubQuery) -> dict:
             started = time.perf_counter()
-            qt = _normalize_query_type(sq.query_type or self._default_query_type)
+            qt = sq.query_type or self._default_query_type
+            if qt not in ("personal_recent", "structured", "concept"):
+                qt = "concept"
             focus_obj = self._current_focus_lookup.get(sq.target_focus)
             focus_text = focus_obj.text if focus_obj else sq.target_focus
+            
+            owner_ids = [getattr(self, "_current_open_id", None)] if sq.author_filter == "me" and getattr(self, "_current_open_id", None) else None
+            
             doc_cands: List[dict] = []
             try:
-                from feishu_read_tool.search import search_feishu_docs
-                result = await asyncio.to_thread(
-                    search_feishu_docs, query=sq.query, count=20,
-                    uat=self._uat, time_filter=sq.time_filter,
-                )
-                raw = result.get("items", [])
-                # 零结果重试
-                if not raw:
-                    simplified = None
-                    try:
-                        from tools.feishu.feishu_retrieve import _simplify_feishu_query
-                        simplified = _simplify_feishu_query(sq.query)
-                    except Exception:
-                        pass
-                    if simplified:
-                        r2 = await asyncio.to_thread(
-                            search_feishu_docs, query=simplified, count=20, uat=self._uat,
-                        )
-                        raw = r2.get("items", [])
+                if qt == "personal_recent":
+                    from feishu_read_tool.search import search_feishu_mcp_pure
+                    raw_result = await asyncio.to_thread(
+                        search_feishu_mcp_pure,
+                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
+                        owner_ids=owner_ids, sort_rule="EDIT_TIME"
+                    )
+                    raw = raw_result.get("items", [])
+                else:
+                    from feishu_read_tool.search import search_feishu_docs
+                    result = await asyncio.to_thread(
+                        search_feishu_docs, query=sq.query, count=20,
+                        uat=self._uat, time_filter=sq.time_filter, owner_ids=owner_ids
+                    )
+                    raw = result.get("items", [])
+                    # 零结果重试
+                    if not raw:
+                        simplified = None
+                        try:
+                            from tools.feishu.feishu_retrieve import _simplify_feishu_query
+                            simplified = _simplify_feishu_query(sq.query)
+                        except Exception:
+                            pass
+                        if simplified:
+                            r2 = await asyncio.to_thread(
+                                search_feishu_docs, query=simplified, count=20, uat=self._uat,
+                                owner_ids=owner_ids
+                            )
+                            raw = r2.get("items", [])
+                            
                 # 直接用搜索结果，注入 lineage 字段
                 for rank, c in enumerate(raw, start=1):
                     c["selected_focus_ids"] = [sq.target_focus]

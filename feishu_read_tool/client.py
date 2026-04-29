@@ -341,6 +341,54 @@ class FeishuClient:
             )
             return {'row_count': 100, 'column_count': 26}
 
+    def get_files_metadata(self, tokens: List[str]) -> Dict[str, Dict]:
+        """批量获取文档或表格的元数据（主要用于时间过滤）。
+
+        Args:
+            tokens: 文件的 token 列表（可以是 doc_token, sheet_token, bitable_token 等）
+
+        Returns:
+            Dict[str, Dict]: token 映射到元数据字典（含 edit_time, create_time, owner_id 等）
+        """
+        if not tokens:
+            return {}
+
+        # 飞书 batch_query 接口每次最多查询 200 个，这里进行安全截断
+        tokens = tokens[:200]
+
+        url = "https://open.feishu.cn/open-apis/drive/v1/metas/batch_query"
+        headers = {
+            "Authorization": f"Bearer {self.user_access_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+
+        body = {
+            "request_docs": [{"docs_token": token, "docs_type": "doc"} for token in tokens],
+            "with_url": False
+        }
+
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=10)
+            if resp.status_code != 200:
+                logger.warning(f"batch_query failed with status {resp.status_code}: {resp.text}")
+                return {}
+
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning(f"batch_query failed with code {data.get('code')}: {data.get('msg')}")
+                return {}
+
+            metas = data.get("data", {}).get("metas", [])
+            result = {}
+            for meta in metas:
+                t = meta.get("docs_token")
+                if t:
+                    result[t] = meta
+            return result
+        except Exception as e:
+            logger.warning(f"batch_query exception: {e}")
+            return {}
+
     def get_wiki_node_info(self, wiki_node_token: str) -> Dict:
         """将 Wiki node token 转换为实际文档信息。
 

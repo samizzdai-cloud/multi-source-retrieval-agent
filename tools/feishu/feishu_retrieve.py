@@ -208,7 +208,9 @@ def _build_doc_candidate_bm25(query: str, candidate: dict) -> float:
 
 
 def _normalize_query_type(query_type: Optional[str]) -> str:
-    return "concept" if query_type == "concept" else "structured"
+    if query_type in ("concept", "personal_recent"):
+        return query_type
+    return "structured"
 
 
 def _annotate_selected_candidate(
@@ -700,6 +702,7 @@ async def search_and_select_feishu_doc_candidates(
     focus_id: str = "",
     focus_text: str = "",
     sub_query_id: str = "",
+    owner_ids: Optional[List[str]] = None,
 ) -> List[dict]:
     """执行 Feishu doc 搜索并返回当前 sub_query 选中的候选文档。
 
@@ -713,7 +716,7 @@ async def search_and_select_feishu_doc_candidates(
     try:
         # Step 1: 原 query 直接搜索（不做品牌变体并发）
         doc_result = await asyncio.to_thread(
-            search_feishu_docs, query=query, count=page_size, uat=token, time_filter=time_filter,
+            search_feishu_docs, query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
         )
         doc_candidates = doc_result.get("items", [])
 
@@ -723,7 +726,7 @@ async def search_and_select_feishu_doc_candidates(
             if simplified:
                 logger.info("feishu_retrieve: ZERO results, retry with simplified '%s'", simplified)
                 retry_result = await asyncio.to_thread(
-                    search_feishu_docs, query=simplified, count=page_size, uat=token, time_filter=time_filter,
+                    search_feishu_docs, query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
                 )
                 doc_candidates = retry_result.get("items", [])
 
@@ -733,7 +736,7 @@ async def search_and_select_feishu_doc_candidates(
             if variant:
                 logger.info("feishu_retrieve: still ZERO, try brand variant '%s'", variant)
                 variant_result = await asyncio.to_thread(
-                    search_feishu_docs, query=variant, count=page_size, uat=token, time_filter=time_filter,
+                    search_feishu_docs, query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
                 )
                 doc_candidates = variant_result.get("items", [])
 
@@ -746,6 +749,61 @@ async def search_and_select_feishu_doc_candidates(
             "TIMING feishu.doc_candidate_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
             sub_query_id or "unknown",
             _elapsed_ms(started),
+        )
+        return []
+
+    # Time Post-filtering logic for non-MCP items in Tables
+    if time_filter:
+        cutoff_timestamp = 0
+        if time_filter.startswith(">"):
+            date_str = time_filter[1:].strip()
+            try:
+                import datetime
+                dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                cutoff_timestamp = dt.timestamp()
+            except ValueError:
+                pass
+                
+        if cutoff_timestamp > 0:
+            # 提取所有需要验证时间的非 MCP token
+            tokens_to_check = []
+            for cand in parent_candidates:
+                if cand.get("_source") != "mcp":
+                    tok = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or ""
+                    if tok:
+                        tokens_to_check.append(tok)
+            
+            meta_map = {}
+            if tokens_to_check:
+                from feishu_read_tool.client import FeishuClient
+                client = FeishuClient(user_access_token=token)
+                meta_map = client.get_files_metadata(tokens_to_check)
+                
+            filtered_cands = []
+            for cand in parent_candidates:
+                if cand.get("_source") == "mcp":
+                    filtered_cands.append(cand)
+                else:
+                    tok = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or ""
+                    meta = meta_map.get(tok, {})
+                    edit_time_str = meta.get("edit_time", "0")
+                    try:
+                        edit_time = float(edit_time_str)
+                    except (ValueError, TypeError):
+                        edit_time = 0.0
+                    
+                    if edit_time >= cutoff_timestamp:
+                        filtered_cands.append(cand)
+                    else:
+                        logger.info("feishu_retrieve: filtered out table parent candidate %s (edit_time: %s < %s)", 
+                                    tok[:12], edit_time, cutoff_timestamp)
+                        
+            parent_candidates = filtered_cands
+
+    if not parent_candidates:
+        logger.info(
+            "TIMING feishu.table_parent_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
+            sub_query_id or "unknown", _elapsed_ms(started),
         )
         return []
 
@@ -783,6 +841,7 @@ async def search_and_select_feishu_table_candidates(
     table_pool: "Optional[object]" = None,
     direct_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
+    owner_ids: Optional[List[str]] = None,
 ) -> List[dict]:
     """执行 Feishu table 搜索，全局 child rerank，返回已选中子表的父文件候选。
 
@@ -805,6 +864,7 @@ async def search_and_select_feishu_table_candidates(
             query=query,
             count=page_size,
             uat=token,
+            owner_ids=owner_ids,
         )
     except Exception as e:
         logger.warning("feishu_retrieve table search failed: %s", e)
