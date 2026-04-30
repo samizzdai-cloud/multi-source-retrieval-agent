@@ -76,6 +76,7 @@ class SubQuery:
     query_type: Optional[str] = None
     google_enable_fulltext: Optional[bool] = None
     google_order_by: Optional[str] = None
+    author_filter: Optional[str] = None
     sub_query_id: str = ""
 
 
@@ -394,6 +395,7 @@ class SourceAgent:
                 query_type=q.get("query_type"),
                 google_enable_fulltext=q.get("google_enable_fulltext"),
                 google_order_by=q.get("google_order_by"),
+                author_filter=q.get("author_filter"),
             )
             for q in out.get("sub_queries", [])
         ])
@@ -509,6 +511,7 @@ class SourceAgent:
                         query_type=q.get("query_type"),
                         google_enable_fulltext=q.get("google_enable_fulltext"),
                         google_order_by=q.get("google_order_by"),
+                        author_filter=q.get("author_filter"),
                     )
                     for q in (pe_out.get("replan_queries") or [])
                 ]

@@ -8,7 +8,7 @@
   expand_keywords(words)             — 扩展关键词集，加入已知同义词
 """
 
-from typing import Dict, Set
+from typing import Dict, Set, List
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 主映射表：term (小写) → set of synonyms
@@ -274,3 +274,24 @@ def expand_keywords(words: Set[str], passes: int = 2) -> Set[str]:
             break
         expanded |= new_words
     return expanded
+
+def generate_grouped_keywords(query: str) -> List[List[str]]:
+    """
+    将一个按空格分隔的词汇字符串，转为二维泛化词组。
+    例如："nubia 销售" -> [["nubia"], ["销售", "sales", "销量", ...]]
+    这对于支持 (A or A') and (B or B') 逻辑的底层搜索引擎（如 Google Drive）非常有用。
+    """
+    if not query:
+        return []
+        
+    # 去除多余空格并分词
+    tokens = query.strip().split()
+    grouped = []
+    
+    for token in tokens:
+        # 对每个核心词进行同义词扩展
+        synonyms = expand_keywords({token})
+        # 转回列表结构
+        grouped.append(list(synonyms))
+        
+    return grouped

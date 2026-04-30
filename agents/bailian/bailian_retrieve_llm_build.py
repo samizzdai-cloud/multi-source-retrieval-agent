@@ -15,6 +15,7 @@ class SubQueryItem(BaseModel):
     target_focus: str = Field(..., description="该 sub_query 回答的 focus_id")
     tags: List[str] = Field(default_factory=list, description="L2 业务 tag + 时效 tag")
     indexes: List[str] = Field(default_factory=list, description="目标知识库名")
+    author_filter: Optional[str] = Field(default=None, description="作者或归属过滤，如果明确要求'我写的'等填'me'")
 
 class PlanOnlyOutput(BaseModel):
     sub_queries: List[SubQueryItem] = Field(..., description="按 focus 拆解出的子查询列表")

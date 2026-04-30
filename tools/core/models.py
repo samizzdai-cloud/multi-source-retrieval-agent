@@ -15,6 +15,7 @@ class SourceConfig:
     - 某个凭证为空 → 对应检索源不可用（不调用）
     """
     feishu_uat: str = ""
+    feishu_open_id: str = ""              # 飞书用户 open_id（用于 author_filter="me" / personal_recent）
     bailian_allowed_indexes: str = ""     # "nubia,hypershell"，空时代表不限制，允许所有注册的知识库
     dashscope_api_key: str = ""           # text-embedding-v4
     load_from_env: bool = True            # 开关：True 时空字段 fallback 到 env var
@@ -52,6 +53,7 @@ class AgentConfig:
 
     # ── 飞书凭证 ──────────────────────────────────────────────
     feishu_uat: str = ""                  # 空时走 FEISHU_UAT 环境变量
+    feishu_open_id: str = ""              # 用户 open_id；空时运行时通过 /authen/v1/user_info 兜底请求
 
     # ── 百炼凭证 ──────────────────────────────────────────────
     bailian_allowed_indexes: str = ""     # 允许查询的知识库白名单，如 "nubia,hypershell"，空时走全部
@@ -67,6 +69,7 @@ class AgentConfig:
         """转换为 SourceConfig（凭证配置）。"""
         return SourceConfig(
             feishu_uat=self.feishu_uat,
+            feishu_open_id=self.feishu_open_id,
             bailian_allowed_indexes=self.bailian_allowed_indexes,
             load_from_env=True,           # 空字段始终 fallback 到环境变量
         )

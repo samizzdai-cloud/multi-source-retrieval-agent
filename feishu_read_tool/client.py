@@ -10,10 +10,10 @@ import logging
 import time
 
 import requests
-import lark_oapi as lark
-from lark_oapi.api.docx.v1 import ListDocumentBlockRequest
-from lark_oapi.api.drive.v1 import ListFileRequest
-from lark_oapi.api.sheets.v3 import QuerySpreadsheetSheetRequest
+import lark_oapi as lark # pyright: ignore[reportMissingImports]
+from lark_oapi.api.docx.v1 import ListDocumentBlockRequest # pyright: ignore[reportMissingImports]
+from lark_oapi.api.drive.v1 import ListFileRequest # pyright: ignore[reportMissingImports]
+from lark_oapi.api.sheets.v3 import QuerySpreadsheetSheetRequest # pyright: ignore[reportMissingImports]
 from typing import List, Dict
 import json
 

@@ -13,8 +13,10 @@ from tools.core.llm_contracts import MODEL, Decision, TierAssignment, build_eval
 class SubQueryItem(BaseModel):
     query: str = Field(..., description="子查询原文")
     target_focus: str = Field(..., description="该 sub_query 回答的 focus_id")
-    google_enable_fulltext: Optional[bool] = Field(default=None, description="是否开启全文检索")
+    google_enable_fulltext: Optional[bool] = Field(default=None, description="是否启用全文检索")
     google_order_by: Optional[str] = Field(default=None, description="排序模式")
+    time_filter: Optional[str] = Field(default=None, description="符合 Google 语法的 ISO 日期过滤条件")
+    author_filter: Optional[str] = Field(default=None, description="作者过滤，如'me'")
 
 class PlanOnlyOutput(BaseModel):
     sub_queries: List[SubQueryItem] = Field(..., description="按 focus 拆解出的子查询列表")

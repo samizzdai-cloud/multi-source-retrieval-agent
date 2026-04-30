@@ -20,7 +20,6 @@ from typing import List, Optional
 
 from tools.core.llm_client import call_llm, parse_json_response
 from tools.core.models import PlanFocus, QueryPlan
-from tools.core.source_query_config import BRAND_ROUTING
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +38,7 @@ MAX_FOCUSES_TOTAL = 6
 _SOURCE_PROFILES_BASE = {
     "feishu": "飞书文档：团队内部沉淀的运营材料、会议纪要、项目文档、表格数据。",
     "bailian": "百炼知识库：公司级结构化知识（产品、渠道、合规、市场情报等）向量检索。",
-    "google": "Google Drive：跨团队协作文档（当前未启用检索）。",
+    "google": "Google Workspace：沉淀某电竞消费电子品牌的硬件产品与营销业务内容，涵盖培训、时间表、话术及视觉设计资产等协作文件。",
     "notion": "Notion：外部合作/公共知识文档（当前未启用检索）。",
 }
 
@@ -61,25 +60,20 @@ _FOCUS_GUIDE = """每个 focus 必须满足：
 
 def _build_source_profiles_block(
     available_sources: List[str], 
-    bailian_allowed_indexes: Optional[List[str]] = None
+    bailian_allowed_indexes: Optional[List[str]] = None,
+    google_spaces: Optional[List[str]] = None
 ) -> str:
     lines = []
     for s in available_sources:
         desc = _SOURCE_PROFILES_BASE.get(s, '(未知源)')
-        if s == "bailian" and bailian_allowed_indexes:
-            desc += f"（当前可用限制：{', '.join(bailian_allowed_indexes)}）"
+        if s == "bailian" and bailian_allowed_indexes is not None:
+            desc += f"（当前可用知识库项目：{', '.join(bailian_allowed_indexes)}）"
+        if s == "google" and google_spaces is not None:
+            # 只展示前 15 个以防过长
+            display_spaces = google_spaces[:15]
+            suffix = "..." if len(google_spaces) > 15 else ""
+            desc += f"\n    [可见顶级空间] {', '.join(display_spaces)}{suffix}"
         lines.append(f"  - {s}: {desc}")
-    return "\n".join(lines)
-
-
-def _build_brand_routing_block(available_sources: List[str]) -> str:
-    """feishu + bailian 同时可用时，提供品牌路由建议（仅建议，LLM 可自由决定）。"""
-    if "feishu" not in available_sources or "bailian" not in available_sources:
-        return ""
-    lines = ["品牌路由建议（基于历史召回质量；LLM 最终自由裁量）："]
-    for brand, routes in BRAND_ROUTING.items():
-        keep = [r for r in routes if r in available_sources]
-        lines.append(f"  - {brand}: {keep}")
     return "\n".join(lines)
 
 
@@ -155,6 +149,7 @@ def plan_query(
     query: str,
     available_sources: List[str],
     bailian_allowed_indexes: Optional[List[str]] = None,
+    google_spaces: Optional[List[str]] = None,
     session_context: str = "",
 ) -> QueryPlan:
     """把用户 query 拆成 flat focuses（每个 focus 独立带 targets）。
@@ -162,8 +157,11 @@ def plan_query(
     v2.1：FG 概念下线，直接输出 ``focuses[{text, targets}]``。
     输出 ``QueryPlan`` 只含：``original_query`` + ``focuses``。
     """
-    profiles_block = _build_source_profiles_block(available_sources, bailian_allowed_indexes)
-    brand_block = _build_brand_routing_block(available_sources)
+    profiles_block = _build_source_profiles_block(
+        available_sources, 
+        bailian_allowed_indexes=bailian_allowed_indexes,
+        google_spaces=google_spaces
+    )
 
     prompt = f"""你是多源检索的「全局规划器」。职责只有两件事：
 1. **语义拆解**：把用户 query 拆成若干个 flat focuses（可独立评估的检索维度）。
@@ -172,10 +170,8 @@ def plan_query(
 用户 query：「{query}」
 上下文：{session_context or "无"}
 
-可用检索源：
+可用检索源（包含了当前环境动态解析出的可访问清单）：
 {profiles_block}
-
-{brand_block}
 
 ## Focus 质量要求
 
@@ -193,11 +189,12 @@ def plan_query(
 ## 源路由规则（每个 focus 独立判断）
 
 - ``targets`` 从 {json.dumps(available_sources)} 中选，不能为空
-- 判断依据：
-  · 内部运营事实 / 表格数据 / SOP / 会议纪要 / 项目材料 → feishu
-  · 跨文档概念 / 语义推理 / 品牌长文档 / 市场情报 → bailian
-  · 两个源都能**独立**贡献有价值信息（非互为冗余）→ 同时路由
-- 用户显式指定源（"在飞书里找"、"#bailian"）时，targets 只保留该源
+- 判断依据：根据提供的具体清单（如 Bailian 可用项目、Google 可见文件夹）或 Feishu 的普适性来动态决定。
+  · 内部运营事实 / 结构化表格 / 日常 SOP / 会议纪要 / 通用协作材料 → 优先 `feishu`
+  · 若发现 Query 中的实体/项目名称正好在 `bailian` 的可用知识库列表中，或者涉及跨文档语义推理 / 深度市场情报 → 分发给 `bailian`
+  · 若发现 Query 中的业务名称、团队名称正好在 `google` 的可见顶级空间/文件夹列表中，或是外部协作资料 → 分发给 `google`
+  · 多个源都能**独立**贡献有价值信息（非互为冗余）时 → 同时路由（如 `["feishu", "bailian"]`）
+- 最高优先级：用户显式指定源（如 "在飞书里找"、"#bailian"、"搜一下Drive"）时，targets 仅保留用户指定的源。
 
 ## 输出（严格 JSON，不要额外说明）
 

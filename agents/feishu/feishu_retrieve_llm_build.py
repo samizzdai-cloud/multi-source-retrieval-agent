@@ -11,10 +11,11 @@ from tools.core.llm_contracts import MODEL, Decision, TierAssignment, build_eval
 # ============================================================================
 
 class SubQueryItem(BaseModel):
-    query: str = Field(..., description="子查询原文")
+    query: str = Field(..., description="子查询原文，如果查询极其空泛可留空或补充通用词汇")
     target_focus: str = Field(..., description="该 sub_query 回答的 focus_id")
-    time_filter: Optional[str] = Field(default=None, description="feishu 专用：'last_N_days' 或 None")
-    query_type: Optional[Literal["structured", "concept"]] = Field(default=None, description="feishu 专用：structured=结构化, concept=概念")
+    time_filter: Optional[str] = Field(default=None, description="ISO 日期格式（如 '>2025-01-01'）或相对时间（如 'last_30_days'）")
+    query_type: Optional[Literal["structured", "concept", "personal_recent"]] = Field(default=None, description="查询模式分类")
+    author_filter: Optional[str] = Field(default=None, description="作者过滤，如'me'")
 
 class PlanOnlyOutput(BaseModel):
     sub_queries: List[SubQueryItem] = Field(..., description="按 focus 拆解出的子查询列表")
@@ -46,13 +47,14 @@ PLAN_ONLY_INSTRUCTION = """你是检索规划器。针对给定的 source，按 
 - sub_queries 总数不超过给定的上限
 - 每条 sub_query 必填：query, target_focus
 - 每条 sub_query 选填：
-    · time_filter: 取值如 "last_30_days" 或 null
-    · query_type: 取值 "structured" 或 "concept" 
+    · time_filter: 取值如 ">2025-01-01" 或 "last_30_days" 或 null
+    · query_type: 取值 "structured", "concept" 或 "personal_recent"
+    · author_filter: 取值 "me" 或 null
 
 输出示例（飞书源）：
 {"sub_queries": [
   {"query": "nubia 英国 销售", "target_focus": "focus_0", "time_filter": null, "query_type": "structured"},
-  {"query": "nubia 策略", "target_focus": "focus_1", "time_filter": "last_30_days", "query_type": "concept"}
+  {"query": "复盘 总结", "target_focus": "focus_1", "time_filter": "last_30_days", "query_type": "personal_recent", "author_filter": "me"}
 ]}
 """
 

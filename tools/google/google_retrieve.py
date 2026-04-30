@@ -52,17 +52,70 @@ def _get_credentials():
     return get_credentials(scopes=_SCOPES)
 
 
-def _build_search_q(query: str, enable_fulltext: bool = True) -> str:
-    """Build Drive search query with MIME type filter.
+def _build_search_q(
+    query: str, 
+    keyword_groups: Optional[List[List[str]]] = None, 
+    enable_fulltext: bool = True,
+    time_filter: Optional[str] = None,
+    author_filter: Optional[str] = None,
+) -> str:
+    """Build Drive search query with MIME type filter, keyword groups, and advanced filters.
 
-    Example:
-        fullText contains 'budget' and (mimeType='application/vnd.google-apps.document' or ...)
+    If keyword_groups is provided, it builds a grouped query:
+    e.g. ((fullText contains 'A' or fullText contains 'A_syn') and (fullText contains 'B')) and (mimeType=...)
     """
     mime_clauses = [f"mimeType='{mt}'" for mt in _SUPPORTED_MIMETYPES]
     mime_filter = " or ".join(mime_clauses)
-    escaped = query.replace("'", "\\'")
     search_field = "fullText" if enable_fulltext else "name"
-    return f"{search_field} contains '{escaped}' and ({mime_filter})"
+    
+    base_query_filter = ""
+    if keyword_groups:
+        group_clauses = []
+        for group in keyword_groups:
+            if not group:
+                continue
+            # 组内使用 OR
+            term_clauses = []
+            for term in group:
+                escaped = term.replace("'", "\\'")
+                term_clauses.append(f"{search_field} contains '{escaped}'")
+            group_clauses.append("(" + " or ".join(term_clauses) + ")")
+        
+        # 组间使用 AND
+        if group_clauses:
+            base_query_filter = "(" + " and ".join(group_clauses) + ")"
+            
+    if not base_query_filter:
+        # Fallback 到传统的完整字符串匹配
+        escaped = query.replace("'", "\\'")
+        base_query_filter = f"({search_field} contains '{escaped}')"
+
+    filters = [base_query_filter, f"({mime_filter})"]
+    
+    # 注入高级 Time 过滤（比如 >2025-09-01）
+    if time_filter:
+        time_filter = time_filter.strip()
+        # 简单解析支持的操作符：>, <, >=, <=, =
+        import re
+        match = re.match(r"^([><=]+)\s*(.*)$", time_filter)
+        if match:
+            op, date_str = match.groups()
+            # 确保变成 ISO 时间戳，追加 T00:00:00
+            if "T" not in date_str:
+                date_str = f"{date_str}T00:00:00"
+            filters.append(f"(modifiedTime {op} '{date_str}' or createdTime {op} '{date_str}')")
+        else:
+            # 如果没有操作符，默认使用 > (大于等于当天)
+            date_str = time_filter
+            if "T" not in date_str:
+                date_str = f"{date_str}T00:00:00"
+            filters.append(f"(modifiedTime > '{date_str}' or createdTime > '{date_str}')")
+
+    # 注入 Owner / Author 过滤
+    if author_filter and author_filter.lower() == "me":
+        filters.append("('me' in owners or 'me' in writers)")
+
+    return " and ".join(filters)
 
 
 def _google_chunk_to_unified(gc, query: str = "") -> UnifiedChunk:
@@ -197,6 +250,9 @@ def _select_drive_candidates(query: str, files: List[dict], top_n: int = 5) -> L
 
 def _sync_google_retrieve(
     query: str,
+    keyword_groups: Optional[List[List[str]]] = None,
+    time_filter: Optional[str] = None,
+    author_filter: Optional[str] = None,
     max_results: int = 20,
     max_chunk_tokens: int = 800,
     download_timeout: int = 12,
@@ -217,7 +273,13 @@ def _sync_google_retrieve(
         logger.warning("google_retrieve: credentials not available: %s", e)
         return []
 
-    q = _build_search_q(query, enable_fulltext=enable_fulltext_search)
+    q = _build_search_q(
+        query, 
+        keyword_groups=keyword_groups, 
+        enable_fulltext=enable_fulltext_search,
+        time_filter=time_filter,
+        author_filter=author_filter,
+    )
     
     # 仅在非全文搜索时允许自定义排序
     order_by = order_by_mode if not enable_fulltext_search else None
@@ -300,6 +362,9 @@ def _sync_google_retrieve(
 
 async def google_retrieve(
     query: str,
+    keyword_groups: Optional[List[List[str]]] = None,
+    time_filter: Optional[str] = None,
+    author_filter: Optional[str] = None,
     max_results: int = 10,
     max_chunk_tokens: int = 800,
     download_timeout: int = 12,
@@ -331,6 +396,9 @@ async def google_retrieve(
     drive_chunks = await asyncio.to_thread(
         _sync_google_retrieve,
         query,
+        keyword_groups,
+        time_filter,
+        author_filter,
         max_results,
         max_chunk_tokens,
         download_timeout,

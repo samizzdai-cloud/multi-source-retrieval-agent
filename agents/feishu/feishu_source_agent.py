@@ -713,11 +713,45 @@ class FeishuSourceAgent(SourceAgent):
         self._log_table_roi(chunks)
         return chunks
 
+    # ── lazy user identity：只在 personal_recent 且未配置 open_id 时请求 ──
+    async def _ensure_user_identity(self, sub_queries: List[SubQuery]) -> None:
+        """按需获取 open_id：仅当 sub_queries 含 personal_recent 且未配置时发起 API 请求。"""
+        has_personal_recent = any(
+            (sq.query_type or self._default_query_type) == "personal_recent"
+            for sq in sub_queries
+        )
+        if not has_personal_recent:
+            return
+        if getattr(self, "_current_open_id", None):
+            return
+
+        uat = self._uat
+        if not uat:
+            logger.warning("[feishu] personal_recent requires open_id but no UAT available")
+            return
+
+        try:
+            from feishu_read_tool.client import _auth_headers
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    "https://open.feishu.cn/open-apis/authen/v1/user_info",
+                    headers=_auth_headers(uat),
+                    timeout=5.0,
+                )
+                data = resp.json()
+                if data.get("code") == 0:
+                    self._current_open_id = data["data"].get("open_id")
+                    logger.info("[feishu] Lazy fetched open_id for personal_recent")
+        except Exception as e:
+            logger.warning("[feishu] Failed to fetch open_id for personal_recent: %s", e)
+
     # ── 批处理路径：doc/table 完全并行流水线 ─────────────────
     async def _execute_batch(
         self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry],
     ) -> None:
         batch_started = time.perf_counter()
+        await self._ensure_user_identity(sub_queries)
         if self._doc_pool is None:
             raise RuntimeError("FeishuSourceAgent requires doc_pool; ensure FEISHU_UAT is configured")
 
@@ -733,6 +767,9 @@ class FeishuSourceAgent(SourceAgent):
             started = time.perf_counter()
             qt = sq.query_type or self._default_query_type
             if qt not in ("personal_recent", "structured", "concept"):
+                qt = "concept"
+            # lite preset 不启动 table 流水线，structured 降级为 concept 以保持行为一致
+            if self._preset == "lite" and qt == "structured":
                 qt = "concept"
             focus_obj = self._current_focus_lookup.get(sq.target_focus)
             focus_text = focus_obj.text if focus_obj else sq.target_focus
@@ -1012,6 +1049,7 @@ class FeishuSourceAgent(SourceAgent):
         """lite 模式：每个 sq 独立搜索 doc，跨 sq 去重后取前 8 篇，
         全部强制 MCP 路由，无 candidate rerank，无 table 流水线。
         """
+        await self._ensure_user_identity(sub_queries)
         _LITE_DOC_CAP = 8  # 跨 sq 去重后最多提交的 doc 数
 
         # Step 1: 并行搜索 doc（直接取搜索结果，不做 candidate rerank）
@@ -1019,6 +1057,9 @@ class FeishuSourceAgent(SourceAgent):
             started = time.perf_counter()
             qt = sq.query_type or self._default_query_type
             if qt not in ("personal_recent", "structured", "concept"):
+                qt = "concept"
+            # lite preset 不启动 table 流水线，structured 降级为 concept 以保持行为一致
+            if self._preset == "lite" and qt == "structured":
                 qt = "concept"
             focus_obj = self._current_focus_lookup.get(sq.target_focus)
             focus_text = focus_obj.text if focus_obj else sq.target_focus

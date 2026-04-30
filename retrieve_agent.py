@@ -47,6 +47,7 @@ def _prepare_focuses(
     query: str, 
     available_sources: List[str], 
     bailian_allowed_indexes: Optional[List[str]] = None,
+    google_spaces: Optional[List[str]] = None,
 ) -> List[Focus]:
     """调用 query_planner，把 ``QueryPlan.focuses`` 映射到 runtime ``Focus``。
 
@@ -62,6 +63,7 @@ def _prepare_focuses(
             query, 
             available_sources, 
             bailian_allowed_indexes=bailian_allowed_indexes,
+            google_spaces=google_spaces,
             session_context="",
         )
     except Exception as e:
@@ -348,7 +350,54 @@ class RetrieveAgent(BaseAgent):
             # self.sources["bailian"] 是 BailianSourceAgent 的实例
             bailian_allowed = getattr(self.sources["bailian"], "_allowed_indexes", None)
             
-        focuses = await asyncio.to_thread(_prepare_focuses, query, enabled, bailian_allowed)
+        # 并发获取各个 Source Agent 需要的全局前置上下文
+        google_spaces = None
+
+        async def fetch_google_spaces():
+            from google_workspace_tool.auth_utils import get_credentials
+            from tools.google.google_retrieve import _SCOPES
+            from google_workspace_tool.drive_space_lister import list_drive_spaces_async
+            creds = get_credentials(scopes=_SCOPES)
+            spaces_info = await list_drive_spaces_async(
+                creds=creds,
+                include_shared_drives=True,
+                include_shared_folders=True,
+                include_my_drive_folders=True
+            )
+            return [s["name"] for s in spaces_info if s.get("name")]
+
+        # feishu open_id: 配置优先注入；无配置时不请求，lazy 到 FeishuSourceAgent 内部按需获取
+        if "feishu" in self.sources:
+            configured_open_id = self.source_config.get("feishu_open_id", "FEISHU_OPEN_ID")
+            if configured_open_id:
+                self.sources["feishu"]._current_open_id = configured_open_id
+                logger.info("RetrieveAgent: Injected configured Feishu open_id")
+
+        tasks = []
+        if "google" in self.sources:
+            tasks.append(fetch_google_spaces())
+        else:
+            async def null_task(): return None
+            tasks.append(null_task())
+
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            if not isinstance(results[0], Exception):
+                google_spaces = results[0]
+                if google_spaces is not None:
+                    logger.info("RetrieveAgent: Fetched %d google spaces for planner context", len(google_spaces))
+            else:
+                logger.warning("RetrieveAgent: Failed to fetch google spaces: %s", results[0])
+        except Exception as e:
+            logger.warning("RetrieveAgent: Gather pre-fetch failed: %s", e)
+            
+        focuses = await asyncio.to_thread(
+            _prepare_focuses, 
+            query, 
+            enabled, 
+            bailian_allowed,
+            google_spaces
+        )
         logger.info(
             "TIMING retrieve.prepare_focuses focuses=%d ms=%.1f",
             len(focuses),

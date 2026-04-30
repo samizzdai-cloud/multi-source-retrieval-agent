@@ -69,18 +69,17 @@ SOURCE_PROFILES: Dict[str, SourceProfile] = {
     ),
     "google": SourceProfile(
         source="google",
-        description="Google 搜索——公开互联网资讯、行业报告、竞品动态",
+        description="Google Workspace——该环境沉淀某电竞消费电子品牌的硬件产品与营销业务内容，文件涵盖培训文档、上市时间表、问答话术及视觉设计资产，适合回答关于智能终端规格卖点、市场发布节奏、营销物料分布及电商设计规范等问题。",
         strengths=[
-            "实时性强（新闻 / 发布会）",
-            "外部视角（行业分析 / 媒体评论）",
+            "跨部门共享资料、团队协作文档（Docs/Sheets/Slides）",
+            "外部供应商或代理商共享的物料",
         ],
         weaknesses=[
-            "无法访问内部私域资料",
-            "结果嘈杂，需要 query 足够精确",
+            "结果可能比较嘈杂，依赖文件名或全文匹配",
         ],
         sub_query_hints=[
-            "使用英文专有名词可提升精度",
-            "加时间 / 地区限定（'2025 China market'）",
+            "使用强特征的英文专有名词或项目代号",
+            "根据提供的可用空间列表 (google_spaces) 定向检索",
         ],
     ),
     "notion": SourceProfile(

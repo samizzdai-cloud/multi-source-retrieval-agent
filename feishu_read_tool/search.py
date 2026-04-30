@@ -94,6 +94,7 @@ def _search_direct_non_docx(
     count: int = 10,
     token: str = "",
     tenant_domain: str = "",
+    owner_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """调用 /suite/docs-api/search/object 搜索 sheet/bitable/slides/file 类型。
 
@@ -104,11 +105,13 @@ def _search_direct_non_docx(
         "Content-Type": "application/json; charset=utf-8",
     }
     body = {
-        "search_key": query,
+        "search_key": query or "",
         "count": min(count, 50),
         "offset": 0,
         "docs_types": ["sheet", "bitable"],
     }
+    if owner_ids:
+        body["owner_ids"] = owner_ids
     try:
         resp = requests.post(FEISHU_DIRECT_SEARCH_URL, headers=headers, json=body, timeout=15)
         resp.raise_for_status()
@@ -337,11 +340,65 @@ def _search_wiki(
 
 # ── 按类型拆分的搜索接口（供 feishu_retrieve 分阶段调用）──────────────────
 
+def search_feishu_mcp_pure(
+    query: str,
+    count: int = 10,
+    uat: str = "",
+    time_filter: Optional[str] = None,
+    owner_ids: Optional[List[str]] = None,
+    sort_rule: Optional[str] = None,
+) -> Dict[str, Any]:
+    """纯 MCP 搜索接口（用于 personal_recent 通道极速拉取）。"""
+    token = uat or FEISHU_UAT
+    if not token:
+        return {"status": "error", "message": "未配置 FEISHU_UAT"}
+
+    filters: Dict[str, Any] = {}
+    if time_filter:
+        filters["open_time_relative"] = time_filter
+    if owner_ids:
+        filters["owners"] = owner_ids
+    if sort_rule:
+        filters["sort_rule"] = sort_rule
+
+    page: Dict[str, Any] = {"size": count}
+    arguments: Dict[str, Any] = {"query": query or "", "page": page}
+    if filters:
+        arguments["filters"] = filters
+        
+    payload = {
+        "jsonrpc": "2.0", "method": "tools/call", "id": 1,
+        "params": {"name": "search-doc", "arguments": arguments},
+    }
+    mcp_headers = {
+        "Content-Type": "application/json",
+        "X-Lark-MCP-UAT": token,
+        "X-Lark-MCP-Allowed-Tools": "search-doc",
+    }
+    try:
+        resp = requests.post(FEISHU_MCP_ENDPOINT, headers=mcp_headers, json=payload, timeout=15)
+        resp.raise_for_status()
+        content = resp.json().get("result", {}).get("content", [])
+        raw = content[0].get("text", "") if content else ""
+        inner = json.loads(raw) if raw else {}
+        if inner.get("code") != 0:
+            return {"status": "success", "items": []}
+        items = inner.get("data", {}).get("items", [])
+        for item in items:
+            item.setdefault("_source", "mcp")
+            item.setdefault("summary", item.get("summary", ""))
+        return {"status": "success", "items": items}
+    except Exception as e:
+        logger.warning("_mcp_call pure failed: %s", e)
+        return {"status": "success", "items": []}
+
+
 def search_feishu_docs(
     query: str,
     count: int = 20,
     uat: str = "",
     time_filter: Optional[str] = None,
+    owner_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """文档搜索：MCP + Wiki doc 类，按 title 去重（MCP 优先）。
 
@@ -352,45 +409,12 @@ def search_feishu_docs(
     if not token:
         return {"status": "error", "message": "未配置 FEISHU_UAT"}
 
-    # MCP 搜索 (复用 search_feishu_hybrid 中的 _mcp_call 逻辑)
-    def _mcp_call():
-        filters: Dict[str, Any] = {}
-        if time_filter:
-            filters["open_time_relative"] = time_filter
-        page: Dict[str, Any] = {"size": count}
-        arguments: Dict[str, Any] = {"query": query, "page": page}
-        if filters:
-            arguments["filters"] = filters
-        payload = {
-            "jsonrpc": "2.0", "method": "tools/call", "id": 1,
-            "params": {"name": "search-doc", "arguments": arguments},
-        }
-        mcp_headers = {
-            "Content-Type": "application/json",
-            "X-Lark-MCP-UAT": token,
-            "X-Lark-MCP-Allowed-Tools": "search-doc",
-        }
-        try:
-            resp = requests.post(FEISHU_MCP_ENDPOINT, headers=mcp_headers, json=payload, timeout=15)
-            resp.raise_for_status()
-            content = resp.json().get("result", {}).get("content", [])
-            raw = content[0].get("text", "") if content else ""
-            inner = json.loads(raw) if raw else {}
-            if inner.get("code") != 0:
-                return []
-            items = inner.get("data", {}).get("items", [])
-            for item in items:
-                item.setdefault("_source", "mcp")
-                item.setdefault("summary", item.get("summary", ""))
-            return items
-        except Exception:
-            return []
-
     # 并行: MCP ∥ Wiki
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        fut_mcp = ex.submit(_mcp_call)
+        fut_mcp = ex.submit(search_feishu_mcp_pure, query, count, token, time_filter, owner_ids)
         fut_wiki = ex.submit(_search_wiki, query, count, token)
-        mcp_items = fut_mcp.result()
+        mcp_res = fut_mcp.result()
+        mcp_items = mcp_res.get("items", []) if mcp_res else []
         wiki_all = fut_wiki.result()
 
     # Wiki 中只取文档类 (DOC/DOCX)
@@ -433,6 +457,7 @@ def search_feishu_tables(
     query: str,
     count: int = 20,
     uat: str = "",
+    owner_ids: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """表格搜索：Direct API (sheet+bitable) + Wiki table 类。
 
@@ -448,7 +473,7 @@ def search_feishu_tables(
 
     # 并行: Direct ∥ Wiki
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        fut_direct = ex.submit(_search_direct_non_docx, query, count, token, tenant_domain)
+        fut_direct = ex.submit(_search_direct_non_docx, query, count, token, tenant_domain, owner_ids)
         fut_wiki = ex.submit(_search_wiki, query, count, token)
         direct_items = fut_direct.result()
         wiki_all = fut_wiki.result()
