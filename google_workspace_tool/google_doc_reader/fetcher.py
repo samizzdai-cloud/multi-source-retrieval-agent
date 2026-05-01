@@ -76,10 +76,16 @@ class BatchDocFetcher:
         self._include_tabs_content = include_tabs_content
 
     def fetch_one(self, doc_id: str) -> dict:
-        """获取单个文档，带重试逻辑。"""
+        """获取单个文档，带重试逻辑。
+        
+        注意：某些文档请求 childTabs/lists 字段时会导致 400 错误
+        "Field mask cannot retrieve comment-specific fields when include_comments is false"。
+        此时自动降级为不包含这些字段的精简字段，确保文档内容仍可读取。
+        """
         attempt = 0
         max_attempts = 4
         base_delay = 1.0
+        fields_to_use = self._fields
 
         while attempt < max_attempts:
             try:
@@ -89,13 +95,29 @@ class BatchDocFetcher:
                         documentId=doc_id,
                         includeTabsContent=self._include_tabs_content,
                         suggestionsViewMode=self._suggestions_view_mode,
-                        fields=self._fields,
+                        fields=fields_to_use,
                     )
                     .execute()
                 )
                 return result
             except HttpError as e:
                 status = e.resp.status if hasattr(e, "resp") else 0
+                # 处理 "Field mask cannot retrieve comment-specific fields" 400 错误
+                if status == 400 and "comment-specific fields" in str(e):
+                    if "childTabs" in fields_to_use:
+                        logger.warning("[fetcher] Doc %s 400 on childTabs field, retrying without childTabs", doc_id)
+                        fields_to_use = fields_to_use.replace("childTabs,", "")
+                        attempt += 1
+                        continue
+                    if "lists" in fields_to_use:
+                        logger.warning("[fetcher] Doc %s 400 on lists field, retrying without lists", doc_id)
+                        fields_to_use = fields_to_use.replace(",lists)", ")")
+                        attempt += 1
+                        continue
+                    logger.warning("[fetcher] Doc %s 400 comment-specific fields, giving up fields", doc_id)
+                    fields_to_use = "documentId,title"
+                    attempt += 1
+                    continue
                 if status == 429:
                     attempt += 1
                     delay = base_delay * (2 ** (attempt - 1))

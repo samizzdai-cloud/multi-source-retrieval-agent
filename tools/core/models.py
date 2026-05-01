@@ -240,12 +240,19 @@ class SourceAgentConfig:
     sub_query_top_n: int = 8               # 每个 sub_query 原始召回上限
     google_download_timeout_s: float = 12.0 # 非原生文件流式下载强制打断时间
     google_api_timeout_s: float = 12.0      # 原生文件单次 API 请求底层 Socket 超时
-    google_enable_gmail: bool = False       # 是否开启 Gmail 检索
-    google_enable_gmail_attachments: bool = False # 是否开启 Gmail 附件读取
-    google_enable_sheet_filter: bool = False # 是否开启 Google Sheets LLM/Rerank 过滤
-    google_enable_excel_filter: bool = False # 是否开启 Excel/CSV LLM/Rerank 过滤
+    google_enable_gmail: bool = True        # 默认开启 Gmail 检索
+    google_enable_gmail_attachments: bool = False # balanced/deep_dive 在 preset 中覆盖开启
+    google_enable_sheet_filter: bool = True  # 是否开启 Google Sheets qwen rerank 过滤
+    google_enable_excel_filter: bool = True  # 是否开启 Excel/CSV qwen rerank 过滤
     google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
-    google_order_by_mode: Optional[str] = None # Drive API 排序，如 "modifiedTime desc", "viewedByMeTime desc"
+    google_order_by_mode: Optional[str] = "viewedByMeTime desc" # Drive API 排序，默认"我最近查看"优先
+    # per-type 候选数量（按 preset 可定制，Sheet 优先级靠后）
+    google_doc_candidates_per_sq: int = 12    # 每个 sub_query Doc 必读候选数（宽松读取，超时截断）
+    google_slide_candidates_per_sq: int = 12  # 每个 sub_query Slide 必读候选数
+    google_sheet_candidates_per_sq: int = 5   # 每个 sub_query Sheet 必读候选数（收紧）
+    # Gmail 候选数量
+    google_max_gmail_threads_per_subquery: int = 10  # Gmail 搜索默认返回 thread 数
+    google_gmail_rerank_top_n: int = 3               # snippet rerank 后保留 thread 数
 
 
 # ── SourceAgent 预设（Phase 4b）────────────────────────────────────
@@ -319,13 +326,15 @@ class RetrieveConfig:
         "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
-                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0},
+                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0,
+                                     "google_enable_gmail_attachments": True},
                       }},
         "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
-                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0},
+                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0,
+                                     "google_enable_gmail_attachments": True},
                       }},
     }
 
@@ -389,6 +398,7 @@ class RetrieveConfig:
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_filter", "google_enable_excel_filter",
             "google_enable_fulltext_search", "google_order_by_mode",
+            "google_max_gmail_threads_per_subquery", "google_gmail_rerank_top_n",
         ):
             if getattr(override, f) != getattr(defaults, f):
                 diff[f] = getattr(override, f)

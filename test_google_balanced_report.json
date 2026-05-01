@@ -1,0 +1,211 @@
+[
+  {
+    "query_id": 1,
+    "query": "nubia 英国站3月份DTC渠道的GMV和订单量",
+    "status": "ok",
+    "error": "",
+    "total_ms": 48684.34845900083,
+    "loops_used": 1,
+    "top_chunks_count": 5,
+    "top_chunks": [
+      {
+        "score": 0.6,
+        "tier": "important",
+        "source_name": "Mar.1 - Mar.7 RMM Weekly Report ",
+        "type": "?",
+        "content_preview": "## Website Performance – Traffic Source...\n- 本周Display流量来源最大，较上一周相比上升了7.50%；\n\n- Referral的流量占据第二位，相比上周下降了36.58%，主要是nubia和gleam流量都各减少了39.6% and 38.29%;\n\n- Affiliate (Other)比上周下降了39.37%,但交易量下降了40.00%(3 vs 5)；\n\n- Paid search流量较上一周下降了13.65%，交易量也减少了78.95%(4 vs19);\n"
+      },
+      {
+        "score": 0.55,
+        "tier": "important",
+        "source_name": "Mar.1 - Mar.7 RMM Weekly Report ",
+        "type": "?",
+        "content_preview": "## Website Performance...\n- 网站整体流量为 10,731，相比上周下降18.28%；\n\n- 交易转化量为28，相较上一周下降24.32%，交易转化率为0.20%；\n"
+      },
+      {
+        "score": 0.2,
+        "tier": "noise",
+        "source_name": "[REDMAGIC] Launch report RM8SPro",
+        "type": "?",
+        "content_preview": "## Sales Review 2023.08.02 - 2023.08.31...\n|  |  |  |  |  |\n|---|---|---|---|---|\n| Channel | Target | Sales / Qty | Sales / Revenue | Goal Progress / Qty |\n| Channel 1 - DTC Store | 2,360 | 3,162 | $2,599,390.57 | 134% |\n| Channel 2 - Marketplace | 300 | 356 | $313,330.00 | 118.6% |\n| Channel 3 - O"
+      },
+      {
+        "score": 0.1,
+        "tier": "noise",
+        "source_name": "[REDMAGIC] Launch report RM8SPro",
+        "type": "?",
+        "content_preview": "## DTC Channel Sales vs. Budget Review by Country...\n| 8S Pro | United States | United Kingdom | Germany | Mexico | France | Canada | Italy | Spain | Singapore | Saudi Arabia | Netherlands, Austria, Sweden, Belgium | Others | Total |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|---|\n| PR - M"
+      },
+      {
+        "score": 0.1,
+        "tier": "noise",
+        "source_name": "[REDMAGIC] Launch report RM8SPro",
+        "type": "?",
+        "content_preview": "## Sales Review by Revenue - DTC Channel Overview 202...\n| GMV | RM 7S Pro | 📱Sales | RM 8S Pro | 📱Sales | 💲Growth | AOV | AOV Growth |\n|---|---|---|---|---|---|---|---|\n| GL | $117,474.26 | 91 | $140,745.09 | 167 | 19.81% | $648.4 | ↘️21% |\n| SG | $40,931.96 | 37 | $113,376.48 | 100 | 177% | S$924."
+      }
+    ]
+  },
+  {
+    "query_id": 4,
+    "query": "nubia 日本市场的KOL合作名单和已确认的博主合作进度",
+    "status": "ok",
+    "error": "",
+    "total_ms": 27760.462541999004,
+    "loops_used": 1,
+    "top_chunks_count": 2,
+    "top_chunks": [
+      {
+        "score": 0.9,
+        "tier": "critical",
+        "source_name": "",
+        "type": "?",
+        "content_preview": "## Tab: RM 6 PR Meeting with Jason\n\nSo, 15 articles are a feasible number of review coverage.But, the candidate of the key media that accept a review offer is less than 20.If Nubia wants more, I think it is better to offer the KOL or journalists to publish a review article on their page or blog.It i"
+      },
+      {
+        "score": 0.85,
+        "tier": "important",
+        "source_name": "",
+        "type": "?",
+        "content_preview": "## Tab: RM 6 PR Meeting with Jason\n\nseq{1. 已经确认继续和做了RM 5G的日本 Agency 合作，正在等他们的proposal;; 1. 正在和法国一个 Agency 进行沟通， 在谈 KOL 和 PR 合作细节；; 1. 会寻找合适的中东，德国的当地 Agency}\n\n>>>媒体样机发货时间会太晚\n\nTime is too limited\n\nMarch 12 is a Friday and the time it will start shipping is Monday；\n\nactual time for the reviews will be "
+      }
+    ]
+  },
+  {
+    "query_id": 44,
+    "query": "REDMAGIC 11 Pro 各站点首发销量和DTC渠道表现",
+    "status": "ok",
+    "error": "",
+    "total_ms": 39505.384250000134,
+    "loops_used": 1,
+    "top_chunks_count": 5,
+    "top_chunks": [
+      {
+        "score": 0.98,
+        "tier": "critical",
+        "source_name": "Copy of  [REDMAGIC] RM 11 Pro Launch report",
+        "type": "?",
+        "content_preview": "## Sales Review 2025.11.18-2025.12.17...\n|  |  |  |  |  |\n|---|---|---|---|---|\n| Channel | Target | Sales / Qty | Sales / Revenue | Goal Progress / Qty |\n| Channel 1 - DTC Store | 15000 | 14143 | 12,907,979 | 94.2% |\n| Channel 2 - MCD | 2000 | 2025 | $1,880,930 | 100.1% |\n| Channel 3 - Offline | 25"
+      },
+      {
+        "score": 0.95,
+        "tier": "critical",
+        "source_name": "Copy of  [REDMAGIC] RM 11 Pro Launch report",
+        "type": "?",
+        "content_preview": "## Sales Review - DTC Channel 2025.11.18-2025.12.17...\n| Source: metabase | Source: Shopify |\n|---|---|\n\nBy Store pcs\n\nSource: metabase\n\n| Store | 11 Pro sales | Growth | 11 Pro GMV | 11 Pro AOV | vs | 11 PRO CRV | vs | Store | 11 Pro sales | Growth |\n|---|---|---|---|---|---|---|---|---|---|---|\n| "
+      },
+      {
+        "score": 0.92,
+        "tier": "important",
+        "source_name": "Copy of  [REDMAGIC] RM 11 Pro Launch report",
+        "type": "?",
+        "content_preview": "## Sales Review - DTC Channel 2025.11.18-2025.12.17...\n| Overview | By Color | By Day |\n|---|---|---|\n| Source: metabase | Source: metabase |   |\n\nGMV\n\n|  | 11 Pro | Prop. |\n|---|---|---|\n| 12G+256G-Cryo | 1465 | 10.36% |\n| 16G+512G-Nightfreeze | 5251 | 37.13% |\n| 16G+512G-Subzero | 4029 | 28.49% |\n"
+      },
+      {
+        "score": 0.85,
+        "tier": "important",
+        "source_name": "Copy of  [REDMAGIC] RM 11 Pro Launch report",
+        "type": "?",
+        "content_preview": "## Sales Review - DTC Channel Traffic Analysis Source...\n| 曝光量, 流量, 转化率, 销量, 开售后的变化曲线 ; Impressions, Session, CVR and Sales, after Open Sales ; 11 Pro vs. 10 Pro ; 曝光趋势图 11 Pro vs. 10 Pro Impressions. Source: Google Search Console ; 流量趋势图 11 Pro vs. 10 Pro Traffic. Source: Shopify ; [SheetsChart: Ch"
+      },
+      {
+        "score": 0.82,
+        "tier": "important",
+        "source_name": "Copy of  [REDMAGIC] RM 11 Pro Launch report",
+        "type": "?",
+        "content_preview": "## Sales Review - DTC Channel 2025.11.18-2025.12.17 C...\n流量质量： 在流量激增的情况下，质量依然保持稳健且正向。\n\n| BR Store | Sessions | ATC Rate | Reach Checkout | Complete Checkout Rate | Conversion Rate |  | Session Duration | Page Depth | Bounce Rate |\n|---|---|---|---|---|---|---|---|---|---|\n| 11 Pro | 99,335 | 2.20% |"
+      }
+    ]
+  },
+  {
+    "query_id": 48,
+    "query": "REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度",
+    "status": "ok",
+    "error": "",
+    "total_ms": 28078.740082999502,
+    "loops_used": 1,
+    "top_chunks_count": 5,
+    "top_chunks": [
+      {
+        "score": 0.95,
+        "tier": "critical",
+        "source_name": "Copy of [REDMAGIC] Launch Report RM10 Air",
+        "type": "?",
+        "content_preview": "## Social Listening (KOLs)...\n整体舆情：所有评测普遍为正面。\n\n亮点与优点：\n\n游戏性能：\n\n- 普遍被认为是一款表现突出的游戏手机，搭载骁龙 8 Gen 3，性能强劲。\n\n- 被形容为运行流畅、速度快，适合长时间游戏体验。\n\n性价比与定价：\n\n- 在高性能游戏手机中被认为价格亲民。\n\n- 以远低于许多竞品的价格提供旗舰级游戏体验，受到广泛认可。\n\n特色亮点：\n\n- 屏幕：大尺寸 OLED 无开孔屏幕、配备游戏肩键，专为游戏设计。\n\n- 外观设计：机身轻薄、时尚，RGB 灯效与质感做工获得好评。\n\n- 电池：续航表现优秀，用户反馈电池耐用。\n\n问题与质疑：\n\n软件"
+      },
+      {
+        "score": 0.95,
+        "tier": "critical",
+        "source_name": "[REDMAGIC] Launch Report RM10 Air",
+        "type": "?",
+        "content_preview": "## Social Listening (KOLs)...\n整体舆情：所有评测普遍为正面。\n\n亮点与优点：\n\n游戏性能：\n\n- 普遍被认为是一款表现突出的游戏手机，搭载骁龙 8 Gen 3，性能强劲。\n\n- 被形容为运行流畅、速度快，适合长时间游戏体验。\n\n性价比与定价：\n\n- 在高性能游戏手机中被认为价格亲民。\n\n- 以远低于许多竞品的价格提供旗舰级游戏体验，受到广泛认可。\n\n特色亮点：\n\n- 屏幕：大尺寸 OLED 无开孔屏幕、配备游戏肩键，专为游戏设计。\n\n- 外观设计：机身轻薄、时尚，RGB 灯效与质感做工获得好评。\n\n- 电池：续航表现优秀，用户反馈电池耐用。\n\n问题与质疑：\n\n软件"
+      },
+      {
+        "score": 0.8,
+        "tier": "important",
+        "source_name": "Copy of [REDMAGIC] Launch Report RM10 Air",
+        "type": "?",
+        "content_preview": "## Overview...\n|  | REDMAGIC 9S Pro <br>*Meltwater Data | REDMAGIC 10 Pro <br>*Meltwater Data | REDMAGIC 10 Air <br>*Meltwater Data |\n|---|---|---|---|\n| Media Coverage | 1,331 volume trend  <br>514.2M Reach Trend | 1,695 Volume Trend<br>7.28B Reach Trend | 190  Volume Trend  <br>225M Reach Trend |\n"
+      },
+      {
+        "score": 0.8,
+        "tier": "important",
+        "source_name": "[REDMAGIC] Launch Report RM10 Air",
+        "type": "?",
+        "content_preview": "## Overview...\n|  | REDMAGIC 9S Pro <br>*Meltwater Data | REDMAGIC 10 Pro <br>*Meltwater Data | REDMAGIC 10 Air <br>*Meltwater Data |\n|---|---|---|---|\n| Media Coverage | 1,331 volume trend  <br>514.2M Reach Trend | 1,695 Volume Trend<br>7.28B Reach Trend | 190  Volume Trend  <br>225M Reach Trend |\n"
+      },
+      {
+        "score": 0.7,
+        "tier": "important",
+        "source_name": "Copy of [REDMAGIC] Launch Report RM10 Air",
+        "type": "?",
+        "content_preview": "## Sales Review - EBO Sales...\n| 10 Air | EBO | 10 Pro | vs | 9S Pro | vs |\n|---|---|---|---|---|---|\n| CA | 38 | 440 | -91.4% | 136 | -72.1% |\n| US | 210 | 2251 | -90.7% | 585 | -64.1% |\n| EU | 320 | 2687 | -88.1% | 863 | -62.9% |\n| UK | 63 | 511 | -87.7% | 170 | -62.9% |\n| GL | 176 | 907 | -80.6% "
+      }
+    ]
+  },
+  {
+    "query_id": 55,
+    "query": "按渠道分类对比nubia和hypershell的总体销售数据",
+    "status": "ok",
+    "error": "",
+    "total_ms": 33842.96216700022,
+    "loops_used": 1,
+    "top_chunks_count": 5,
+    "top_chunks": [
+      {
+        "score": 0.95,
+        "tier": "critical",
+        "source_name": "[REDMAGIC] Launch report RM8SPro",
+        "type": "?",
+        "content_preview": "## Sales Review 2023.08.02 - 2023.08.31...\n|  |  |  |  |  |\n|---|---|---|---|---|\n| Channel | Target | Sales / Qty | Sales / Revenue | Goal Progress / Qty |\n| Channel 1 - DTC Store | 2,360 | 3,162 | $2,599,390.57 | 134% |\n| Channel 2 - Marketplace | 300 | 356 | $313,330.00 | 118.6% |\n| Channel 3 - O"
+      },
+      {
+        "score": 0.7,
+        "tier": "important",
+        "source_name": "[REDMAGIC] Launch report RM8SPro",
+        "type": "?",
+        "content_preview": "## Sales Review - Offline 2023.08.01 - 2023.08.31...\nCustomers type: Retailers/Traders/End Users\n\n| Region | Sales / Qty |\n|---|---|\n| SEA | 400 |\n| ME | 105 |\n| EU | - |\n| NA | 90 |\n| LATAM | 20 |\n| Total | 615 |\n\n| Product | Sales / Qty |\n|---|---|\n| Midnight | 230 |\n| Platinum | 205 |\n| Aurora | "
+      },
+      {
+        "score": 0.1,
+        "tier": "noise",
+        "source_name": "Apr 5 - Apr 11 RMM Weekly Report ",
+        "type": "?",
+        "content_preview": "## Media Quotes - Content Analysis...\n| Total Coverage |\n|---|\n| 87 |\n\n| Data tracking: ; overall Reach:      76404588 ; Link Of Report : https://docs.google.com/spreadsheets/d/1pLk0IubUy7_UKx3G6ipLkIE16AuxCq9ieDwRZHeYzvQ/edit?usp=sharing ; Insights: | Total: ; - 87 outlets |\n|---|---|\n\n- Red Magic "
+      },
+      {
+        "score": 0.1,
+        "tier": "noise",
+        "source_name": "Apr 12 - Apr 19 RMM Weekly Report ",
+        "type": "?",
+        "content_preview": "## Media Quotes - Content Analysis...\n| Total Coverage |\n|---|\n| 87 |\n\n| Data tracking: ; overall Reach:      76404588 ; Link Of Report : https://docs.google.com/spreadsheets/d/1pLk0IubUy7_UKx3G6ipLkIE16AuxCq9ieDwRZHeYzvQ/edit?usp=sharing ; Insights: | Total: ; - 87 outlets |\n|---|---|\n\n- Red Magic "
+      },
+      {
+        "score": 0.05,
+        "tier": "noise",
+        "source_name": "Mar 22 - Mar 29 RMM Weekly Report ",
+        "type": "?",
+        "content_preview": "## Reviewer Program - Reviewer Feedback Report...\nFeedback:\n\nTotal 21 media received Review units,\n\n|  | Mar Week 2 | Mar Week 3 |\n|---|---|---|\n| Total Coverage | 130 | 130 |\n\n7 waiting for the software update,\n\n12 posted review articles\n\nCollecting reviewed products back\n\n- We are waiting for Soft"
+      }
+    ]
+  }
+]

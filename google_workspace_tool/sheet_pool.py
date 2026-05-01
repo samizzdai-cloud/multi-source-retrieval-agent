@@ -1,0 +1,289 @@
+"""Google Spreadsheet 元数据缓存池 — 跨 sub_query 复用。
+
+借鉴 Feishu table_pool 的跨 sub_query 合并读取模式：
+1. 批量获取多个 spreadsheet 的元数据（含 merges + gridProperties）
+2. 缓存到 _meta_cache，避免重复 API 调用
+3. 支持 per-sub_query qwen rerank 选 sheets
+4. 合并跨 sq 的相同 spreadsheet 读取需求
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Set
+
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from tools.core.models import UnifiedChunk
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SheetMeta:
+    """单个 Spreadsheet 的元数据。"""
+    file_id: str
+    title: str
+    url: str
+    sheets: List[dict] = field(default_factory=list)
+    # sheets 中每个 dict: {sheetId, title, index, gridProperties: {rowCount, columnCount}, merges}
+
+
+@dataclass
+class SheetSelection:
+    """某个 sub_query 对某个 spreadsheet 的 sheet 选择结果。"""
+    file_id: str
+    selected_titles: List[str]
+    sub_query_id: str
+    focus_id: str
+
+
+class SheetPool:
+    """Google Spreadsheet 元数据缓存池。
+
+    生命周期：在 GoogleSourceAgent.__init__ 中创建，跨多个 run() 调用持久化。
+    """
+
+    def __init__(self):
+        self._meta_cache: Dict[str, SheetMeta] = {}
+        self._chunk_cache: Dict[str, List[UnifiedChunk]] = {}
+        self._done: Set[str] = set()
+        self._reading: Set[str] = set()
+        self._events: Dict[str, asyncio.Event] = {}
+
+    # ── 元数据获取 ──────────────────────────────────────────────────────
+
+    def batch_fetch_metadata(
+        self,
+        file_ids: List[str],
+        creds,
+        native_api_timeout: int = 10,
+        max_workers: int = 8,
+    ) -> Dict[str, SheetMeta]:
+        """并发获取多个 spreadsheet 的元数据（含 merges + gridProperties）。
+
+        Args:
+            file_ids: Spreadsheet ID 列表
+            creds: 已授权的 Credentials 对象
+            native_api_timeout: 每个请求 API 超时（秒）
+            max_workers: 并发 worker 数
+
+        Returns:
+            file_id → SheetMeta 的字典（仅包含成功获取的）
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from google_workspace_tool.readers.sheet_reader import _build_service
+
+        fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties,merges)"
+
+        # 分离已缓存和未缓存的
+        uncached_ids = [fid for fid in file_ids if fid not in self._meta_cache]
+        results: Dict[str, SheetMeta] = {
+            fid: self._meta_cache[fid] for fid in file_ids if fid in self._meta_cache
+        }
+
+        if not uncached_ids:
+            return results
+
+        def _fetch_one(fid: str) -> tuple:
+            """获取单个 spreadsheet 的元数据。每个线程独立创建 service。"""
+            try:
+                service = _build_service(creds, native_api_timeout=native_api_timeout)
+                meta = service.spreadsheets().get(
+                    spreadsheetId=fid, fields=fields
+                ).execute()
+                props = meta.get("properties", {})
+                title = props.get("title", "")
+                sheets = meta.get("sheets", [])
+                sheet_list = []
+                for s in sheets:
+                    p = s.get("properties", {})
+                    sheet_list.append({
+                        "sheetId": p.get("sheetId"),
+                        "title": p.get("title", ""),
+                        "index": p.get("index", 0),
+                        "gridProperties": p.get("gridProperties", {}),
+                        "merges": s.get("merges", []),
+                    })
+                sm = SheetMeta(
+                    file_id=fid,
+                    title=title,
+                    url=f"https://docs.google.com/spreadsheets/d/{fid}/edit",
+                    sheets=sheet_list,
+                )
+                return fid, sm, None
+            except HttpError as e:
+                logger.warning("[sheet_pool] metadata fetch failed for %s: %s", fid, e)
+                return fid, None, e
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_fid = {executor.submit(_fetch_one, fid): fid for fid in uncached_ids}
+            for future in as_completed(future_to_fid):
+                fid, sm, error = future.result()
+                if sm is not None:
+                    self._meta_cache[fid] = sm
+                    results[fid] = sm
+
+        return results
+
+    # ── 查询 ────────────────────────────────────────────────────────────
+
+    def get_meta(self, file_id: str) -> Optional[SheetMeta]:
+        return self._meta_cache.get(file_id)
+
+    def get_sheet_titles(self, file_id: str) -> List[str]:
+        meta = self._meta_cache.get(file_id)
+        if not meta:
+            return []
+        return [s.get("title", "") for s in meta.sheets]
+
+    def get_sheet_by_title(self, file_id: str, title: str) -> Optional[dict]:
+        meta = self._meta_cache.get(file_id)
+        if not meta:
+            return None
+        for s in meta.sheets:
+            if s.get("title") == title:
+                return s
+        return None
+
+    def get_merges(self, file_id: str, title: str) -> List[dict]:
+        s = self.get_sheet_by_title(file_id, title)
+        return s.get("merges", []) if s else []
+
+    def get_row_count(self, file_id: str, title: str) -> int:
+        s = self.get_sheet_by_title(file_id, title)
+        if not s:
+            return 0
+        return s.get("gridProperties", {}).get("rowCount", 0)
+
+    # ── 状态管理 ────────────────────────────────────────────────────────
+
+    def mark_reading(self, file_id: str) -> bool:
+        """标记为读取中。返回 True 表示首次标记，False 表示已在读取/已读完。"""
+        if file_id in self._done or file_id in self._reading:
+            return False
+        self._reading.add(file_id)
+        self._events[file_id] = asyncio.Event()
+        return True
+
+    def mark_done(self, file_id: str, chunks: List[UnifiedChunk]) -> None:
+        """读取完成（含超时/失败），唤醒所有等待的 sq。"""
+        self._reading.discard(file_id)
+        self._done.add(file_id)
+        self._chunk_cache[file_id] = chunks
+        evt = self._events.pop(file_id, None)
+        if evt:
+            evt.set()
+
+    async def wait_for_done(self, file_id: str, timeout: float) -> List[UnifiedChunk]:
+        """等待 file 读取完成（含超时）。返回已完成的 chunks。"""
+        if file_id in self._chunk_cache:
+            return self._chunk_cache[file_id]
+        evt = self._events.get(file_id)
+        if not evt:
+            return []
+        try:
+            await asyncio.wait_for(evt.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
+        return self._chunk_cache.get(file_id, [])
+
+    def is_done(self, file_id: str) -> bool:
+        return file_id in self._done
+
+    def is_reading(self, file_id: str) -> bool:
+        return file_id in self._reading
+
+    # ── Sheet 筛选（qwen rerank）────────────────────────────────────────
+
+    def select_sheets_for_sub_query(
+        self,
+        file_id: str,
+        query: str,
+        focus_text: str,
+        top_n: int = 4,
+        score_threshold: float = 0.18,
+        min_keep: int = 1,
+        skip_rerank_if_few: bool = True,
+    ) -> List[str]:
+        """对单个 spreadsheet 的 sheets 做 qwen rerank，返回选中的 sheet titles。
+
+        Args:
+            file_id: Spreadsheet ID
+            query: sub_query 文本
+            focus_text: focus 文本
+            top_n: 最多返回几个 sheet
+            score_threshold: rerank 分数阈值
+            min_keep: 最少保留几个
+
+        Returns:
+            选中的 sheet title 列表
+        """
+        meta = self._meta_cache.get(file_id)
+        if not meta or not meta.sheets:
+            return []
+
+        sheets = meta.sheets
+        # 如果 sheet 数量 ≤ top_n，直接全量返回，跳过 rerank
+        if skip_rerank_if_few and len(sheets) <= top_n:
+            return [s.get("title", "") for s in sheets]
+
+        try:
+            from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
+        except ImportError:
+            return [s.get("title", "") for s in sheets[:top_n]]
+
+        candidates = []
+        for s in sheets:
+            grid = s.get("gridProperties", {})
+            summary = f"Rows: {grid.get('rowCount', 0)} | Cols: {grid.get('columnCount', 0)}"
+            candidates.append({
+                "id": str(s.get("sheetId", "")),
+                "title": f"{meta.title} / {s.get('title', '')}",
+                "summary": summary,
+                "_sheet_title": s.get("title", ""),
+            })
+
+        question = build_focus_sub_query_question(focus_text, query)
+        rerank_result = select_search_candidates(
+            query=question,
+            candidates=candidates,
+            top_n=top_n,
+            score_threshold=score_threshold,
+            min_keep=min_keep,
+            instruct_template="qa",
+        )
+
+        if rerank_result.get("status") == "success":
+            selected = list(rerank_result.get("selected_candidates") or [])
+            return [c.get("_sheet_title", "") for c in selected if c.get("_sheet_title")]
+        else:
+            return [c.get("_sheet_title", "") for c in candidates[:top_n]]
+
+    # ── 跨 sub_query 合并 ───────────────────────────────────────────────
+
+    @staticmethod
+    def merge_selections(
+        selections: List[SheetSelection],
+    ) -> Dict[str, List[str]]:
+        """合并跨 sub_query 的相同 spreadsheet 的选中 sheets。
+
+        Args:
+            selections: 所有 sub_query 的 sheet 选择结果
+
+        Returns:
+            file_id → 合并后的 sheet titles 列表（去重）
+        """
+        merged: Dict[str, Set[str]] = {}
+        for sel in selections:
+            if sel.file_id not in merged:
+                merged[sel.file_id] = set()
+            merged[sel.file_id].update(sel.selected_titles)
+
+        # 控制总量：单个 spreadsheet 最多 200 ranges（batchGet 限制）
+        result: Dict[str, List[str]] = {}
+        for fid, titles in merged.items():
+            result[fid] = list(titles)[:200]
+        return result

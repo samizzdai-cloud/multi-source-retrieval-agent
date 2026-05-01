@@ -209,7 +209,7 @@ def read_chunks(
     enable_excel_filter: bool = False,
 ) -> list:
     """读取 Excel 文档并切分为 chunks。"""
-    from chunkers import GoogleChunk
+    from google_workspace_tool.chunkers import GoogleChunk
     from utils.table_utils import split_sections, process_section_to_markdown
     import io
     
@@ -316,7 +316,7 @@ def read_chunks(
             if range_names:
                 selected_sheets = [s for s in selected_sheets if s in range_names]
             # pandas 不易实现 BM25 行过滤，直接转 markdown chunk
-            from chunkers import markdown_to_chunks
+            from google_workspace_tool.chunkers import markdown_to_chunks
             for sheet_name in selected_sheets:
                 df = dfs[sheet_name]
                 if df.empty:

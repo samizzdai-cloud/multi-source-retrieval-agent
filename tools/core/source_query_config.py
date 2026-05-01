@@ -181,9 +181,19 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
         "1. 默认情况，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配。\n"
         "2. 如果用户寻找近期修改或阅读的文件，设置 `google_enable_fulltext = false`（退化为纯标题检索），"
         "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` 或 `'modifiedTime desc'`。\n"
-        "3. 【极其重要】你的 `query` 必须提取为 2 到 3 个最核心的名词或专有名词，必须用空格隔开（例如：'REDMAGIC 营销 上市'）。系统会在底层自动为你做同义词泛化，绝对不能输出长句。\n"
-        "4. 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 `time_filter` 设置为提前的时间点，例如 `'>2025-09-01'`。如果是某年终总结，可设置 `'>2025-11-01'`。如果不涉及时效，留空即可。\n"
-        "5. 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 `'me'`。"
+        "3. 【极其重要】你的 `query` 必须提取为 2 到 4 个最核心的名词或专有名词，必须用空格隔开（例如：'REDMAGIC 营销 上市'）。系统会在底层自动为你做同义词泛化，绝对不能输出长句。\n"
+        "4. 【Query 类型适配】根据 focus 的 query_type 调整 subquery 策略：\n"
+        "   - data 类型（问销量/GMV/订单/库存/转化率等结构化数据）：\n"
+        "     * subquery 必须包含「品牌 + 渠道/国家 + 指标词」，如 'nubia UK DTC GMV'\n"
+        "     * 强烈建议使用 `time_filter` 过滤时间范围（如 `'>2025-03-01'`）\n"
+        "     * 如果 query 涉及特定月份，务必把月份加入 subquery，如 'March'、'3月'\n"
+        "     * 如果涉及多个国家，subquery 里只保留最核心的 1-2 个国家\n"
+        "   - concept 类型（问策略/原因/背景/定位/市场分析等）：\n"
+        "     * subquery 保持 2-3 个关键词，如 'REDMAGIC 竞品 分析'\n"
+        "     * 不使用 time_filter，扩大召回范围\n"
+        "   - personal_recent 类型：设置 `author_filter = 'me'` 并启用 `google_order_by = 'viewedByMeTime desc'`\n"
+        "5. 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 `time_filter` 设置为提前的时间点，例如 `'>2025-09-01'`。如果是某年终总结，可设置 `'>2025-11-01'`。如果不涉及时效，留空即可。\n"
+        "6. 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 `'me'`。"
     ),
 }
 

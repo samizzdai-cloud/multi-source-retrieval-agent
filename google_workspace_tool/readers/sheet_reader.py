@@ -159,11 +159,18 @@ def _extract_all_sheets(service, spreadsheet_id: str, metadata: dict, **kwargs) 
         try:
             result = _get_values(service, spreadsheet_id, range_name, **kwargs)
             values = result.get("values", [])
+            # 提取该 sheet 的 merges（从 metadata 中匹配）
+            sheet_merges = []
+            for s in sheets:
+                if s.get("properties", {}).get("title") == title:
+                    sheet_merges = s.get("merges", [])
+                    break
             all_data[title] = {
                 "range": result.get("range", ""),
                 "values": values,
                 "row_count": len(values),
                 "col_count": max(len(row) for row in values) if values else 0,
+                "merges": sheet_merges,
             }
         except HttpError as e:
             all_data[title] = {"error": str(e), "values": [], "row_count": 0, "col_count": 0}
@@ -607,8 +614,8 @@ def read_chunks(
     Returns:
         List[GoogleChunk]
     """
-    from chunkers import GoogleChunk
-    from utils.table_utils import split_sections, process_section_to_markdown
+    from google_workspace_tool.chunkers import GoogleChunk
+    from google_workspace_tool.utils.table_utils import split_sections, process_section_to_markdown
     
     result = read_one(
         file_id=file_id,
@@ -626,6 +633,7 @@ def read_chunks(
     title = result.get("title", "")
     file_url = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
     all_chunks = []
+    chunk_counter = 0
     
     for sheet_title, data in result["sheets"].items():
         if isinstance(data, dict) and "error" in data:
@@ -637,10 +645,11 @@ def read_chunks(
         sections = split_sections(values)
         for sec_idx, (start_idx, end_idx) in enumerate(sections):
             section_rows = values[start_idx:end_idx + 1]
+            merges = data.get("merges") if isinstance(data, dict) else None
             md, is_bm25_filtered, effective_row_count, cov_score = process_section_to_markdown(
                 section_rows=section_rows,
                 query=query,
-                merges=None,  # Google Sheets read_one 暂时没有返回 merges
+                merges=merges,
                 section_start_global=start_idx,
             )
             
@@ -648,15 +657,18 @@ def read_chunks(
                 continue
                 
             heading = f"Sheet: {title} > {sheet_title}"
+            chunk_counter += 1
             
+            from google_workspace_tool.chunkers.md_chunker import estimate_tokens
             chunk = GoogleChunk(
                 file_id=file_id,
-                chunk_id=f"{file_id}_{sheet_title}_s{sec_idx}",
+                chunk_id=f"google:sheet:{file_id}:{chunk_counter}",
                 file_title=title,
                 file_url=file_url,
                 content=md,
                 content_type="table_md",
                 heading_path=heading,
+                token_count=estimate_tokens(md),
                 has_table=True,
                 metadata={
                     "mime_type": _MIME_SHEETS,

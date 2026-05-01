@@ -143,7 +143,7 @@ def read_chunks(
     download_timeout: int = 15,
 ) -> list:
     """读取文本并切分为 chunks。"""
-    from chunkers import markdown_to_chunks, GoogleChunk
+    from google_workspace_tool.chunkers import markdown_to_chunks, GoogleChunk
     result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout)
     if result.get("error") or not result.get("structured_md"):
         return []

@@ -21,6 +21,7 @@ Type-specific readers 位于 readers/ 目录下：
 - read_concurrent(file_ids, creds, max_workers, ...) -> list[dict]
 """
 
+import logging
 import threading
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +29,8 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from google_workspace_tool.utils.url_parser import resolve_file_id
+
+logger = logging.getLogger(__name__)
 from google_workspace_tool.utils.metadata_utils import get_file_metadata
 from google_workspace_tool.readers import doc_reader, word_reader, slide_reader, sheet_reader, text_reader, excel_reader, pptx_reader
 
@@ -276,7 +279,7 @@ def read_drive_content(
 
     # --- Layer 2: API 调用超时兜底 ---
     # 对保护线程依然保留最大超时（防止极少数底层死锁），取两者的最大值作为线程最大寿命
-    max_timeout = max(download_timeout, native_api_timeout) + 2
+    max_timeout = max(download_timeout, native_api_timeout)
 
     def _do_read():
         if mime_type == _MIME_DOCS:
@@ -553,7 +556,6 @@ def read_drive_chunks(
                 auto_outline_threshold=auto_outline_threshold,
                 supports_all_drives=supports_all_drives,
                 max_chunk_tokens=max_chunk_tokens,
-                native_api_timeout=native_api_timeout,
             )
         elif mime_type in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT, _MIME_CSV, _MIME_XLSX, _MIME_XLS, _MIME_XLSM, _MIME_PPTX):
             kwargs = {}
@@ -592,5 +594,66 @@ def read_drive_chunks(
         if result is None:
             return []
         return result if result else []
-    except Exception:
+    except Exception as e:
+        logger.warning("[drive_content_reader] read_chunks failed for %s (%s): %s", file_id, mime_type, e)
         return []
+
+
+def read_chunks_from_bytes(
+    raw_bytes: bytes,
+    mime_type: str,
+    title: str,
+    file_url: str = "",
+    source_tag: str = "google",
+    max_chunk_tokens: int = 800,
+) -> list:
+    """从原始 bytes 读取并切分为 chunks（用于 Gmail 附件等无 Drive file_id 的场景）。
+
+    复用各 reader 的文本提取逻辑 + markdown_to_chunks 切分，保持与 Drive 文件一致的 chunk 格式。
+
+    Args:
+        raw_bytes: 文件原始 bytes
+        mime_type: 文件 MIME 类型
+        title: 文件标题（用于 chunk 的 file_title）
+        file_url: 文件 URL（可选）
+        source_tag: chunk_id 前缀
+        max_chunk_tokens: 每个 chunk 最大 token 数
+
+    Returns:
+        List[GoogleChunk]
+    """
+    from google_workspace_tool.chunkers.md_chunker import markdown_to_chunks
+
+    if not raw_bytes:
+        return []
+
+    text = ""
+    if mime_type in (_MIME_TXT, _MIME_CSV):
+        text = raw_bytes.decode("utf-8", errors="replace")
+    elif mime_type == "text/html":
+        from google_workspace_tool.gmail_rag_pipeline import MessageParserTool
+        text = raw_bytes.decode("utf-8", errors="replace")
+        text = MessageParserTool._clean_html(text)
+    elif mime_type in (_MIME_WORD, _MIME_WORD_OLD):
+        from google_workspace_tool.readers.word_reader import _try_extract_word_text
+        text = _try_extract_word_text(raw_bytes) or ""
+    elif mime_type in (_MIME_XLSX, _MIME_XLS, _MIME_XLSM):
+        from google_workspace_tool.readers.excel_reader import _try_extract_excel_text
+        text = _try_extract_excel_text(raw_bytes) or ""
+    elif mime_type == _MIME_PPTX:
+        from google_workspace_tool.readers.pptx_reader import _try_extract_pptx_text
+        text = _try_extract_pptx_text(raw_bytes) or ""
+    else:
+        return []
+
+    if not text or not text.strip():
+        return []
+
+    return markdown_to_chunks(
+        markdown=text,
+        file_id=title,
+        file_title=title,
+        file_url=file_url,
+        source_tag=source_tag,
+        max_chunk_tokens=max_chunk_tokens,
+    )

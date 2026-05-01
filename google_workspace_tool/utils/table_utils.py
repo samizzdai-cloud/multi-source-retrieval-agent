@@ -156,7 +156,7 @@ def bm25_filter_rows(
     header_row: list,
     data_rows: List[list],
     query: str,
-    max_output: int = 20,
+    max_output: int = 30,
 ) -> List[int]:
     """BM25 筛选与 query 相关的行，返回行索引列表。"""
     try:
@@ -195,8 +195,8 @@ def process_section_to_markdown(
     query: Optional[str] = None,
     merges: List[dict] = None,
     section_start_global: int = 0,
-    bm25_threshold_rows: int = 30,
-    llm_output_max_rows: int = 20,
+    bm25_threshold_rows: int = 40,
+    bm25_output_max_rows: int = 30,
     max_cols: int = 20,
 ) -> Tuple[str, bool, int, float]:
     """处理单个区块，执行表头检测、BM25过滤并生成 Markdown。
@@ -234,7 +234,7 @@ def process_section_to_markdown(
                 
         if query and len(data_rows) > bm25_threshold_rows:
             # 触发 BM25 浓缩
-            selected_indices = bm25_filter_rows(header_row, data_rows, query, llm_output_max_rows)
+            selected_indices = bm25_filter_rows(header_row, data_rows, query, bm25_output_max_rows)
             selected_data = [data_rows[i] for i in selected_indices if i < len(data_rows)]
             is_bm25_filtered = True
             

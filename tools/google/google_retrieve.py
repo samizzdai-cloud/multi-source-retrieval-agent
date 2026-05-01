@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import re
 from typing import List, Optional
 
 from tools.core.models import UnifiedChunk
@@ -52,21 +53,51 @@ def _get_credentials():
     return get_credentials(scopes=_SCOPES)
 
 
+def _escape_drive_q_term(term: str) -> str:
+    """转义 Drive search q 语法中的非法字符。
+
+    Drive API `fullText contains` 对以下字符敏感，会导致 400 Bad Request:
+    - 反斜杠 \\ 本身
+    - 未闭合的引号 / 尖括号 / 管道符
+    - 控制字符
+    策略：先移除危险字符（保留单引号），再移除原始反斜杠，最后转义单引号。
+    """
+    # 先移除尖括号、管道符、控制字符
+    term = re.sub(r'[<>|\x00-\x1f]', '', term)
+    # 再移除原始反斜杠（必须在转义单引号之前，否则会把转义用的反斜杠也清掉）
+    term = term.replace('\\', '')
+    # 最后转义单引号
+    term = term.replace("'", "\\'")
+    return term.strip()
+
+
 def _build_search_q(
     query: str, 
     keyword_groups: Optional[List[List[str]]] = None, 
     enable_fulltext: bool = True,
     time_filter: Optional[str] = None,
     author_filter: Optional[str] = None,
+    mime_types: Optional[set] = None,
+    max_groups: Optional[int] = None,
 ) -> str:
     """Build Drive search query with MIME type filter, keyword groups, and advanced filters.
 
     If keyword_groups is provided, it builds a grouped query:
     e.g. ((fullText contains 'A' or fullText contains 'A_syn') and (fullText contains 'B')) and (mimeType=...)
+    
+    Args:
+        mime_types: 指定搜索的 MIME type 集合，默认使用全部支持的类型
+        max_groups: 最多使用多少个关键词组（用于 doc/slide 宽召回时限制组数）
     """
-    mime_clauses = [f"mimeType='{mt}'" for mt in _SUPPORTED_MIMETYPES]
+    if mime_types is None:
+        mime_types = _SUPPORTED_MIMETYPES
+    mime_clauses = [f"mimeType='{mt}'" for mt in mime_types]
     mime_filter = " or ".join(mime_clauses)
     search_field = "fullText" if enable_fulltext else "name"
+    
+    # 限制关键词组数量
+    if keyword_groups and max_groups:
+        keyword_groups = keyword_groups[:max_groups]
     
     base_query_filter = ""
     if keyword_groups:
@@ -74,12 +105,16 @@ def _build_search_q(
         for group in keyword_groups:
             if not group:
                 continue
+            # 限制每组同义词数量，避免过宽 OR 导致语义漂移和 q 语法过长
+            limited_group = group[:3]
             # 组内使用 OR
             term_clauses = []
-            for term in group:
-                escaped = term.replace("'", "\\'")
-                term_clauses.append(f"{search_field} contains '{escaped}'")
-            group_clauses.append("(" + " or ".join(term_clauses) + ")")
+            for term in limited_group:
+                escaped = _escape_drive_q_term(term)
+                if escaped:
+                    term_clauses.append(f"{search_field} contains '{escaped}'")
+            if term_clauses:
+                group_clauses.append("(" + " or ".join(term_clauses) + ")")
         
         # 组间使用 AND
         if group_clauses:
@@ -87,8 +122,29 @@ def _build_search_q(
             
     if not base_query_filter:
         # Fallback 到传统的完整字符串匹配
-        escaped = query.replace("'", "\\'")
-        base_query_filter = f"({search_field} contains '{escaped}')"
+        escaped = _escape_drive_q_term(query)
+        if escaped:
+            base_query_filter = f"({search_field} contains '{escaped}')"
+        else:
+            base_query_filter = f"({mime_filter})"
+            filters = [base_query_filter]
+            # 注入高级 Time 过滤
+            if time_filter:
+                time_filter = time_filter.strip()
+                match = re.match(r"^([><=]+)\s*(.*)$", time_filter)
+                if match:
+                    op, date_str = match.groups()
+                    if "T" not in date_str:
+                        date_str = f"{date_str}T00:00:00"
+                    filters.append(f"(modifiedTime {op} '{date_str}' or createdTime {op} '{date_str}')")
+                else:
+                    date_str = time_filter
+                    if "T" not in date_str:
+                        date_str = f"{date_str}T00:00:00"
+                    filters.append(f"(modifiedTime > '{date_str}' or createdTime > '{date_str}')")
+            if author_filter and author_filter.lower() == "me":
+                filters.append("('me' in owners or 'me' in writers)")
+            return " and ".join(filters)
 
     filters = [base_query_filter, f"({mime_filter})"]
     
@@ -130,16 +186,50 @@ def _google_chunk_to_unified(gc, query: str = "") -> UnifiedChunk:
             "token_count": gc.token_count,
         }
     )
-    # 简单的相关性评分：query 在 chunk 中出现则给基础分
+    # BM25 + 关键词扩展评分（与 Feishu 对齐）
     score = 0.5
-    if query and query.lower() in (gc.content or "").lower():
-        score = 0.7
+    if query:
+        try:
+            from tools.core.chunk_scorer import bm25_score
+            from tools.core.kw_generalization import expand_keywords
+            import re
+
+            raw_kw = set(re.findall(r'[\w\u4e00-\u9fff]{2,}', query.lower()))
+            expanded_q = " ".join(expand_keywords(raw_kw))
+            score_text = f"{gc.file_title or ''} {gc.heading_path or ''} {gc.content or ''}"[:800]
+            raw_bm25 = bm25_score(expanded_q, score_text)
+            score = min(1.0, raw_bm25 / 5.0)
+        except Exception:
+            pass
+
+    # 根据 chunk_id 前缀推断更细粒度的 source_tool，供 eval 区分来源
+    chunk_id = gc.chunk_id or ""
+    if chunk_id.startswith("google:doc:"):
+        source_tool = "google:doc"
+    elif chunk_id.startswith("google:sheet:"):
+        source_tool = "google:sheet"
+    elif chunk_id.startswith("google:slide:"):
+        source_tool = "google:slide"
+    elif chunk_id.startswith("google:word:"):
+        source_tool = "google:word"
+    elif chunk_id.startswith("google:excel:"):
+        source_tool = "google:excel"
+    elif chunk_id.startswith("google:pptx:"):
+        source_tool = "google:pptx"
+    elif chunk_id.startswith("google:txt:") or chunk_id.startswith("google:csv:"):
+        source_tool = "google:txt"
+    elif chunk_id.startswith("google:gmail:body:"):
+        source_tool = "google:gmail:body"
+    elif chunk_id.startswith("google:gmail:att:"):
+        source_tool = "google:gmail:att"
+    else:
+        source_tool = "google"
 
     return UnifiedChunk(
         text=gc.content or "",
         source_name=gc.file_title or "",
         source_url=gc.file_url or "",
-        source_tool="google",
+        source_tool=source_tool,
         heading_path=gc.heading_path or "",
         score=score,
         metadata=meta,

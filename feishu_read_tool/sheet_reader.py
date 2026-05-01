@@ -50,8 +50,8 @@ def _api_call_with_backoff(func, *f_args, max_attempts: int = 5, **f_kwargs):
 SMALL_TAB_ROW_THRESHOLD = 50     # ≤50 行直接全量读取
 MAX_TABS_PER_SHEET = 5           # 每个 spreadsheet 最多处理的 tabs
 SECTION_MAX_ROWS = 100           # 单个 section 上限
-BM25_FILTER_THRESHOLD_ROWS = 30  # >30 行触发 BM25 筛选
-LLM_OUTPUT_MAX_ROWS = 20         # LLM 筛选后最多保留行数
+BM25_FILTER_THRESHOLD_ROWS = 40  # >40 行触发 BM25 筛选
+BM25_OUTPUT_MAX_ROWS = 30         # BM25 筛选后最多保留行数
 READ_MAX_ROWS = 500              # 单次 read_range 最大行数
 
 
@@ -262,7 +262,7 @@ def _bm25_filter_rows(
     header_row: list,
     data_rows: List[list],
     query: str,
-    max_output: int = LLM_OUTPUT_MAX_ROWS,
+    max_output: int = BM25_OUTPUT_MAX_ROWS,
 ) -> List[int]:
     """[P2.5] BM25 筛选与 query 相关的行，返回行索引列表。
 

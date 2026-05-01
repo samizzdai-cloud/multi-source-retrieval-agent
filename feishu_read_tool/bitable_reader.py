@@ -28,8 +28,8 @@ logger = logging.getLogger(__name__)
 MAX_RECORDS = 200               # search_records 最大返回条数
 FALLBACK_RECORDS = 100          # contains filter 无命中时 fallback 取前 N 条
 MAX_TABLES_PER_BITABLE = 3     # 每个 bitable 最多处理的 tables
-BM25_FILTER_THRESHOLD_ROWS = 30  # >30 行触发 BM25 筛选
-LLM_OUTPUT_MAX_ROWS = 20       # LLM 筛选后最多保留行数
+BM25_FILTER_THRESHOLD_ROWS = 40  # >40 行触发 BM25 筛选
+BM25_OUTPUT_MAX_ROWS = 30       # BM25 筛选后最多保留行数
 
 # 可文本化的字段类型（参考 API 文档 /reference/bitable-v1/app-table-field/list）
 _TEXT_FIELD_TYPES = {
@@ -154,7 +154,7 @@ def _bm25_filter_records(
     field_names: List[str],
     records: List[dict],
     query: str,
-    max_output: int = LLM_OUTPUT_MAX_ROWS,
+    max_output: int = BM25_OUTPUT_MAX_ROWS,
 ) -> List[int]:
     """[P2.5] BM25 筛选与 query 相关的记录，返回索引列表。
 
