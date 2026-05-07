@@ -90,6 +90,8 @@ def read_one(
     creds,
     supports_all_drives: bool = True,
     download_timeout: int = 15,
+    known_title: Optional[str] = None,
+    known_mime_type: Optional[str] = None,
 ) -> dict:
     """读取单个 Excel 文件。"""
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
@@ -99,8 +101,8 @@ def read_one(
     except HttpError as e:
         return {
             "file_id": file_id,
-            "mime_type": _MIME_XLSX,
-            "title": "",
+            "mime_type": known_mime_type or _MIME_XLSX,
+            "title": known_title or "",
             "content": None,
             "structured_md": None,
             "content_type": None,
@@ -111,16 +113,19 @@ def read_one(
             "skip_reason": None,
         }
 
-    title = ""
-    mime_type = _MIME_XLSX
-    try:
-        meta = drive_service.files().get(
-            fileId=file_id, fields="name,mimeType", supportsAllDrives=supports_all_drives
-        ).execute()
-        title = meta.get("name", "")
-        mime_type = meta.get("mimeType", _MIME_XLSX)
-    except HttpError:
-        pass
+    title = known_title or ""
+    mime_type = known_mime_type or _MIME_XLSX
+    if not (known_title and known_mime_type):
+        try:
+            meta = drive_service.files().get(
+                fileId=file_id, fields="name,mimeType", supportsAllDrives=supports_all_drives
+            ).execute()
+            if not title:
+                title = meta.get("name", "")
+            if not known_mime_type:
+                mime_type = meta.get("mimeType", _MIME_XLSX)
+        except HttpError:
+            pass
 
     text = _try_extract_excel_text(raw_bytes)
     if text is not None:
@@ -207,13 +212,14 @@ def read_chunks(
     range_names: Optional[list[str]] = None,
     query: Optional[str] = None,
     enable_excel_filter: bool = False,
+    known_title: Optional[str] = None,
 ) -> list:
     """读取 Excel 文档并切分为 chunks。"""
     from google_workspace_tool.chunkers import GoogleChunk
     from utils.table_utils import split_sections, process_section_to_markdown
     import io
-    
-    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout)
+
+    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout, known_title=known_title)
     raw_bytes = result.get("raw_bytes")
     if result.get("error") or not raw_bytes:
         return []

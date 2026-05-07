@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal, Optional, Set
 
 
 @dataclass
@@ -271,6 +271,15 @@ class SourceAgentConfig:
     google_sheet_prefilter_close_delta: float = 0.12
     google_sheet_metadata_max_files_structured: int = 6
     google_sheet_metadata_max_files_concept: int = 2
+    google_sheet_min_keep_per_sq: int = 1
+    # 家族级 nonnative 搜索 gate：仅当 sq.query_type ∈ 白名单 时才在 Phase A 召回该家族的非原生文件
+    # default 涵盖 structured / concept / personal_recent；可由 preset 覆盖
+    google_nonnative_search_query_types: Dict[str, Set[str]] = field(default_factory=lambda: {
+        "sheet": {"structured", "personal_recent"},
+        "slide": {"structured", "concept", "personal_recent"},
+        "doc":   {"structured", "concept", "personal_recent"},
+    })
+    google_dedup_native_vs_nonnative: bool = True
     google_doc_chunk_cap: int = 60
     google_slide_chunk_cap: int = 40
     google_file_rerank_min_chunks_sheet: int = 25
@@ -279,6 +288,7 @@ class SourceAgentConfig:
     google_type_pool_doc_workers: int = 3
     google_type_pool_slide_workers: int = 3
     google_type_pool_gmail_workers: int = 2
+    google_type_pool_nonnative_workers: int = 2  # 合并 pptx/word/excel/csv/txt 下载并发
     google_gmail_attachment_max_files: int = 3
     # per-type 搜索召回数量（按 preset 可定制）
     google_doc_search_per_sq: int = 12    # 每个 sub_query Doc 搜索召回数
@@ -383,6 +393,8 @@ class RetrieveConfig:
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
                               "google_enable_cross_sq_pre_filter": True,
+                              # lite 完全 native-only：所有家族关闭非原生召回
+                              "google_nonnative_search_query_types": {"sheet": set(), "slide": set(), "doc": set()},
                           },
                       }},
         "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
@@ -487,9 +499,12 @@ class RetrieveConfig:
             "google_sheet_prefilter_trigger_count", "google_sheet_prefilter_qwen_trigger_count",
             "google_sheet_prefilter_close_delta",
             "google_sheet_metadata_max_files_structured", "google_sheet_metadata_max_files_concept",
+            "google_sheet_min_keep_per_sq",
+            "google_nonnative_search_query_types", "google_dedup_native_vs_nonnative",
             "google_file_rerank_min_chunks_sheet", "google_file_rerank_min_chunks_slide",
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
             "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
+            "google_type_pool_nonnative_workers",
             "google_gmail_attachment_max_files",
             "google_doc_search_per_sq", "google_slide_search_per_sq", "google_sheet_search_per_sq",
             "google_doc_candidates_per_sq", "google_slide_candidates_per_sq", "google_sheet_candidates_per_sq",

@@ -195,7 +195,12 @@ def _sheet_cap_for_query_types(cfg: SourceAgentConfig, query_types: Set[str]) ->
     return max(0, int(cfg.google_sheet_metadata_max_files_structured))
 
 
-def _sheet_has_time_or_fresh_intent(text: str) -> bool:
+def _drive_has_time_or_fresh_intent(text: str) -> bool:
+    """Detect explicit time / freshness intent in a query.
+
+    Used to gate stale-year penalties — when there is no time intent, we keep
+    older artifacts at full weight (long-shelf-life materials).
+    """
     if not text:
         return False
     lowered = text.lower()
@@ -211,15 +216,112 @@ def _sheet_has_time_or_fresh_intent(text: str) -> bool:
     )
 
 
-def _sheet_has_new_product_intent(text: str) -> bool:
-    lowered = (text or "").lower()
-    return bool(re.search(r"\b(?:rm\s*11|red\s*magic\s*11|redmagic\s*11|11\s*pro|11\s*air|10s)\b", lowered))
+# ---- Family / native classification ------------------------------------
+
+_FAMILY_BY_MIME: Dict[str, str] = {
+    _MIME_DOCS: "doc", _MIME_WORD: "doc", _MIME_WORD_OLD: "doc", _MIME_TXT: "doc",
+    _MIME_SHEETS: "sheet", _MIME_EXCEL: "sheet", _MIME_EXCEL_OLD: "sheet", _MIME_EXCEL_MACRO: "sheet", _MIME_CSV: "sheet",
+    _MIME_SLIDES: "slide", _MIME_PPTX: "slide",
+}
+
+_NATIVE_MIMES: Set[str] = {_MIME_DOCS, _MIME_SHEETS, _MIME_SLIDES}
 
 
-def _sheet_file_local_score(file_meta: dict, query_text: str, source_channels: Set[str]) -> float:
-    """Cheap file-level score before Sheet metadata fetch.
+def _family_of(mime: Optional[str]) -> Optional[str]:
+    """Classify a Drive mime into sheet/slide/doc, or None for unknown."""
+    return _FAMILY_BY_MIME.get(mime or "")
 
-    It intentionally penalizes but does not hard-drop stale/sidecar candidates.
+
+def _is_native(mime: Optional[str]) -> bool:
+    return (mime or "") in _NATIVE_MIMES
+
+
+def _format_label(mime: Optional[str]) -> str:
+    """Short Format tag for Qwen rerank candidate summary."""
+    return {
+        _MIME_DOCS: "native_doc", _MIME_SHEETS: "native_sheet", _MIME_SLIDES: "native_slide",
+        _MIME_WORD: "docx", _MIME_WORD_OLD: "doc", _MIME_TXT: "txt",
+        _MIME_EXCEL: "excel", _MIME_EXCEL_OLD: "excel", _MIME_EXCEL_MACRO: "excel", _MIME_CSV: "csv",
+        _MIME_PPTX: "pptx",
+    }.get(mime or "", "unknown")
+
+
+_TITLE_NORM_STRIP_RE = re.compile(r"[\s\W_]+", flags=re.UNICODE)
+_TITLE_NORM_TRAILING_YEAR_RE = re.compile(r"(?:[\-_\s/]?20\d{2}(?:年)?)+\s*$")
+
+
+def _normalize_title_for_dedup(title: str) -> str:
+    """Lowercase, strip trailing year suffixes, drop whitespace/punct.
+
+    Used for native ↔ non-native duplicate detection.
+    """
+    if not title:
+        return ""
+    t = title.strip().lower()
+    t = _TITLE_NORM_TRAILING_YEAR_RE.sub("", t)
+    t = _TITLE_NORM_STRIP_RE.sub("", t)
+    return t
+
+
+def _dedup_native_vs_nonnative(files: List[dict]) -> List[dict]:
+    """Within each family, drop non-native files whose normalized title matches
+    or is contained in a native sibling's title (length diff <= 5 chars).
+
+    Native preference is fully captured here: when a duplicate exists we keep
+    the native entry, drop the non-native. Files from other families are
+    untouched.
+    """
+    if not files:
+        return files
+    native_norms_by_family: Dict[str, List[str]] = {}
+    for f in files:
+        if not _is_native(f.get("mimeType")):
+            continue
+        fam = _family_of(f.get("mimeType"))
+        if not fam:
+            continue
+        norm = _normalize_title_for_dedup(f.get("name") or "")
+        if norm:
+            native_norms_by_family.setdefault(fam, []).append(norm)
+
+    if not native_norms_by_family:
+        return files
+
+    kept: List[dict] = []
+    for f in files:
+        mime = f.get("mimeType")
+        if _is_native(mime):
+            kept.append(f)
+            continue
+        fam = _family_of(mime)
+        norm = _normalize_title_for_dedup(f.get("name") or "")
+        if not fam or not norm:
+            kept.append(f)
+            continue
+        natives = native_norms_by_family.get(fam, [])
+        is_dup = any(
+            n == norm
+            or (n and norm and (n in norm or norm in n) and abs(len(n) - len(norm)) <= 5)
+            for n in natives
+        )
+        if not is_dup:
+            kept.append(f)
+    return kept
+
+
+def _drive_file_local_score(
+    file_meta: dict,
+    query_text: str,
+    source_channels: Set[str],
+    time_filter: Optional[str] = None,
+) -> float:
+    """Cheap file-level score for any Drive family.
+
+    Penalizes but does not hard-drop stale/sidecar candidates.
+
+    ``time_filter`` (when provided by plan_only, e.g. ">2026-01-01" or
+    "last_30_days") triggers the stale-year penalty deterministically and
+    overrides the regex inference; falls back to regex when absent.
     """
     title = str(file_meta.get("name") or "")
     desc = str(file_meta.get("description") or "")
@@ -255,15 +357,21 @@ def _sheet_file_local_score(file_meta: dict, query_text: str, source_channels: S
     elif "fallback" in source_channels and "fulltext" not in source_channels:
         score -= 0.05
 
-    if _sheet_has_time_or_fresh_intent(query_text):
+    has_time_intent = bool(time_filter) or _drive_has_time_or_fresh_intent(query_text)
+    if has_time_intent:
+        target_year: Optional[int] = None
+        if time_filter:
+            m = re.search(r"20\d{2}", time_filter)
+            if m:
+                target_year = int(m.group())
+            elif re.search(r"last[_\-]?\d+[_\-]?day", time_filter, flags=re.I):
+                target_year = date.today().year
+        if target_year is None:
+            query_years = [int(y) for y in re.findall(r"20\d{2}", query_text)]
+            target_year = max(query_years) if query_years else date.today().year
         years = [int(y) for y in re.findall(r"20\d{2}", hay)]
-        query_years = [int(y) for y in re.findall(r"20\d{2}", query_text)]
-        target_year = max(query_years) if query_years else date.today().year
         if years and max(years) < target_year:
             score -= min(0.35, 0.12 * (target_year - max(years)))
-
-    if _sheet_has_new_product_intent(query_text) and re.search(r"\b(?:rm\s*[6-9]|red\s*magic\s*[6-9]|redmagic\s*[6-9])\b", hay):
-        score -= 0.25
 
     return score
 
@@ -531,6 +639,9 @@ class GoogleSourceAgent(SourceAgent):
             if fid:
                 file_by_id[fid] = f
             parts = [f"Title: {f.get('name', '')}"]
+            fmt_label = _format_label(f.get("mimeType"))
+            if fmt_label and fmt_label != "unknown":
+                parts.append(f"Format: {fmt_label}")
             if use_description and f.get("description"):
                 parts.append(f"Desc: {f.get('description', '')}")
             owners = ", ".join([o.get("displayName", "") for o in f.get("owners", []) if o.get("displayName")])
@@ -610,6 +721,11 @@ class GoogleSourceAgent(SourceAgent):
         query_type_by_id: Dict[str, Set[str]] = {}
         query_parts_by_id: Dict[str, List[str]] = {}
         channels_by_id: Dict[str, Set[str]] = {}
+        # 每份 sheet 命中过的 sub_query 集合，以及 per-(sq, fid) 的查询/focus 文本（用于 per-sq 打分）
+        sq_ids_by_id: Dict[str, Set[str]] = {}
+        sq_text_by_pair: Dict[Tuple[str, str], str] = {}
+        all_sq_ids: Set[str] = set()
+        sq_time_filter: Dict[str, Optional[str]] = {}
 
         for res in search_results:
             sq = res.get("sq")
@@ -617,6 +733,8 @@ class GoogleSourceAgent(SourceAgent):
                 continue
             qt = _normalize_google_query_type(getattr(sq, "query_type", None))
             focus_text = focus_text_map.get(sq.sub_query_id, sq.target_focus)
+            all_sq_ids.add(sq.sub_query_id)
+            sq_time_filter[sq.sub_query_id] = getattr(sq, "time_filter", None)
             for f in res.get("files", []):
                 if f.get("mimeType") != _MIME_SHEETS:
                     continue
@@ -627,6 +745,11 @@ class GoogleSourceAgent(SourceAgent):
                 focus_by_id.setdefault(fid, set()).add(focus_text or "")
                 query_type_by_id.setdefault(fid, set()).add(qt)
                 query_parts_by_id.setdefault(fid, []).append(str(sq.query or ""))
+                sq_ids_by_id.setdefault(fid, set()).add(sq.sub_query_id)
+                sq_text_by_pair.setdefault(
+                    (sq.sub_query_id, fid),
+                    f"{focus_text or ''} {sq.query or ''}".strip(),
+                )
                 channels = set(f.get("_google_sheet_channels") or [])
                 if f.get("_google_sheet_channel"):
                     channels.add(f.get("_google_sheet_channel"))
@@ -655,15 +778,59 @@ class GoogleSourceAgent(SourceAgent):
             )
             return set(), raw_by_id
 
+        # Per-sq 打分，取 max；记录每份文件的 top_sq（用于 min_keep_per_sq floor）
         scored: List[Tuple[float, str]] = []
+        top_sq_by_fid: Dict[str, str] = {}
         for fid, f in raw_by_id.items():
-            query_text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
-            score = _sheet_file_local_score(f, query_text, channels_by_id.get(fid, set()))
-            scored.append((score, fid))
+            channels = channels_by_id.get(fid, set())
+            best_score = -1e9
+            best_sq: Optional[str] = None
+            for sq_id in sq_ids_by_id.get(fid, set()):
+                text = sq_text_by_pair.get((sq_id, fid), "")
+                if not text:
+                    text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
+                tf = sq_time_filter.get(sq_id)
+                s = _drive_file_local_score(f, text, channels, time_filter=tf)
+                if s > best_score:
+                    best_score = s
+                    best_sq = sq_id
+            if best_sq is None:
+                # fallback: legacy union scoring path
+                text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
+                best_score = _drive_file_local_score(f, text, channels)
+                best_sq = next(iter(sq_ids_by_id.get(fid, set())), "")
+            scored.append((best_score, fid))
+            top_sq_by_fid[fid] = best_sq or ""
         scored.sort(key=lambda x: x[0], reverse=True)
         local_ms = _elapsed_ms(started)
 
-        selected_ids = [fid for _, fid in scored[:cap]]
+        # 全局 cap 截断后做 per-sq min_keep floor 兜底
+        min_keep_per_sq = max(0, int(getattr(self.cfg, "google_sheet_min_keep_per_sq", 1)))
+        n_sqs = len(all_sq_ids)
+        effective_cap = max(cap, n_sqs * min_keep_per_sq) if min_keep_per_sq else cap
+
+        selected_ids = [fid for _, fid in scored[:effective_cap]]
+        if min_keep_per_sq:
+            selected_set = set(selected_ids)
+            score_by_fid = {fid: s for s, fid in scored}
+            for sq_id in all_sq_ids:
+                owned = [fid for fid in selected_ids if top_sq_by_fid.get(fid) == sq_id]
+                if len(owned) >= min_keep_per_sq:
+                    continue
+                # 该 sq 命中的所有候选，按 score 降序取尚未入选的补齐
+                sq_owned_sorted = sorted(
+                    (fid for fid in sq_ids_by_id if sq_id in sq_ids_by_id[fid]),
+                    key=lambda x: -score_by_fid.get(x, 0.0),
+                )
+                need = min_keep_per_sq - len(owned)
+                for cand_fid in sq_owned_sorted:
+                    if need <= 0:
+                        break
+                    if cand_fid in selected_set:
+                        continue
+                    selected_ids.append(cand_fid)
+                    selected_set.add(cand_fid)
+                    need -= 1
         qwen_ms = 0.0
         reason = "local"
         qwen_trigger = int(self.cfg.google_sheet_prefilter_qwen_trigger_count)
@@ -685,11 +852,13 @@ class GoogleSourceAgent(SourceAgent):
                 for rank, (score, fid) in enumerate(scored):
                     f = raw_by_id[fid]
                     channels = ",".join(sorted(channels_by_id.get(fid, set())))
+                    fmt_label = _format_label(f.get("mimeType"))
                     candidates.append({
                         "id": fid,
                         "title": f.get("name", ""),
                         "summary": (
-                            f"Title: {f.get('name', '')} | Desc: {f.get('description', '')} | "
+                            f"Title: {f.get('name', '')} | Format: {fmt_label} | "
+                            f"Desc: {f.get('description', '')} | "
                             f"Modified: {f.get('modifiedTime', '')} | Source: {channels} | "
                             f"LocalScore: {score:.3f} | LocalRank: {rank + 1}"
                         ),
@@ -702,17 +871,38 @@ class GoogleSourceAgent(SourceAgent):
                 rerank_result = select_search_candidates(
                     query=combined_query,
                     candidates=candidates,
-                    top_n=cap,
+                    top_n=effective_cap,
                     score_threshold=0.10,
-                    min_keep=min(3, cap),
+                    min_keep=min(3, effective_cap),
                     instruct_template="qa",
                 )
                 if rerank_result.get("status") == "success":
                     selected = list(rerank_result.get("selected_candidates") or [])
                     reranked_ids = [c.get("_file_id") or c.get("id") for c in selected if c.get("_file_id") or c.get("id")]
                     if reranked_ids:
-                        selected_ids = reranked_ids[:cap]
+                        selected_ids = reranked_ids[:effective_cap]
                         reason = "qwen_close"
+                        # Re-apply per-sq min_keep floor on Qwen output
+                        if min_keep_per_sq:
+                            selected_set = set(selected_ids)
+                            score_by_fid_q = {fid: s for s, fid in scored}
+                            for sq_id in all_sq_ids:
+                                owned = [fid for fid in selected_ids if top_sq_by_fid.get(fid) == sq_id]
+                                if len(owned) >= min_keep_per_sq:
+                                    continue
+                                sq_owned_sorted = sorted(
+                                    (fid for fid in sq_ids_by_id if sq_id in sq_ids_by_id[fid]),
+                                    key=lambda x: -score_by_fid_q.get(x, 0.0),
+                                )
+                                need = min_keep_per_sq - len(owned)
+                                for cand_fid in sq_owned_sorted:
+                                    if need <= 0:
+                                        break
+                                    if cand_fid in selected_set:
+                                        continue
+                                    selected_ids.append(cand_fid)
+                                    selected_set.add(cand_fid)
+                                    need -= 1
                 else:
                     reason = "qwen_failed_local"
             except Exception as e:
@@ -730,8 +920,9 @@ class GoogleSourceAgent(SourceAgent):
             res["files"] = filtered
 
         logger.info(
-            "TIMING google.sheet_prefilter raw=%d selected=%d cap=%d local_ms=%.1f qwen_ms=%.1f reason=%s selected_ids=%s",
-            raw_count, len(allowed), cap, local_ms, qwen_ms, reason,
+            "TIMING google.sheet_prefilter raw=%d selected=%d cap=%d effective_cap=%d min_keep_per_sq=%d n_sqs=%d local_ms=%.1f qwen_ms=%.1f reason=%s selected_ids=%s",
+            raw_count, len(allowed), cap, effective_cap, min_keep_per_sq, n_sqs,
+            local_ms, qwen_ms, reason,
             [fid[-8:] for fid in selected_ids],
         )
         return allowed, raw_by_id
@@ -877,18 +1068,28 @@ class GoogleSourceAgent(SourceAgent):
                 return groups
 
             # ── 通道 A1/A2/B + Sheet sidecar + Gmail：5 路并发 gather ─────────
-            # lite 模式：仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv 二进制下载）
+            # 家族级 nonnative gate：sq.query_type ∈ 白名单 才召回该家族的非原生文件。
+            # google_native_only（lite-style 历史开关）等价于把所有家族 nonnative 关闭。
             sheet_search_enabled = bool(getattr(self.cfg, "google_enable_sheet_search", True))
-            if getattr(self.cfg, "google_native_only", False):
-                doc_mimes = {_MIME_DOCS}
-                slide_mimes = {_MIME_SLIDES}
-                sheet_mimes = {_MIME_SHEETS} if sheet_search_enabled else set()
+            qt_norm = _normalize_google_query_type(getattr(sq, "query_type", None))
+            nonnative_gate: Dict[str, Set[str]] = getattr(self.cfg, "google_nonnative_search_query_types", {}) or {}
+            native_only = bool(getattr(self.cfg, "google_native_only", False))
+            sheet_nonnative_ok = (not native_only) and (qt_norm in (nonnative_gate.get("sheet") or set()))
+            slide_nonnative_ok = (not native_only) and (qt_norm in (nonnative_gate.get("slide") or set()))
+            doc_nonnative_ok = (not native_only) and (qt_norm in (nonnative_gate.get("doc") or set()))
+
+            doc_mimes: Set[str] = {_MIME_DOCS}
+            if doc_nonnative_ok:
+                doc_mimes |= {_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT}
+            slide_mimes: Set[str] = {_MIME_SLIDES}
+            if slide_nonnative_ok:
+                slide_mimes |= {_MIME_PPTX}
+            if sheet_search_enabled:
+                sheet_mimes: Set[str] = {_MIME_SHEETS}
+                if sheet_nonnative_ok:
+                    sheet_mimes |= {_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV}
             else:
-                doc_mimes = {_MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT}
-                slide_mimes = {_MIME_SLIDES, _MIME_PPTX}
-                sheet_mimes = {
-                    _MIME_SHEETS, _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
-                } if sheet_search_enabled else set()
+                sheet_mimes = set()
             q_doc = _build_search_q(
                 sq.query, keyword_groups=keyword_groups, enable_fulltext=enable_fulltext,
                 time_filter=sq.time_filter, author_filter=sq.author_filter,
@@ -1120,6 +1321,21 @@ class GoogleSourceAgent(SourceAgent):
                     logger.info("[google] fallback2 title slide sq=%s results=%d", sq.sub_query_id, len(files_slide))
                 except Exception as e:
                     logger.warning("[google] fallback2 title slide search failed for sq=%s: %s", sq.sub_query_id, e)
+
+            # Native ↔ non-native dedup（每家族内：标题归一相同/包含 → 丢非原生）
+            if bool(getattr(self.cfg, "google_dedup_native_vs_nonnative", True)):
+                pre_doc, pre_slide, pre_sheet = len(files_doc), len(files_slide), len(files_sheet)
+                files_doc = _dedup_native_vs_nonnative(files_doc)
+                files_slide = _dedup_native_vs_nonnative(files_slide)
+                files_sheet = _dedup_native_vs_nonnative(files_sheet)
+                drop_doc = pre_doc - len(files_doc)
+                drop_slide = pre_slide - len(files_slide)
+                drop_sheet = pre_sheet - len(files_sheet)
+                if drop_doc or drop_slide or drop_sheet:
+                    logger.info(
+                        "[google] dedup native_vs_nonnative sq=%s doc-=%d slide-=%d sheet-=%d",
+                        sq.sub_query_id, drop_doc, drop_slide, drop_sheet,
+                    )
 
             files = files_doc + files_slide + files_sheet
             _log_candidates("doc", files_doc)
@@ -1582,11 +1798,23 @@ class GoogleSourceAgent(SourceAgent):
                     logger.info("[google] sheet cache HIT %s", _short_id(fid))
                 else:
                     sheet_meta = sheet_pool.get_meta(fid)
+                    _known_meta = None
+                    _known_sheet_count = None
+                    if sheet_meta:
+                        _known_meta = {
+                            "name": sheet_meta.title,
+                            "size": sheet_meta.drive_size,
+                            "modifiedTime": sheet_meta.modified_time,
+                            "mimeType": _MIME_SHEETS,
+                        }
+                        _known_sheet_count = len(sheet_meta.sheets) if sheet_meta.sheets else None
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=_MIME_SHEETS, creds=creds,
                         max_chunk_tokens=800, native_api_timeout=int(self.cfg.google_api_timeout_s),
                         supports_all_drives=True, range_names=range_names, query=query,
                         known_title=sheet_meta.title if sheet_meta else None,
+                        known_metadata=_known_meta,
+                        known_sheet_count=_known_sheet_count,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
@@ -1637,6 +1865,14 @@ class GoogleSourceAgent(SourceAgent):
                     gc_list = _gc_cached
                     logger.info("[google] doc cache HIT %s", _short_id(fid))
                 else:
+                    _known_meta = None
+                    if meta:
+                        _known_meta = {
+                            "name": meta.title,
+                            "size": meta.drive_size,
+                            "modifiedTime": meta.modified_time,
+                            "mimeType": mime,
+                        }
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=mime, creds=creds,
                         max_chunk_tokens=800,
@@ -1644,6 +1880,8 @@ class GoogleSourceAgent(SourceAgent):
                         download_timeout=_dl_timeout,
                         native_api_timeout=int(self.cfg.google_api_timeout_s),
                         supports_all_drives=True, query=query,
+                        known_title=meta.title if meta else None,
+                        known_metadata=_known_meta,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
@@ -1691,12 +1929,22 @@ class GoogleSourceAgent(SourceAgent):
                     gc_list = _gc_cached
                     logger.info("[google] slide cache HIT %s", _short_id(fid))
                 else:
+                    _known_meta = None
+                    if meta:
+                        _known_meta = {
+                            "name": meta.title,
+                            "size": meta.drive_size,
+                            "modifiedTime": meta.modified_time,
+                            "mimeType": mime,
+                        }
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=mime, creds=creds,
                         max_chunk_tokens=800,
                         download_timeout=_dl_timeout,
                         native_api_timeout=int(self.cfg.google_api_timeout_s),
                         supports_all_drives=True, query=query,
+                        known_title=meta.title if meta else None,
+                        known_metadata=_known_meta,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
@@ -1943,11 +2191,15 @@ class GoogleSourceAgent(SourceAgent):
             executors["doc"] = ThreadPoolExecutor(max_workers=int(self.cfg.google_type_pool_doc_workers))
             executors["slide"] = ThreadPoolExecutor(max_workers=int(self.cfg.google_type_pool_slide_workers))
             executors["gmail"] = ThreadPoolExecutor(max_workers=int(self.cfg.google_type_pool_gmail_workers))
+            # nonnative 池：所有 binary 下载（pptx/word/excel/csv/txt）共享，避免与原生 API 抢线程
+            executors["nonnative"] = ThreadPoolExecutor(
+                max_workers=max(1, int(self.cfg.google_type_pool_nonnative_workers))
+            )
             executors["shared"] = ThreadPoolExecutor(max_workers=14)
         else:
             executors["shared"] = ThreadPoolExecutor(max_workers=12)
 
-        pool_submit_counts = {"sheet": 0, "doc": 0, "slide": 0, "gmail": 0, "shared": 0}
+        pool_submit_counts = {"sheet": 0, "doc": 0, "slide": 0, "gmail": 0, "nonnative": 0, "shared": 0}
         try:
             # 先注册所有 wait events，避免 wait 先于 worker mark_reading 发生时直接返回空。
             for fid in merged_sheets:
@@ -1960,39 +2212,40 @@ class GoogleSourceAgent(SourceAgent):
                 for tid in merged_gmail:
                     gmail_pool.ensure_waitable(tid)
 
-            def _get_executor(fid: str, channel: str, pool_meta) -> ThreadPoolExecutor:
+            def _get_executor(fid: str, channel: str, pool_meta) -> Tuple[ThreadPoolExecutor, str]:
+                """Return (executor, pool_key) — native goes to per-family pool, nonnative goes to shared nonnative pool."""
                 if not use_type_pools:
-                    return executors["shared"]
+                    return executors["shared"], "shared"
                 meta = pool_meta.get_meta(fid) if pool_meta else None
-                # SheetMeta doesn't have mime_type, but we know anything in sheet_pool is a spreadsheet
-                # Wait, actually SheetPool only fetches metadata for _MIME_SHEETS (Google Sheets).
-                # But let's safely check if the attribute exists or fallback to the known channel defaults.
                 mime = getattr(meta, "mime_type", None) if meta else None
-                
+
                 if channel == "sheet":
-                    # If it's in sheet_pool, it's a spreadsheet. The original bug was because SheetMeta has no mime_type.
-                    # In Phase A, we only put _MIME_SHEETS into SheetPool metadata fetch. 
-                    # Other table types (Excel, CSV) go through here too but they don't have SheetMeta.
-                    # If meta exists, it's a native Google Sheet.
-                    return executors["sheet"] if meta else executors["shared"]
+                    # SheetPool only stores native Google Sheets metadata (Phase B batch). meta=None ⇒ Excel/CSV.
+                    if meta:
+                        return executors["sheet"], "sheet"
+                    return executors["nonnative"], "nonnative"
                 elif channel == "doc":
-                    return executors["doc"] if mime == _MIME_DOCS else executors["shared"]
+                    if mime == _MIME_DOCS:
+                        return executors["doc"], "doc"
+                    return executors["nonnative"], "nonnative"
                 elif channel == "slide":
-                    return executors["slide"] if mime == _MIME_SLIDES else executors["shared"]
-                return executors["shared"]
+                    if mime == _MIME_SLIDES:
+                        return executors["slide"], "slide"
+                    return executors["nonnative"], "nonnative"
+                return executors["shared"], "shared"
 
             for fid, titles in merged_sheets.items():
-                executor = _get_executor(fid, "sheet", sheet_pool)
+                executor, pkey = _get_executor(fid, "sheet", sheet_pool)
                 executor.submit(_read_sheet_task, fid, titles)
-                pool_submit_counts["sheet"] += 1
+                pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
             for fid in merged_docs:
-                executor = _get_executor(fid, "doc", doc_pool)
+                executor, pkey = _get_executor(fid, "doc", doc_pool)
                 executor.submit(_read_doc_task, fid)
-                pool_submit_counts["doc"] += 1
+                pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
             for fid in merged_slides:
-                executor = _get_executor(fid, "slide", slide_pool)
+                executor, pkey = _get_executor(fid, "slide", slide_pool)
                 executor.submit(_read_slide_task, fid)
-                pool_submit_counts["slide"] += 1
+                pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
             if self.cfg.google_enable_gmail:
                 for tid in merged_gmail:
                     if use_type_pools:
@@ -2003,8 +2256,10 @@ class GoogleSourceAgent(SourceAgent):
                     pool_submit_counts["gmail"] += 1
 
             logger.info(
-                "[google] pool submits sheet=%d doc=%d slide=%d gmail=%d type_pools=%s",
-                pool_submit_counts["sheet"], pool_submit_counts["doc"], pool_submit_counts["slide"], pool_submit_counts["gmail"],
+                "[google] pool submits sheet=%d doc=%d slide=%d nonnative=%d gmail=%d shared=%d type_pools=%s",
+                pool_submit_counts.get("sheet", 0), pool_submit_counts.get("doc", 0),
+                pool_submit_counts.get("slide", 0), pool_submit_counts.get("nonnative", 0),
+                pool_submit_counts.get("gmail", 0), pool_submit_counts.get("shared", 0),
                 use_type_pools,
             )
 

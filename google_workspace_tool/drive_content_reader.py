@@ -486,6 +486,8 @@ def read_drive_chunks(
     query: Optional[str] = None,
     enable_excel_filter: bool = False,
     known_title: Optional[str] = None,
+    known_metadata: Optional[dict] = None,
+    known_sheet_count: Optional[int] = None,
 ) -> list:
     """读取单个 Drive 文件并切分为 chunks。
 
@@ -515,20 +517,25 @@ def read_drive_chunks(
     except ValueError as e:
         raise ValueError(str(e))
 
-    # 获取元数据（size 用于阈值判断）
+    # 获取元数据（size 用于阈值判断）。若上游已透传 known_metadata，跳过 Drive files().get。
     import time as _time
-    _meta_start = _time.perf_counter()
-    drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    metadata = get_file_metadata(
-        file_id=resolved_id,
-        drive_service=drive_service,
-        supports_all_drives=supports_all_drives,
-    )
-    _meta_ms = (_time.perf_counter() - _meta_start) * 1000
-    drive_size = metadata.get("size") if metadata else None
-    title = metadata.get("name", "") if metadata else ""
-    logger.info("[TIMING] drive.metadata file_id=%s... size=%s title=%.30r ms=%.1f",
-                resolved_id[:20], drive_size, title, _meta_ms)
+    if known_metadata is not None and (known_metadata.get("size") is not None or known_metadata.get("name")):
+        metadata = known_metadata
+        drive_size = metadata.get("size")
+        title = metadata.get("name", "") or known_title or ""
+    else:
+        _meta_start = _time.perf_counter()
+        drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        metadata = get_file_metadata(
+            file_id=resolved_id,
+            drive_service=drive_service,
+            supports_all_drives=supports_all_drives,
+        )
+        _meta_ms = (_time.perf_counter() - _meta_start) * 1000
+        drive_size = metadata.get("size") if metadata else None
+        title = metadata.get("name", "") if metadata else ""
+        logger.info("[TIMING] drive.metadata file_id=%s... size=%s title=%.30r ms=%.1f",
+                    resolved_id[:20], drive_size, title, _meta_ms)
 
     # Size Gate
     effective_max_size = max_drive_size
@@ -539,12 +546,16 @@ def read_drive_chunks(
         if effective_max_size is not None and drive_size is not None and drive_size > effective_max_size:
             return []
 
-    # Sheets pre-estimate
+    # Sheets pre-estimate：若上游已知 sheet 数（来自 SheetPool），跳过额外 spreadsheets().get。
     if mime_type == _MIME_SHEETS and native_api_timeout:
-        estimated_seconds = _estimate_sheet_read_time(resolved_id, creds)
-        estimated_sheet_count = max(0, int((estimated_seconds - 0.5) / _SHEET_ESTIMATE_SECONDS_PER_SHEET))
-        if estimated_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
-            return []
+        if known_sheet_count is not None:
+            if known_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
+                return []
+        else:
+            estimated_seconds = _estimate_sheet_read_time(resolved_id, creds)
+            estimated_sheet_count = max(0, int((estimated_seconds - 0.5) / _SHEET_ESTIMATE_SECONDS_PER_SHEET))
+            if estimated_sheet_count > _MAX_SHEET_COUNT_FOR_ESTIMATE:
+                return []
 
     reader = _READER_MAP.get(mime_type)
     if reader is None:
@@ -569,6 +580,9 @@ def read_drive_chunks(
                 kwargs["range_names"] = range_names
                 kwargs["query"] = query
                 kwargs["enable_excel_filter"] = enable_excel_filter
+            _kt = known_title or (title if title else None)
+            if _kt:
+                kwargs["known_title"] = _kt
             return reader.read_chunks(
                 file_id=resolved_id,
                 creds=creds,
