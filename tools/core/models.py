@@ -407,7 +407,9 @@ class RetrieveConfig:
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
                           "google": {"google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
                                      "google_per_file_timeout_s": 9.0,
-                                     "google_pptx_download_timeout_s": 7.0,
+                                     # PPTX 是 balanced 主要尾延迟（avg 3.8s, p95 8s, avg 27MB）。
+                                     # 5s 下载超时让大 PPTX 提前失败，不影响小文件解析。
+                                     "google_pptx_download_timeout_s": 5.0,
                                      "google_word_download_timeout_s": 7.0,
                                      "google_enable_gmail_attachments": True,
                                      "google_enable_native_slide_size_gate": True,
