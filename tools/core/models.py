@@ -245,9 +245,41 @@ class SourceAgentConfig:
     google_enable_sheet_filter: bool = True  # 是否开启 Google Sheets qwen rerank 过滤
     google_enable_excel_filter: bool = True  # 是否开启 Excel/CSV qwen rerank 过滤
     google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
+    google_enable_native_slide_size_gate: bool = False
+    google_enable_conditional_file_rerank: bool = False
+    google_enable_type_pools: bool = False
+    google_enable_gmail_isolation: bool = False
     google_order_by_mode: Optional[str] = "viewedByMeTime desc" # Drive API 排序，默认"我最近查看"优先
-    # per-type 候选数量（按 preset 可定制，Sheet 优先级靠后）
-    google_doc_candidates_per_sq: int = 12    # 每个 sub_query Doc 必读候选数（宽松读取，超时截断）
+    google_per_file_timeout_s: float = 20.0
+    google_native_doc_size_gate_bytes: int = 45_000_000
+    google_native_doc_outline_threshold_bytes: int = 10_000_000
+    google_native_slide_size_gate_bytes: int = 55_000_000
+    google_pptx_size_gate_bytes: int = 48_000_000           # pptx 单独的 size gate（48MB，从 35MB 放宽）
+    google_word_size_gate_bytes: int = 30_000_000           # word/docx 的 size gate
+    google_pptx_download_timeout_s: float = 6.0             # pptx 独立 timeout（默认 6s，比 native API 更激进）
+    google_word_download_timeout_s: float = 6.0             # word/docx 独立 timeout
+    google_enable_file_content_cache: bool = True           # 跨 query 文件级 LRU 缓存
+    google_file_content_cache_ttl_s: float = 300.0          # 缓存 TTL（5 分钟）
+    google_file_content_cache_max_files: int = 64           # 缓存最大条目数
+    google_enable_cross_sq_pre_filter: bool = True          # X1: chunk_pool 进 eval_only 前用 Qwen rerank 收口
+    google_cross_sq_pre_filter_threshold: int = 10          # chunk_pool > 此阈值才触发（默认 source_top_k * 2）
+    google_native_only: bool = False                        # lite 模式开启：仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv）
+    google_sheet_chunk_cap: int = 50
+    google_doc_chunk_cap: int = 60
+    google_slide_chunk_cap: int = 40
+    google_file_rerank_min_chunks_sheet: int = 25
+    google_file_rerank_min_chunks_slide: int = 30
+    google_type_pool_sheet_workers: int = 4
+    google_type_pool_doc_workers: int = 3
+    google_type_pool_slide_workers: int = 3
+    google_type_pool_gmail_workers: int = 2
+    google_gmail_attachment_max_files: int = 3
+    # per-type 搜索召回数量（按 preset 可定制）
+    google_doc_search_per_sq: int = 12    # 每个 sub_query Doc 搜索召回数
+    google_slide_search_per_sq: int = 12  # 每个 sub_query Slide 搜索召回数
+    google_sheet_search_per_sq: int = 5   # 每个 sub_query Sheet 搜索召回数
+    # per-type 候选数量（rerank 后保留，必须 ≤ 搜索召回数）
+    google_doc_candidates_per_sq: int = 12    # 每个 sub_query Doc 必读候选数
     google_slide_candidates_per_sq: int = 12  # 每个 sub_query Slide 必读候选数
     google_sheet_candidates_per_sq: int = 5   # 每个 sub_query Sheet 必读候选数（收紧）
     # Gmail 候选数量
@@ -321,20 +353,60 @@ class RetrieveConfig:
     _PRESET_DEFAULTS = {
         "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
                       "source_overrides": {
-                          "google": {"google_download_timeout_s": 8.0, "google_api_timeout_s": 8.0},
+                          "google": {
+                              # 激进 timeout：lite 主打速度
+                              "google_download_timeout_s": 6.0, "google_api_timeout_s": 6.0,
+                              "google_per_file_timeout_s": 7.0,
+                              "google_pptx_download_timeout_s": 6.0,
+                              "google_word_download_timeout_s": 6.0,
+                              # 仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv 二进制下载）
+                              "google_native_only": True,
+                              # gmail 仅正文，不下附件
+                              "google_enable_gmail_attachments": False,
+                              # 候选/检索数量收紧
+                              "google_doc_search_per_sq": 8, "google_slide_search_per_sq": 8,
+                              "google_doc_candidates_per_sq": 4, "google_slide_candidates_per_sq": 3,
+                              "google_sheet_candidates_per_sq": 3,
+                              "google_max_gmail_threads_per_subquery": 2,
+                              "google_gmail_rerank_top_n": 2,
+                              # 复用 balanced 的所有优化开关
+                              "google_enable_native_slide_size_gate": True,
+                              "google_enable_conditional_file_rerank": True,
+                              "google_enable_type_pools": True,
+                              "google_enable_gmail_isolation": True,
+                              "google_enable_cross_sq_pre_filter": True,
+                          },
                       }},
         "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
-                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0,
-                                     "google_enable_gmail_attachments": True},
+                          "google": {"google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
+                                     "google_per_file_timeout_s": 9.0,
+                                     "google_pptx_download_timeout_s": 7.0,
+                                     "google_word_download_timeout_s": 7.0,
+                                     "google_enable_gmail_attachments": True,
+                                     "google_enable_native_slide_size_gate": True,
+                                     "google_enable_conditional_file_rerank": True,
+                                     "google_enable_type_pools": True,
+                                     "google_enable_gmail_isolation": True,
+                                     "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
+                                     "google_doc_candidates_per_sq": 5, "google_slide_candidates_per_sq": 4,
+                                     "google_sheet_candidates_per_sq": 4,
+                                     "google_max_gmail_threads_per_subquery": 3,
+                                     "google_gmail_rerank_top_n": 3},
                       }},
         "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
                           "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0,
-                                     "google_enable_gmail_attachments": True},
+                                     "google_enable_gmail_attachments": True,
+                                     "google_enable_native_slide_size_gate": True,
+                                     "google_enable_conditional_file_rerank": True,
+                                     "google_enable_type_pools": True,
+                                     "google_enable_gmail_isolation": True,
+                                     "google_doc_search_per_sq": 16, "google_slide_search_per_sq": 15,
+                                     "google_doc_candidates_per_sq": 9, "google_slide_candidates_per_sq": 9},
                       }},
     }
 
@@ -397,7 +469,16 @@ class RetrieveConfig:
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_filter", "google_enable_excel_filter",
-            "google_enable_fulltext_search", "google_order_by_mode",
+            "google_enable_fulltext_search", "google_enable_native_slide_size_gate",
+            "google_enable_conditional_file_rerank", "google_enable_type_pools",
+            "google_enable_gmail_isolation", "google_order_by_mode",
+            "google_per_file_timeout_s", "google_native_doc_size_gate_bytes",
+            "google_native_doc_outline_threshold_bytes", "google_native_slide_size_gate_bytes",
+            "google_sheet_chunk_cap", "google_doc_chunk_cap", "google_slide_chunk_cap",
+            "google_file_rerank_min_chunks_sheet", "google_file_rerank_min_chunks_slide",
+            "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
+            "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
+            "google_gmail_attachment_max_files",
             "google_max_gmail_threads_per_subquery", "google_gmail_rerank_top_n",
         ):
             if getattr(override, f) != getattr(defaults, f):

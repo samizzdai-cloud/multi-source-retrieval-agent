@@ -515,14 +515,19 @@ def read_drive_chunks(
         raise ValueError(str(e))
 
     # 获取元数据（size 用于阈值判断）
+    import time as _time
+    _meta_start = _time.perf_counter()
     drive_service = build("drive", "v3", credentials=creds, cache_discovery=False)
     metadata = get_file_metadata(
         file_id=resolved_id,
         drive_service=drive_service,
         supports_all_drives=supports_all_drives,
     )
+    _meta_ms = (_time.perf_counter() - _meta_start) * 1000
     drive_size = metadata.get("size") if metadata else None
     title = metadata.get("name", "") if metadata else ""
+    logger.info("[TIMING] drive.metadata file_id=%s... size=%s title=%.30r ms=%.1f",
+                resolved_id[:20], drive_size, title, _meta_ms)
 
     # Size Gate
     effective_max_size = max_drive_size
@@ -590,11 +595,19 @@ def read_drive_chunks(
         return []
 
     try:
+        _reader_start = _time.perf_counter()
         result = _run_with_timeout(_do_read_chunks, max_timeout)
+        _reader_ms = (_time.perf_counter() - _reader_start) * 1000
+        chunk_count = len(result) if result else 0
+        logger.info("[TIMING] drive.reader file_id=%s... mime=%s chunks=%d ms=%.1f",
+                    resolved_id[:20], mime_type, chunk_count, _reader_ms)
         if result is None:
             return []
         return result if result else []
     except Exception as e:
+        _reader_ms = (_time.perf_counter() - _reader_start) * 1000
+        logger.info("[TIMING] drive.reader file_id=%s... mime=%s FAILED ms=%.1f error=%s",
+                    resolved_id[:20], mime_type, _reader_ms, e)
         logger.warning("[drive_content_reader] read_chunks failed for %s (%s): %s", file_id, mime_type, e)
         return []
 

@@ -107,7 +107,12 @@ _KW_GENERALIZATION: Dict[str, Set[str]] = {
     "cpc":    {"单次点击费用", "cost per click", "点击成本"},
     "广告":   {"ads", "advertising", "投放", "付费推广"},
     "ads":    {"广告", "advertising", "投放"},
-    "投放":   {"广告", "ads", "paid media"},
+    "投放":   {"广告", "ads", "paid media", "推广", "campaign"},
+    "营销":   {"marketing", "campaign", "推广", "promotion", "投放"},
+    "marketing": {"营销", "campaign", "promotion", "推广"},
+    "campaign": {"营销", "marketing", "活动", "campaigns"},
+    "推广":   {"营销", "marketing", "promotion", "投放", "广告"},
+    "promotion": {"营销", "推广", "marketing", "campaign"},
 
     # ── 销售指标 ──────────────────────────────────────────────────────────────
     "gmv":    {"销售额", "成交额", "revenue", "营收", "销售总额"},
@@ -135,12 +140,27 @@ _KW_GENERALIZATION: Dict[str, Set[str]] = {
     "kol":    {"达人", "influencer", "博主", "网红", "youtuber", "tiktoker"},
     "达人":   {"kol", "influencer", "博主", "网红"},
     "influencer": {"kol", "达人", "博主", "网红"},
+    "名单":   {"list", "roster", "清单"},
+    "清单":   {"list", "名单", "checklist"},
+    "list":   {"名单", "清单", "roster"},
+    "合作名单": {"list", "名单", "kol list", "roster", "清单"},
 
     # ── 社媒 / 邮件 ───────────────────────────────────────────────────────────
     "edm":    {"邮件营销", "newsletter", "email", "邮件"},
     "邮件":   {"email", "edm", "newsletter"},
     "newsletter": {"邮件", "edm", "email"},
-    "社媒":   {"social media", "社交媒体"},
+    # 社媒 umbrella：让 "社媒/social media" 自动 OR 国际主流平台
+    # （日志统计：KOL 296次 / Google Ads 76 / Affiliate 64 / YouTube 25 / Instagram 6 / Facebook 5）
+    "社媒":   {"social media", "社交媒体", "social", "facebook", "instagram", "tiktok", "youtube"},
+    "social media": {"社媒", "社交媒体", "facebook", "instagram", "tiktok", "youtube"},
+    "social":  {"社媒", "social media", "社交媒体"},
+    # 国际主流平台同义词（按日志频率：YouTube > Instagram > Facebook > TikTok > Twitter）
+    "youtube":   {"yt", "ytb", "油管"},
+    "instagram": {"ig", "insta"},
+    "facebook":  {"fb", "meta"},
+    "tiktok":    {"抖音国际版", "tk"},
+    # 营销 umbrella：让 "营销" 同时召回 KOL/Affiliate/Paid 文件（日志主导项）
+    "营销活动": {"marketing", "campaign", "kol", "affiliate", "paid media"},
     "pr":     {"公关", "媒体", "press release"},
 
     # ── 搜索 / SEO ────────────────────────────────────────────────────────────
@@ -291,7 +311,20 @@ def generate_grouped_keywords(query: str) -> List[List[str]]:
     for token in tokens:
         # 对每个核心词进行同义词扩展
         synonyms = expand_keywords({token})
-        # 转回列表结构
-        grouped.append(list(synonyms))
+        # 转回列表结构：原词优先，保证每组前 3 个被 Drive q 使用时不丢核心词
+        token_l = token.lower()
+        title_priority = {
+            "list": 0,
+            "名单": 1,
+            "清单": 2,
+            "roster": 3,
+            "kol list": 4,
+            "checklist": 5,
+        }
+        ordered = [token_l] + sorted(
+            (s for s in synonyms if s != token_l),
+            key=lambda s: (title_priority.get(s, 50), s),
+        )
+        grouped.append(ordered)
         
     return grouped

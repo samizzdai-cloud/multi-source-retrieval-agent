@@ -49,6 +49,7 @@ class DocPool:
         self._done: Set[str] = set()
         self._reading: Set[str] = set()
         self._events: Dict[str, asyncio.Event] = {}
+        self._event_loops: Dict[str, asyncio.AbstractEventLoop] = {}
 
     # ── 元数据 ──────────────────────────────────────────────────────────
 
@@ -59,6 +60,13 @@ class DocPool:
     def get_meta(self, file_id: str) -> Optional[DocMeta]:
         return self._meta_cache.get(file_id)
 
+    def ensure_waitable(self, file_id: str) -> None:
+        """提前注册 wait event，避免 wait 先于 mark_reading 发生时直接返回空。"""
+        if file_id in self._done or file_id in self._events:
+            return
+        self._events[file_id] = asyncio.Event()
+        self._event_loops[file_id] = asyncio.get_running_loop()
+
     # ── 状态管理 ────────────────────────────────────────────────────────
 
     def mark_reading(self, file_id: str) -> bool:
@@ -66,27 +74,35 @@ class DocPool:
         if file_id in self._done or file_id in self._reading:
             return False
         self._reading.add(file_id)
-        self._events[file_id] = asyncio.Event()
+        if file_id not in self._events:
+            self._events[file_id] = asyncio.Event()
+            self._event_loops[file_id] = asyncio.get_running_loop()
         return True
 
     def mark_done(self, file_id: str, chunks: List[UnifiedChunk]) -> None:
         self._reading.discard(file_id)
         self._done.add(file_id)
         self._chunk_cache[file_id] = chunks
-        evt = self._events.pop(file_id, None)
+        evt = self._events.get(file_id)
+        loop = self._event_loops.get(file_id)
         if evt:
-            evt.set()
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(evt.set)
+            else:
+                evt.set()
 
     async def wait_for_done(self, file_id: str, timeout: float) -> List[UnifiedChunk]:
         if file_id in self._chunk_cache:
             return self._chunk_cache[file_id]
+        self.ensure_waitable(file_id)
         evt = self._events.get(file_id)
-        if not evt:
-            return []
         try:
             await asyncio.wait_for(evt.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             pass
+        if file_id in self._done:
+            self._events.pop(file_id, None)
+            self._event_loops.pop(file_id, None)
         return self._chunk_cache.get(file_id, [])
 
     def is_done(self, file_id: str) -> bool:

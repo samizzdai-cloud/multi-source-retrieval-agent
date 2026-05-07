@@ -272,10 +272,15 @@ def _build_pseudo_table(elements_group):
 
 def _read_one_slide_chunks(service, file_id: str) -> List[GoogleChunk]:
     """内部：通过 Slides API 读取单个演示文稿，返回 GoogleChunk 列表。"""
+    import time, logging
+    _logger = logging.getLogger(__name__)
+    _t0 = time.perf_counter()
     presentation = service.presentations().get(presentationId=file_id).execute()
+    _api_ms = (time.perf_counter() - _t0) * 1000
     title = presentation.get("title", "")
     pres_id = presentation.get("presentationId", "")
 
+    _t1 = time.perf_counter()
     chunks: List[GoogleChunk] = []
 
     for i, slide in enumerate(presentation.get("slides", []), start=1):

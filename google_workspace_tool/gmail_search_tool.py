@@ -51,6 +51,7 @@ def search_gmail(
     include_spam_trash: bool = False,
     max_pages: Optional[int] = None,
     creds=None,
+    fetch_snippets: bool = False,
 ) -> list[dict]:
     """
     搜索 Gmail 邮件，返回消息 ID 列表。
@@ -118,6 +119,23 @@ def search_gmail(
             content=e.content,
             uri=e.uri,
         ) from e
+
+    # 可选：顺序拉 snippet/subject（不能用 ThreadPool — googleapiclient service 非线程安全会卡死）
+    # 5 messages × ~200ms = ~1s 顺序成本，可接受
+    if fetch_snippets and messages:
+        for m in messages:
+            try:
+                detail = service.users().messages().get(
+                    userId="me", id=m["id"], format="metadata",
+                    metadataHeaders=["Subject", "From", "Date"],
+                ).execute()
+                m["snippet"] = detail.get("snippet", "")
+                headers = {h["name"]: h["value"] for h in detail.get("payload", {}).get("headers", [])}
+                m["subject"] = headers.get("Subject", "")
+                m["from"] = headers.get("From", "")
+                m["date"] = headers.get("Date", "")
+            except Exception:
+                m["snippet"] = ""
 
     return messages
 

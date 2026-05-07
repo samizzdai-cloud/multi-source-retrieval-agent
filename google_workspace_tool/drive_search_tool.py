@@ -38,7 +38,7 @@ from googleapiclient.errors import HttpError
 # 默认返回字段：覆盖常用元数据（严格收束以提升性能并保留重排所需关键特征）
 DEFAULT_FIELDS = (
     "nextPageToken, files("
-    "id, name, mimeType, description, modifiedTime, createdTime, viewedByMeTime, "
+    "id, name, mimeType, description, size, modifiedTime, createdTime, viewedByMeTime, "
     "owners(displayName, emailAddress)"
     ")"
 )

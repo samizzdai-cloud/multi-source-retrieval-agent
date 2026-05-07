@@ -22,6 +22,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from google.adk.agents.llm_agent import LlmAgent
@@ -172,9 +173,20 @@ def _chunks_block(
         route = meta.get("route") or meta.get("route_hint") or ""
         source_label = meta.get("source_name") or ""
         heading = meta.get("heading_path") or ""
+        modified = (
+            meta.get("modified_time")
+            or meta.get("modifiedTime")
+            or meta.get("drive_modified")
+            or ""
+        )
+        created = meta.get("created_time") or meta.get("createdTime") or ""
+        sq_display = (c.sub_query or "")[:35]
         extra = f" | route={route}" if route else ""
         extra += f" | src={source_label[:30]}" if source_label else ""
+        extra += f" | modified={str(modified)[:10]}" if modified else ""
+        extra += f" | created={str(created)[:10]}" if created else ""
         extra += f" | heading={heading[:40]}" if heading else ""
+        extra += f" | sq={sq_display}" if sq_display else ""
         return (
             f"- id={c.id} | focuses={sorted(c.target_focuses)} "
             f"| score={c.score}{extra} | {snippet}"
@@ -228,6 +240,7 @@ def _build_plan_only_prompt(
     parts = [
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"source_profile_block:\n{profile.to_prompt_block()}",
+        f"current_date: {date.today().isoformat()}",
         f"source_top_k: {source_top_k}",
         f"sub_query_total_cap: {sq_budget}  (sub_queries 总数不得超过该上限)",
     ]
@@ -241,6 +254,7 @@ def _build_eval_only_prompt(
 ) -> str:
     return (
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
+        f"current_date: {date.today().isoformat()}\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}\n\n"
         f"source_top_k: {source_top_k}"
     )
@@ -256,6 +270,7 @@ def _build_plan_eval_prompt(
 ) -> str:
     return (
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
+        f"current_date: {date.today().isoformat()}\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}\n\n"
         f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}\n"
         f"source_top_k: {source_top_k}"
@@ -294,6 +309,9 @@ class SourceAgent:
         # 运行时注入：execute_sub_query 通过 target_focus 回查对应 Focus 对象
         self._current_focus_lookup: Dict[str, Focus] = {}
         self._sub_query_seq: int = 0
+        # 子类（如 GoogleSourceAgent）可在 _execute_batch 中提前 fire eval_only LLM 调用，
+        # 与 batch_total 末尾的 sub-query rerank 并行，节省 1-2s 串行开销。
+        self._eval_preview_task: Optional["asyncio.Task[List[ChunkEntry]]"] = None
 
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         """构造用于第一轮规划的 LLM Agent，子类覆写。"""
@@ -441,14 +459,29 @@ class SourceAgent:
         logger.info("[%s] plan produced %d sub_queries", self.source, len(sub_queries))
 
         # B. execute（并发跑所有 sub_query）
+        # 子类可能在 _execute_batch 内部 fire 一个 eval_only preview task（与末尾 sub-query rerank 并行）
+        self._eval_preview_task = None
         await self._execute_batch(sub_queries, chunk_pool)
 
         if not chunk_pool:
             logger.warning("[%s] execute produced 0 chunks, skip eval_only", self.source)
+            if self._eval_preview_task is not None:
+                self._eval_preview_task.cancel()
+                self._eval_preview_task = None
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
 
         # C. eval_only 收尾（单 loop 场景下按 spec §2.4 必跑一次）
-        top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
+        if self._eval_preview_task is not None:
+            try:
+                top_chunks = await self._eval_preview_task
+                logger.info("[%s] eval_only via preview pipeline (saved sub-query rerank tail)", self.source)
+            except Exception as e:
+                logger.warning("[%s] eval_preview failed (%s) → fallback eval_only_finalize", self.source, e)
+                top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
+            finally:
+                self._eval_preview_task = None
+        else:
+            top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
         return SourceAgentResult(self.source, top_chunks, loops_used=1, elapsed_s=0.0)
 
     # ── 多 loop 路径：plan_only → execute → (plan_eval → execute)* → eval_only ──
@@ -551,6 +584,7 @@ class SourceAgent:
         top_ids: List[str] = eval_out.get("top_k_chunk_ids", [])
         tiers_map: Dict[str, Dict] = tiers_list_to_map(eval_out.get("tiers"))
         chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+        chunks = self._post_process_top_chunks(focuses, chunks)
         logger.info(
             "TIMING source.eval_only source=%s input_chunks=%d selected=%d ms=%.1f",
             self.source,
@@ -558,6 +592,14 @@ class SourceAgent:
             len(chunks),
             (time.perf_counter() - started) * 1000.0,
         )
+        return chunks
+
+    def _post_process_top_chunks(
+        self,
+        focuses: List[Focus],
+        chunks: List[ChunkEntry],
+    ) -> List[ChunkEntry]:
+        _ = focuses
         return chunks
 
     def _assemble_top_chunks(

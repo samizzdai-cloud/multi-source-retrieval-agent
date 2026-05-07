@@ -47,6 +47,7 @@ class GmailPool:
         self._done: Set[str] = set()
         self._reading: Set[str] = set()
         self._events: Dict[str, asyncio.Event] = {}
+        self._event_loops: Dict[str, asyncio.AbstractEventLoop] = {}
 
     # ── 元数据 ──────────────────────────────────────────────────────────
 
@@ -57,6 +58,12 @@ class GmailPool:
     def get_meta(self, thread_id: str) -> Optional[GmailThreadMeta]:
         return self._meta_cache.get(thread_id)
 
+    def ensure_waitable(self, thread_id: str) -> None:
+        if thread_id in self._done or thread_id in self._events:
+            return
+        self._events[thread_id] = asyncio.Event()
+        self._event_loops[thread_id] = asyncio.get_running_loop()
+
     # ── 状态管理 ────────────────────────────────────────────────────────
 
     def mark_reading(self, thread_id: str) -> bool:
@@ -64,27 +71,35 @@ class GmailPool:
         if thread_id in self._done or thread_id in self._reading:
             return False
         self._reading.add(thread_id)
-        self._events[thread_id] = asyncio.Event()
+        if thread_id not in self._events:
+            self._events[thread_id] = asyncio.Event()
+            self._event_loops[thread_id] = asyncio.get_running_loop()
         return True
 
     def mark_done(self, thread_id: str, chunks: List[UnifiedChunk]) -> None:
         self._reading.discard(thread_id)
         self._done.add(thread_id)
         self._chunk_cache[thread_id] = chunks
-        evt = self._events.pop(thread_id, None)
+        evt = self._events.get(thread_id)
+        loop = self._event_loops.get(thread_id)
         if evt:
-            evt.set()
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(evt.set)
+            else:
+                evt.set()
 
     async def wait_for_done(self, thread_id: str, timeout: float) -> List[UnifiedChunk]:
         if thread_id in self._chunk_cache:
             return self._chunk_cache[thread_id]
+        self.ensure_waitable(thread_id)
         evt = self._events.get(thread_id)
-        if not evt:
-            return []
         try:
             await asyncio.wait_for(evt.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             pass
+        if thread_id in self._done:
+            self._events.pop(thread_id, None)
+            self._event_loops.pop(thread_id, None)
         return self._chunk_cache.get(thread_id, [])
 
     def is_done(self, thread_id: str) -> bool:

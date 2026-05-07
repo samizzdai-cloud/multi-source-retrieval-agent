@@ -28,6 +28,8 @@ class SheetMeta:
     title: str
     url: str
     sheets: List[dict] = field(default_factory=list)
+    drive_size: Optional[int] = None
+    modified_time: Optional[str] = None
     # sheets 中每个 dict: {sheetId, title, index, gridProperties: {rowCount, columnCount}, merges}
 
 
@@ -52,6 +54,7 @@ class SheetPool:
         self._done: Set[str] = set()
         self._reading: Set[str] = set()
         self._events: Dict[str, asyncio.Event] = {}
+        self._event_loops: Dict[str, asyncio.AbstractEventLoop] = {}
 
     # ── 元数据获取 ──────────────────────────────────────────────────────
 
@@ -61,6 +64,7 @@ class SheetPool:
         creds,
         native_api_timeout: int = 10,
         max_workers: int = 8,
+        batch_timeout_s: Optional[float] = None,
     ) -> Dict[str, SheetMeta]:
         """并发获取多个 spreadsheet 的元数据（含 merges + gridProperties）。
 
@@ -69,14 +73,17 @@ class SheetPool:
             creds: 已授权的 Credentials 对象
             native_api_timeout: 每个请求 API 超时（秒）
             max_workers: 并发 worker 数
+            batch_timeout_s: 整批元数据预取最长等待秒数；超时返回已完成结果
 
         Returns:
             file_id → SheetMeta 的字典（仅包含成功获取的）
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
         from google_workspace_tool.readers.sheet_reader import _build_service
 
         fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties,merges)"
+        if batch_timeout_s is None:
+            batch_timeout_s = max(float(native_api_timeout) + 2.0, 20.0)
 
         # 分离已缓存和未缓存的
         uncached_ids = [fid for fid in file_ids if fid not in self._meta_cache]
@@ -117,14 +124,37 @@ class SheetPool:
             except HttpError as e:
                 logger.warning("[sheet_pool] metadata fetch failed for %s: %s", fid, e)
                 return fid, None, e
+            except (TimeoutError, OSError) as e:
+                logger.warning("[sheet_pool] metadata fetch timeout/error for %s: %s", fid, e)
+                return fid, None, e
+            except Exception as e:
+                logger.warning("[sheet_pool] metadata fetch unexpected error for %s: %s", fid, e)
+                return fid, None, e
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_fid = {executor.submit(_fetch_one, fid): fid for fid in uncached_ids}
-            for future in as_completed(future_to_fid):
-                fid, sm, error = future.result()
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        future_to_fid = {executor.submit(_fetch_one, fid): fid for fid in uncached_ids}
+        try:
+            for future in as_completed(future_to_fid, timeout=batch_timeout_s):
+                fid = future_to_fid[future]
+                try:
+                    fid, sm, error = future.result()
+                except Exception as e:
+                    logger.warning("[sheet_pool] metadata future failed for %s: %s", fid, e)
+                    continue
                 if sm is not None:
                     self._meta_cache[fid] = sm
                     results[fid] = sm
+        except FuturesTimeoutError:
+            pending = [fid for fut, fid in future_to_fid.items() if not fut.done()]
+            logger.warning(
+                "[sheet_pool] metadata batch timeout after %.1fs: completed=%d pending=%d pending_ids=%s",
+                batch_timeout_s, len(results), len(pending), [fid[:12] for fid in pending[:8]],
+            )
+            for fut in future_to_fid:
+                if not fut.done():
+                    fut.cancel()
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         return results
 
@@ -158,6 +188,12 @@ class SheetPool:
             return 0
         return s.get("gridProperties", {}).get("rowCount", 0)
 
+    def ensure_waitable(self, file_id: str) -> None:
+        if file_id in self._done or file_id in self._events:
+            return
+        self._events[file_id] = asyncio.Event()
+        self._event_loops[file_id] = asyncio.get_running_loop()
+
     # ── 状态管理 ────────────────────────────────────────────────────────
 
     def mark_reading(self, file_id: str) -> bool:
@@ -165,7 +201,9 @@ class SheetPool:
         if file_id in self._done or file_id in self._reading:
             return False
         self._reading.add(file_id)
-        self._events[file_id] = asyncio.Event()
+        if file_id not in self._events:
+            self._events[file_id] = asyncio.Event()
+            self._event_loops[file_id] = asyncio.get_running_loop()
         return True
 
     def mark_done(self, file_id: str, chunks: List[UnifiedChunk]) -> None:
@@ -173,21 +211,27 @@ class SheetPool:
         self._reading.discard(file_id)
         self._done.add(file_id)
         self._chunk_cache[file_id] = chunks
-        evt = self._events.pop(file_id, None)
+        evt = self._events.get(file_id)
+        loop = self._event_loops.get(file_id)
         if evt:
-            evt.set()
+            if loop and loop.is_running():
+                loop.call_soon_threadsafe(evt.set)
+            else:
+                evt.set()
 
     async def wait_for_done(self, file_id: str, timeout: float) -> List[UnifiedChunk]:
         """等待 file 读取完成（含超时）。返回已完成的 chunks。"""
         if file_id in self._chunk_cache:
             return self._chunk_cache[file_id]
+        self.ensure_waitable(file_id)
         evt = self._events.get(file_id)
-        if not evt:
-            return []
         try:
             await asyncio.wait_for(evt.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             pass
+        if file_id in self._done:
+            self._events.pop(file_id, None)
+            self._event_loops.pop(file_id, None)
         return self._chunk_cache.get(file_id, [])
 
     def is_done(self, file_id: str) -> bool:

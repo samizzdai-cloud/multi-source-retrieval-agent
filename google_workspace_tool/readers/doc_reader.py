@@ -20,16 +20,24 @@ _MIME_DOCS = "application/vnd.google-apps.document"
 
 def _read_one_doc(service, file_id: str, max_tabs: Optional[int] = None) -> dict:
     """内部：通过 Docs API 读取单个文档，返回结构化 Markdown 和纯文本。"""
+    import time, logging
+    _logger = logging.getLogger(__name__)
+    _t0 = time.perf_counter()
     fetcher = BatchDocFetcher(docs_service=service, fields=None)
     doc_json = fetcher.fetch_one(file_id)
+    _api_ms = (time.perf_counter() - _t0) * 1000
 
+    _t1 = time.perf_counter()
     parser = DocParser()
     doc_content = parser.parse(doc_json, max_tabs=max_tabs)
 
     renderer = MarkdownRenderer()
     md = renderer.render(doc_content)
     plain_text = strip_md_to_plain(md)
+    _chunk_ms = (time.perf_counter() - _t1) * 1000
 
+    _logger.info("[TIMING] doc.reader file_id=%s... api_ms=%.1f chunk_ms=%.1f total_ms=%.1f",
+                 file_id[:20], _api_ms, _chunk_ms, _api_ms + _chunk_ms)
     return {"text": plain_text, "structured_md": md}
 
 
