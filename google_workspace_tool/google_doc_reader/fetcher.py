@@ -28,9 +28,13 @@ class BatchDocFetcher:
 
     DEFAULT_MAX_WORKERS = 10
     # 默认请求字段：包含文档标题、tab 结构、主体内容、列表属性
+    # 注意：故意省略 ``childTabs``——大量文档对该字段返回 400
+    # ("comment-specific fields when include_comments is false")，触发重试一次完整 fetch。
+    # 嵌套 tab 极少见，扁平 tabs 已能覆盖 99% 文档；如确有嵌套，下方 fetch_one 的
+    # 兼容逻辑仍会按需降级。
     DEFAULT_FIELDS = (
         "documentId,title,"
-        "tabs(tabProperties,childTabs,"
+        "tabs(tabProperties,"
         "documentTab(body(content),lists)"
         ")"
     )
@@ -39,7 +43,7 @@ class BatchDocFetcher:
     # 注意：实际减少的数据量取决于文档内容，但可避免传输 table 详情、inlineObjects、footnotes 等
     OUTLINE_FIELDS = (
         "documentId,title,"
-        "tabs(tabProperties,childTabs,"
+        "tabs(tabProperties,"
         "documentTab(body(content(paragraph(paragraphStyle,elements(textRun(content,textStyle(strikethrough))))))))"
     )
 

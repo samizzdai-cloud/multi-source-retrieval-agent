@@ -81,7 +81,12 @@ class SheetPool:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
         from google_workspace_tool.readers.sheet_reader import _build_service
 
-        fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties,merges)"
+        # 注意：故意省略 ``merges``。Drive 对每个 spreadsheet 会返回**全部** merge 区间，
+        # 大表（多 sheet × 多 merge）单次响应可达 MB 级，是 Phase B 的主要尾延迟源。
+        # process_section_to_markdown 仅在 merges 存在时增强表头/合并格，缺省也能稳定输出。
+        # 如未来需要 merge-aware 渲染，可在 sheet_reader.read_one 内补一次轻量
+        # spreadsheets().get(fields="sheets(properties.sheetId,merges)") 的按需调用。
+        fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties)"
         if batch_timeout_s is None:
             batch_timeout_s = max(float(native_api_timeout) + 2.0, 20.0)
 
@@ -112,7 +117,8 @@ class SheetPool:
                         "title": p.get("title", ""),
                         "index": p.get("index", 0),
                         "gridProperties": p.get("gridProperties", {}),
-                        "merges": s.get("merges", []),
+                        # merges 故意省略；fields 没拉，s.get("merges") 总是 []
+                        "merges": [],
                     })
                 sm = SheetMeta(
                     file_id=fid,
