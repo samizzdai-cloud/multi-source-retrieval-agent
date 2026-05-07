@@ -2356,6 +2356,10 @@ class GoogleSourceAgent(SourceAgent):
                 try:
                     pre_filter_started = time.perf_counter()
                     target_n = max(int(self.cfg.source_top_k) * 2, int(self.cfg.source_top_k) + 2)
+                    # 独立硬上限（如 balanced 把 10 压到 8 减 eval LLM RTT）。
+                    eval_cap = getattr(self.cfg, "google_eval_input_max_chunks", None)
+                    if eval_cap and int(eval_cap) > 0:
+                        target_n = min(target_n, int(eval_cap))
                     # 用 focus 全文集合作为 query（跨 sq 评估）
                     seen = set()
                     focus_texts = []

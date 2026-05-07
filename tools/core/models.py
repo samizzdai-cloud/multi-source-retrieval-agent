@@ -264,6 +264,11 @@ class SourceAgentConfig:
     google_file_content_cache_max_files: int = 64           # 缓存最大条目数
     google_enable_cross_sq_pre_filter: bool = True          # X1: chunk_pool 进 eval_only 前用 Qwen rerank 收口
     google_cross_sq_pre_filter_threshold: int = 10          # chunk_pool > 此阈值才触发（默认 source_top_k * 2）
+    # eval_only LLM 输入硬上限（独立于 source_top_k）。当 cross_sq_pre_filter 计算
+    # target_n = max(source_top_k*2, source_top_k+2) 后，再与本字段 min 取小值。
+    # None / 0 表示不额外限制（沿用旧 target_n 行为）。
+    # 用途：保留 source_top_k=5 输出的同时，把 eval input 从 10 压到 6-8 减 LLM RTT。
+    google_eval_input_max_chunks: Optional[int] = None
     google_native_only: bool = False                        # lite 模式开启：仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv）
     google_sheet_chunk_cap: int = 50
     google_sheet_prefilter_trigger_count: int = 6
@@ -433,6 +438,14 @@ class RetrieveConfig:
                                      # sheet tab-level cap=3：实验证明 2 没省 wall-clock（sheet read
                                      # 已并行，4 workers 吞得下 -28% per-read），但 important 召回 -1。
                                      "google_sheet_candidates_per_sq": 3,
+                                     # Sheet worker 4 → 8：让 typical 6 sheets/query 全并行无排队。
+                                     # Drive Sheets API 配额每分钟 60 reads/user，8 并发不触限。
+                                     "google_type_pool_sheet_workers": 8,
+                                     # eval_only 输入限制（google_eval_input_max_chunks）实验：
+                                     # 8 vs default 10 实测 critical 平均 -1.6，Q4 全 0C，
+                                     # eval LLM 看不到第 9-10 名候选时漏掉关键 chunk。回滚到 None
+                                     # （沿用 source_top_k*2=10）。如未来发现 eval RTT 是主瓶颈
+                                     # 可单独打开。
                                      "google_max_gmail_threads_per_subquery": 3,
                                      "google_gmail_rerank_top_n": 3},
                       }},
@@ -554,6 +567,7 @@ class RetrieveConfig:
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
             "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
             "google_type_pool_nonnative_workers",
+            "google_eval_input_max_chunks",
             "google_gmail_attachment_max_files",
             "google_doc_search_per_sq", "google_slide_search_per_sq", "google_sheet_search_per_sq",
             "google_doc_candidates_per_sq", "google_slide_candidates_per_sq", "google_sheet_candidates_per_sq",
