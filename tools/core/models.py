@@ -426,14 +426,41 @@ class RetrieveConfig:
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
-                          "google": {"google_download_timeout_s": 12.0, "google_api_timeout_s": 12.0,
-                                     "google_enable_gmail_attachments": True,
-                                     "google_enable_native_slide_size_gate": True,
-                                     "google_enable_conditional_file_rerank": True,
-                                     "google_enable_type_pools": True,
-                                     "google_enable_gmail_isolation": True,
-                                     "google_doc_search_per_sq": 16, "google_slide_search_per_sq": 15,
-                                     "google_doc_candidates_per_sq": 9, "google_slide_candidates_per_sq": 9},
+                          "google": {
+                              # 单轮（覆盖 LOOSE 的 max_loops=2，eval_layer 仍兜底）
+                              "max_loops": 1,
+                              # Timeout：balanced + 1s
+                              "google_download_timeout_s": 8.0,
+                              "google_api_timeout_s": 8.0,
+                              "google_per_file_timeout_s": 10.0,
+                              "google_pptx_download_timeout_s": 6.0,
+                              "google_word_download_timeout_s": 8.0,
+                              # Size gate：balanced × 1.10
+                              "google_native_doc_size_gate_bytes": 50_000_000,      # 45 → 50MB
+                              "google_native_slide_size_gate_bytes": 60_000_000,    # 55 → 60MB
+                              "google_pptx_size_gate_bytes": 38_500_000,            # 35 → 38.5MB
+                              "google_word_size_gate_bytes": 33_000_000,            # 30 → 33MB
+                              # Worker pool：每池 +1
+                              "google_type_pool_sheet_workers": 5,                  # 4 → 5
+                              "google_type_pool_doc_workers": 4,                    # 3 → 4
+                              "google_type_pool_slide_workers": 4,                  # 3 → 4
+                              "google_type_pool_nonnative_workers": 3,              # 2 → 3
+                              "google_type_pool_gmail_workers": 3,                  # 2 → 3
+                              # nonnative gate 全开（所有家族 × 所有 query_type）
+                              "google_nonnative_search_query_types": {
+                                  "sheet": {"structured", "concept", "personal_recent"},
+                                  "slide": {"structured", "concept", "personal_recent"},
+                                  "doc":   {"structured", "concept", "personal_recent"},
+                              },
+                              # 沿用现有积极召回（其他参数不变）
+                              "google_enable_gmail_attachments": True,
+                              "google_enable_native_slide_size_gate": True,
+                              "google_enable_conditional_file_rerank": True,
+                              "google_enable_type_pools": True,
+                              "google_enable_gmail_isolation": True,
+                              "google_doc_search_per_sq": 16, "google_slide_search_per_sq": 15,
+                              "google_doc_candidates_per_sq": 9, "google_slide_candidates_per_sq": 9,
+                          },
                       }},
     }
 
