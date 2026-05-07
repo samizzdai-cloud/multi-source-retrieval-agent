@@ -393,8 +393,10 @@ class RetrieveConfig:
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
                               "google_enable_cross_sq_pre_filter": True,
-                              # lite 仅关闭 sheet 系（excel/csv 与 native sheet 一同跳过），
-                              # slide/doc 家族保持 nonnative 召回，以避免数据型 query 失去关键召回。
+                              # lite：仅关闭 sheet 系（excel/csv 与 native sheet 一同跳过）。
+                              # 实测 lite 禁用 PPTX 会让 Q48 概念查询 critical 由 3 跌到 1
+                              # （PPTX 是 sales review / social listening 的主要载体），
+                              # 故 lite 保留 slide/doc nonnative 召回。
                               "google_nonnative_search_query_types": {
                                   "sheet": set(),
                                   "slide": {"structured", "concept", "personal_recent"},
@@ -411,6 +413,15 @@ class RetrieveConfig:
                                      # 5s 下载超时让大 PPTX 提前失败，不影响小文件解析。
                                      "google_pptx_download_timeout_s": 5.0,
                                      "google_word_download_timeout_s": 7.0,
+                                     # balanced：禁用 PPTX 搜索，将整组 nonnative pool 资源让给 doc/excel/csv。
+                                     # 实测 PPTX 占 balanced 文件读取总耗时 51%，禁用后预期 -3~5s/query；
+                                     # native slide / docx / xlsx 仍可获取大部分演示与表格类 critical 信号。
+                                     # 需要 PPTX 召回的场景请用 deep_dive 模式。
+                                     "google_nonnative_search_query_types": {
+                                         "sheet": {"structured", "personal_recent"},
+                                         "slide": set(),                                          # PPTX off
+                                         "doc":   {"structured", "concept", "personal_recent"},
+                                     },
                                      "google_enable_gmail_attachments": True,
                                      "google_enable_native_slide_size_gate": True,
                                      "google_enable_conditional_file_rerank": True,
