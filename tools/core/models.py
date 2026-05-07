@@ -383,7 +383,8 @@ class RetrieveConfig:
                               "google_enable_gmail_attachments": False,
                               # 候选/检索数量收紧
                               "google_doc_search_per_sq": 8, "google_slide_search_per_sq": 8,
-                              "google_doc_candidates_per_sq": 4, "google_slide_candidates_per_sq": 3,
+                              # doc rerank 候选 +1（4→5），适度放开 doc/docx/txt 召回。
+                              "google_doc_candidates_per_sq": 5, "google_slide_candidates_per_sq": 3,
                               "google_sheet_candidates_per_sq": 3,
                               "google_max_gmail_threads_per_subquery": 2,
                               "google_gmail_rerank_top_n": 2,
@@ -393,13 +394,11 @@ class RetrieveConfig:
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
                               "google_enable_cross_sq_pre_filter": True,
-                              # lite：仅关闭 sheet 系（excel/csv 与 native sheet 一同跳过）。
-                              # 实测 lite 禁用 PPTX 会让 Q48 概念查询 critical 由 3 跌到 1
-                              # （PPTX 是 sales review / social listening 的主要载体），
-                              # 故 lite 保留 slide/doc nonnative 召回。
+                              # lite：sheet + PPTX 全关；保留 doc nonnative（docx/txt 较快）。
+                              # 配合 doc_candidates_per_sq +1（4→5）补足召回深度。
                               "google_nonnative_search_query_types": {
                                   "sheet": set(),
-                                  "slide": {"structured", "concept", "personal_recent"},
+                                  "slide": set(),                                          # PPTX off
                                   "doc":   {"structured", "concept", "personal_recent"},
                               },
                           },
@@ -428,7 +427,8 @@ class RetrieveConfig:
                                      "google_enable_type_pools": True,
                                      "google_enable_gmail_isolation": True,
                                      "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
-                                     "google_doc_candidates_per_sq": 5, "google_slide_candidates_per_sq": 4,
+                                     # doc rerank 候选 +1（5→6），PPTX 已禁后把预算转给 doc 召回。
+                                     "google_doc_candidates_per_sq": 6, "google_slide_candidates_per_sq": 4,
                                      "google_sheet_candidates_per_sq": 3,
                                      "google_max_gmail_threads_per_subquery": 3,
                                      "google_gmail_rerank_top_n": 3},
