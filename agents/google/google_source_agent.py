@@ -15,7 +15,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
 from tools.core.source_profiles import get_profile
@@ -180,6 +180,92 @@ def _tokenize(text: str) -> List[str]:
     if not text:
         return []
     return [t.lower() for t in _TOKEN_RE.findall(text)]
+
+
+def _normalize_google_query_type(query_type: Optional[str]) -> str:
+    """Google keeps concept/personal_recent explicit; everything else is structured."""
+    if query_type in ("concept", "personal_recent"):
+        return query_type
+    return "structured"
+
+
+def _sheet_cap_for_query_types(cfg: SourceAgentConfig, query_types: Set[str]) -> int:
+    if query_types and all(qt == "concept" for qt in query_types):
+        return max(0, int(cfg.google_sheet_metadata_max_files_concept))
+    return max(0, int(cfg.google_sheet_metadata_max_files_structured))
+
+
+def _sheet_has_time_or_fresh_intent(text: str) -> bool:
+    if not text:
+        return False
+    lowered = text.lower()
+    if re.search(r"\b20\d{2}\b|20\d{2}年|\bq[1-4]\b|[1-9]月|1[0-2]月", lowered):
+        return True
+    return any(
+        term in lowered
+        for term in (
+            "今年", "本年", "当前", "最新", "最近", "近况", "近期",
+            "current", "latest", "recent", "this year", "new", "launch",
+            "open sales", "上线", "首发", "开售",
+        )
+    )
+
+
+def _sheet_has_new_product_intent(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(re.search(r"\b(?:rm\s*11|red\s*magic\s*11|redmagic\s*11|11\s*pro|11\s*air|10s)\b", lowered))
+
+
+def _sheet_file_local_score(file_meta: dict, query_text: str, source_channels: Set[str]) -> float:
+    """Cheap file-level score before Sheet metadata fetch.
+
+    It intentionally penalizes but does not hard-drop stale/sidecar candidates.
+    """
+    title = str(file_meta.get("name") or "")
+    desc = str(file_meta.get("description") or "")
+    modified = str(file_meta.get("modifiedTime") or "")
+    hay = f"{title} {desc} {modified}".lower()
+    q_tokens = [t for t in _tokenize(query_text) if len(t) > 1 or re.match(r"[一-鿿]", t)]
+    unique_q = set(q_tokens)
+    title_tokens = set(_tokenize(title))
+    hay_tokens = set(_tokenize(hay))
+
+    score = 0.0
+    if unique_q:
+        title_hits = len(unique_q & title_tokens)
+        all_hits = len(unique_q & hay_tokens)
+        score += min(0.55, 0.12 * title_hits)
+        score += min(0.35, 0.05 * max(0, all_hits - title_hits))
+
+    metric_terms = (
+        "gmv", "revenue", "sales", "traffic", "projection", "budget", "roas", "cvr", "ctr",
+        "库存", "销量", "销售", "收入", "预算", "转化", "流量", "进度", "项目", "状态",
+    )
+    if any(term in hay for term in metric_terms):
+        score += 0.12
+    if any(ch in source_channels for ch in ("fulltext", "fallback")):
+        score += 0.08
+
+    # Source channel penalty: sidecar is useful fallback, not fulltext-equivalent.
+    if "sidecar" in source_channels and "fulltext" not in source_channels:
+        sidecar_penalty = -0.05 if score >= 0.28 else -0.15
+        score += sidecar_penalty
+    if "broad_fallback" in source_channels and "fulltext" not in source_channels:
+        score -= 0.10
+    elif "fallback" in source_channels and "fulltext" not in source_channels:
+        score -= 0.05
+
+    if _sheet_has_time_or_fresh_intent(query_text):
+        years = [int(y) for y in re.findall(r"20\d{2}", hay)]
+        query_years = [int(y) for y in re.findall(r"20\d{2}", query_text)]
+        target_year = max(query_years) if query_years else date.today().year
+        if years and max(years) < target_year:
+            score -= min(0.35, 0.12 * (target_year - max(years)))
+
+    if _sheet_has_new_product_intent(query_text) and re.search(r"\b(?:rm\s*[6-9]|red\s*magic\s*[6-9]|redmagic\s*[6-9])\b", hay):
+        score -= 0.25
+
+    return score
 
 
 def _query_aware_truncate(
@@ -507,6 +593,149 @@ class GoogleSourceAgent(SourceAgent):
 
         return selected
 
+    def _prefilter_sheet_files_before_metadata(
+        self,
+        search_results: List[dict],
+        focus_text_map: Dict[str, str],
+    ) -> Tuple[Set[str], Dict[str, dict]]:
+        """Filter Google Sheet files before metadata prefetch.
+
+        Returns the allowed spreadsheet ids and the raw candidate map used for
+        logging/metadata backfill. Non-native Sheets are ignored here because
+        Phase B only batchFetches native Google Sheets metadata.
+        """
+        started = time.perf_counter()
+        raw_by_id: Dict[str, dict] = {}
+        focus_by_id: Dict[str, Set[str]] = {}
+        query_type_by_id: Dict[str, Set[str]] = {}
+        query_parts_by_id: Dict[str, List[str]] = {}
+        channels_by_id: Dict[str, Set[str]] = {}
+
+        for res in search_results:
+            sq = res.get("sq")
+            if not sq:
+                continue
+            qt = _normalize_google_query_type(getattr(sq, "query_type", None))
+            focus_text = focus_text_map.get(sq.sub_query_id, sq.target_focus)
+            for f in res.get("files", []):
+                if f.get("mimeType") != _MIME_SHEETS:
+                    continue
+                fid = f.get("id")
+                if not fid:
+                    continue
+                raw_by_id.setdefault(fid, f)
+                focus_by_id.setdefault(fid, set()).add(focus_text or "")
+                query_type_by_id.setdefault(fid, set()).add(qt)
+                query_parts_by_id.setdefault(fid, []).append(str(sq.query or ""))
+                channels = set(f.get("_google_sheet_channels") or [])
+                if f.get("_google_sheet_channel"):
+                    channels.add(f.get("_google_sheet_channel"))
+                channels_by_id.setdefault(fid, set()).update(channels or {"fulltext"})
+
+        raw_count = len(raw_by_id)
+        if raw_count == 0:
+            return set(), raw_by_id
+
+        trigger = int(self.cfg.google_sheet_prefilter_trigger_count)
+        if raw_count <= trigger:
+            logger.info(
+                "TIMING google.sheet_prefilter raw=%d selected=%d local_ms=%.1f qwen_ms=0.0 reason=below_trigger",
+                raw_count, raw_count, _elapsed_ms(started),
+            )
+            return set(raw_by_id), raw_by_id
+
+        all_query_types: Set[str] = set()
+        for qts in query_type_by_id.values():
+            all_query_types.update(qts)
+        cap = _sheet_cap_for_query_types(self.cfg, all_query_types)
+        if cap <= 0:
+            logger.info(
+                "TIMING google.sheet_prefilter raw=%d selected=0 local_ms=%.1f qwen_ms=0.0 reason=cap_zero",
+                raw_count, _elapsed_ms(started),
+            )
+            return set(), raw_by_id
+
+        scored: List[Tuple[float, str]] = []
+        for fid, f in raw_by_id.items():
+            query_text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
+            score = _sheet_file_local_score(f, query_text, channels_by_id.get(fid, set()))
+            scored.append((score, fid))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        local_ms = _elapsed_ms(started)
+
+        selected_ids = [fid for _, fid in scored[:cap]]
+        qwen_ms = 0.0
+        reason = "local"
+        qwen_trigger = int(self.cfg.google_sheet_prefilter_qwen_trigger_count)
+        close_delta = float(self.cfg.google_sheet_prefilter_close_delta)
+        should_qwen = False
+        if raw_count > qwen_trigger and len(scored) > cap:
+            top_score = scored[0][0]
+            boundary_score = scored[min(cap - 1, len(scored) - 1)][0]
+            cutoff_score = scored[cap][0]
+            near_cutoff = sum(1 for score, _ in scored if abs(score - cutoff_score) <= 0.10)
+            should_qwen = (top_score - boundary_score) <= close_delta or near_cutoff >= 4
+
+        if should_qwen:
+            qwen_started = time.perf_counter()
+            try:
+                from tools.core.rerank import select_search_candidates
+
+                candidates = []
+                for rank, (score, fid) in enumerate(scored):
+                    f = raw_by_id[fid]
+                    channels = ",".join(sorted(channels_by_id.get(fid, set())))
+                    candidates.append({
+                        "id": fid,
+                        "title": f.get("name", ""),
+                        "summary": (
+                            f"Title: {f.get('name', '')} | Desc: {f.get('description', '')} | "
+                            f"Modified: {f.get('modifiedTime', '')} | Source: {channels} | "
+                            f"LocalScore: {score:.3f} | LocalRank: {rank + 1}"
+                        ),
+                        "_file_id": fid,
+                    })
+                combined_query = "\n".join(
+                    sorted({p for parts in query_parts_by_id.values() for p in parts if p})
+                    + sorted({f for focuses in focus_by_id.values() for f in focuses if f})
+                )
+                rerank_result = select_search_candidates(
+                    query=combined_query,
+                    candidates=candidates,
+                    top_n=cap,
+                    score_threshold=0.10,
+                    min_keep=min(3, cap),
+                    instruct_template="qa",
+                )
+                if rerank_result.get("status") == "success":
+                    selected = list(rerank_result.get("selected_candidates") or [])
+                    reranked_ids = [c.get("_file_id") or c.get("id") for c in selected if c.get("_file_id") or c.get("id")]
+                    if reranked_ids:
+                        selected_ids = reranked_ids[:cap]
+                        reason = "qwen_close"
+                else:
+                    reason = "qwen_failed_local"
+            except Exception as e:
+                logger.warning("[google] sheet file prefilter qwen rerank failed: %s", e)
+                reason = "qwen_exception_local"
+            qwen_ms = _elapsed_ms(qwen_started)
+
+        allowed = set(selected_ids)
+        for res in search_results:
+            filtered = []
+            for f in res.get("files", []):
+                if f.get("mimeType") == _MIME_SHEETS and f.get("id") not in allowed:
+                    continue
+                filtered.append(f)
+            res["files"] = filtered
+
+        logger.info(
+            "TIMING google.sheet_prefilter raw=%d selected=%d cap=%d local_ms=%.1f qwen_ms=%.1f reason=%s selected_ids=%s",
+            raw_count, len(allowed), cap, local_ms, qwen_ms, reason,
+            [fid[-8:] for fid in selected_ids],
+        )
+        return allowed, raw_by_id
+
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         from .google_retrieve_llm_build import build_google_plan_only_agent
         return build_google_plan_only_agent()
@@ -614,11 +843,25 @@ class GoogleSourceAgent(SourceAgent):
 
             def _merge_file_candidates(primary: List[dict], extra: List[dict]) -> List[dict]:
                 merged = list(primary)
-                seen = {f.get("id") for f in merged if f.get("id")}
+                index_by_id = {f.get("id"): i for i, f in enumerate(merged) if f.get("id")}
+                seen = set(index_by_id)
                 for f in extra:
                     fid = f.get("id")
-                    if fid and fid not in seen:
+                    if fid and fid in seen:
+                        idx = index_by_id.get(fid)
+                        if idx is not None:
+                            existing = dict(merged[idx])
+                            channels = set(existing.get("_google_sheet_channels") or [])
+                            channels.update(f.get("_google_sheet_channels") or [])
+                            if f.get("_google_sheet_channel"):
+                                channels.add(f.get("_google_sheet_channel"))
+                            existing["_google_sheet_channels"] = sorted(channels)
+                            if "fulltext" in channels:
+                                existing["_google_sheet_channel"] = "fulltext"
+                            merged[idx] = existing
+                    elif fid:
                         seen.add(fid)
+                        index_by_id[fid] = len(merged)
                         merged.append(f)
                 return merged
 
@@ -635,16 +878,17 @@ class GoogleSourceAgent(SourceAgent):
 
             # ── 通道 A1/A2/B + Sheet sidecar + Gmail：5 路并发 gather ─────────
             # lite 模式：仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv 二进制下载）
+            sheet_search_enabled = bool(getattr(self.cfg, "google_enable_sheet_search", True))
             if getattr(self.cfg, "google_native_only", False):
                 doc_mimes = {_MIME_DOCS}
                 slide_mimes = {_MIME_SLIDES}
-                sheet_mimes = {_MIME_SHEETS}
+                sheet_mimes = {_MIME_SHEETS} if sheet_search_enabled else set()
             else:
                 doc_mimes = {_MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT}
                 slide_mimes = {_MIME_SLIDES, _MIME_PPTX}
                 sheet_mimes = {
                     _MIME_SHEETS, _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
-                }
+                } if sheet_search_enabled else set()
             q_doc = _build_search_q(
                 sq.query, keyword_groups=keyword_groups, enable_fulltext=enable_fulltext,
                 time_filter=sq.time_filter, author_filter=sq.author_filter,
@@ -655,13 +899,15 @@ class GoogleSourceAgent(SourceAgent):
                 time_filter=sq.time_filter, author_filter=sq.author_filter,
                 mime_types=slide_mimes, max_groups=4,
             )
-            q_sheet = _build_search_q(
-                sq.query, keyword_groups=keyword_groups, enable_fulltext=enable_fulltext,
-                time_filter=sq.time_filter, author_filter=sq.author_filter,
-                mime_types=sheet_mimes,
-            )
+            q_sheet = None
+            if sheet_search_enabled and sheet_mimes:
+                q_sheet = _build_search_q(
+                    sq.query, keyword_groups=keyword_groups, enable_fulltext=enable_fulltext,
+                    time_filter=sq.time_filter, author_filter=sq.author_filter,
+                    mime_types=sheet_mimes,
+                )
             q_sheet_sidecar = None
-            if keyword_groups:
+            if sheet_search_enabled and sheet_mimes and keyword_groups:
                 q_sheet_sidecar = _build_search_q(
                     sq.query, keyword_groups=_title_keyword_groups(), enable_fulltext=False,
                     time_filter=sq.time_filter, author_filter=sq.author_filter,
@@ -694,7 +940,7 @@ class GoogleSourceAgent(SourceAgent):
             phase_a_tasks = [
                 asyncio.to_thread(_drive_call, q_doc, self.cfg.google_doc_search_per_sq, order_by_param),
                 asyncio.to_thread(_drive_call, q_slide, self.cfg.google_slide_search_per_sq, order_by_param),
-                asyncio.to_thread(_drive_call, q_sheet, self.cfg.google_sheet_search_per_sq, order_by_param),
+                asyncio.to_thread(_drive_call, q_sheet, self.cfg.google_sheet_search_per_sq, order_by_param) if q_sheet else asyncio.sleep(0, result=[]),
                 asyncio.to_thread(_drive_call, q_sheet_sidecar, 3, order_by) if q_sheet_sidecar else asyncio.sleep(0, result=[]),
                 asyncio.to_thread(_gmail_call),
             ]
@@ -712,6 +958,27 @@ class GoogleSourceAgent(SourceAgent):
             files_sheet = _unwrap(2, "sheet")
             title_sheets_pre = _unwrap(3, "sheet_sidecar")
             gmail_msg_results = _unwrap(4, "gmail")
+
+            def _tag_sheet_candidates(files: List[dict], channel: str) -> List[dict]:
+                tagged = []
+                for f in files or []:
+                    nf = dict(f)
+                    channels = set(nf.get("_google_sheet_channels") or [])
+                    channels.add(channel)
+                    nf["_google_sheet_channels"] = sorted(channels)
+                    nf["_google_sheet_channel"] = channel
+                    tagged.append(nf)
+                return tagged
+
+            files_sheet = _tag_sheet_candidates(files_sheet, "fulltext")
+            title_sheets_pre = _tag_sheet_candidates(title_sheets_pre, "sidecar")
+
+            def _has_non_sidecar_sheet(files: List[dict]) -> bool:
+                for f in files or []:
+                    channels = set(f.get("_google_sheet_channels") or [])
+                    if any(ch in channels for ch in ("fulltext", "fallback", "broad_fallback")):
+                        return True
+                return False
 
             # ── Sheet sidecar 合并（已在 gather 拿到 title_sheets_pre）
             if title_sheets_pre:
@@ -733,7 +1000,7 @@ class GoogleSourceAgent(SourceAgent):
                     time_filter=sq.time_filter, author_filter=sq.author_filter,
                     mime_types=slide_mimes, max_groups=2,
                 ), self.cfg.google_slide_search_per_sq))
-            if len(files_sheet) == 0 and keyword_groups:
+            if sheet_search_enabled and not _has_non_sidecar_sheet(files_sheet) and keyword_groups:
                 fb1_specs.append(("sheet", _build_search_q(
                     sq.query, keyword_groups=keyword_groups, enable_fulltext=enable_fulltext,
                     time_filter=sq.time_filter, author_filter=sq.author_filter,
@@ -753,7 +1020,7 @@ class GoogleSourceAgent(SourceAgent):
                     elif name == "slide":
                         files_slide = r or []
                     elif name == "sheet":
-                        files_sheet = r or []
+                        files_sheet = _merge_file_candidates(files_sheet, _tag_sheet_candidates(r or [], "fallback"))
                     logger.info("[google] fallback %s sq=%s max_groups=2 results=%d",
                                 name, sq.sub_query_id, len(r) if r else 0)
 
@@ -771,7 +1038,7 @@ class GoogleSourceAgent(SourceAgent):
                     time_filter=sq.time_filter, author_filter=sq.author_filter,
                     mime_types=slide_mimes,
                 ), self.cfg.google_slide_search_per_sq))
-            if len(files_sheet) == 0:
+            if sheet_search_enabled and not _has_non_sidecar_sheet(files_sheet):
                 fb2_specs.append(("sheet", _build_search_q(
                     sq.query, keyword_groups=None, enable_fulltext=enable_fulltext,
                     time_filter=sq.time_filter, author_filter=sq.author_filter,
@@ -791,7 +1058,7 @@ class GoogleSourceAgent(SourceAgent):
                     elif name == "slide":
                         files_slide = r or []
                     elif name == "sheet":
-                        files_sheet = r or []
+                        files_sheet = _merge_file_candidates(files_sheet, _tag_sheet_candidates(r or [], "fallback"))
                     logger.info("[google] fallback2 %s sq=%s raw_query results=%d",
                                 name, sq.sub_query_id, len(r) if r else 0)
 
@@ -813,6 +1080,7 @@ class GoogleSourceAgent(SourceAgent):
                     new_doc = [f for f in broad_files if f.get("mimeType") in doc_mimes and f.get("id") not in seen_ids]
                     new_slide = [f for f in broad_files if f.get("mimeType") in slide_mimes and f.get("id") not in seen_ids]
                     new_sheet = [f for f in broad_files if f.get("mimeType") in sheet_mimes and f.get("id") not in seen_ids]
+                    new_sheet = _tag_sheet_candidates(new_sheet, "broad_fallback")
                     files_doc = files_doc + new_doc
                     files_slide = files_slide + new_slide
                     files_sheet = files_sheet + new_sheet
@@ -913,6 +1181,16 @@ class GoogleSourceAgent(SourceAgent):
         def _short_id(fid: str) -> str:
             return fid[-8:] if fid else ""
 
+        focus_text_map = {}
+        for sq in sub_queries:
+            focus_obj = self._current_focus_lookup.get(sq.target_focus)
+            focus_text_map[sq.sub_query_id] = focus_obj.text if focus_obj else sq.target_focus
+
+        allowed_sheet_ids, _ = self._prefilter_sheet_files_before_metadata(
+            search_results,
+            focus_text_map,
+        )
+
         # ── Phase B: 收集所有 spreadsheet file_ids，batchGet 元数据 ────────
         # SheetPool 元数据获取是同步阻塞调用，但只影响 Sheet 的后续 rerank/读取，
         # 与 Doc/Slide/Gmail 的后续处理互不等待。
@@ -924,6 +1202,8 @@ class GoogleSourceAgent(SourceAgent):
                 if f.get("mimeType") == _MIME_SHEETS:
                     fid = f.get("id")
                     if not fid:
+                        continue
+                    if allowed_sheet_ids and fid not in allowed_sheet_ids:
                         continue
                     all_spreadsheet_ids.add(fid)
                     spreadsheet_size_map[fid] = _drive_file_size(f)
@@ -1032,10 +1312,6 @@ class GoogleSourceAgent(SourceAgent):
                     ))
 
         # ── Phase C: Per-sub_query 筛选（qwen rerank）───────────────────────
-        focus_text_map = {}
-        for sq in sub_queries:
-            focus_obj = self._current_focus_lookup.get(sq.target_focus)
-            focus_text_map[sq.sub_query_id] = focus_obj.text if focus_obj else sq.target_focus
 
         # C1. Sheet 筛选（收紧：精准搜索后只保留 top 5 sheets）
         sq_sheet_selections: Dict[str, List[SheetSelection]] = {}
@@ -1305,10 +1581,12 @@ class GoogleSourceAgent(SourceAgent):
                     gc_list = _gc_cached
                     logger.info("[google] sheet cache HIT %s", _short_id(fid))
                 else:
+                    sheet_meta = sheet_pool.get_meta(fid)
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=_MIME_SHEETS, creds=creds,
                         max_chunk_tokens=800, native_api_timeout=int(self.cfg.google_api_timeout_s),
                         supports_all_drives=True, range_names=range_names, query=query,
+                        known_title=sheet_meta.title if sheet_meta else None,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
@@ -1852,7 +2130,7 @@ class GoogleSourceAgent(SourceAgent):
                     continue
 
                 focus_text = focus_text_map[sq.sub_query_id]
-                query_type = sq.query_type or "concept"
+                query_type = _normalize_google_query_type(sq.query_type)
 
                 selected = _select_chunks_for_sub_query(
                     query=sq.query, focus_text=focus_text, query_type=query_type,

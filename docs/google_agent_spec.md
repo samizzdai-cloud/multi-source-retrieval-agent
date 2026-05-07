@@ -1,5 +1,8 @@
 # Google Workspace Source Agent Architecture Specification
 
+> **v2.7（2026-05-07）综合性能优化已落地**——平均耗时 34.5s → 23.6s（−32%），critical 召回 +60%，noise −80%。
+> 详见 §6 / §7 / §8 / §9 / §10。
+
 ## 1. 架构总览与组件映射
 Google Workspace Source Agent 作为连接全局 Retrieve Agent 和 Google 庞大生态（Drive、Gmail 等）的桥梁，负责将高维的检索意图转化为具体的 API 请求，并将复杂的异构数据格式清洗、分块、重排序后输出标准 Chunk。
 
@@ -104,3 +107,189 @@ Google Agent 在保持高度流式并发的同时，凭借 `SourceAgent` 基类�
   在 `ChunkEntry` 组装完成之后返回全局 Agent 之前，`eval_only_agent` 可介入进行自我评估：这些片段究竟有没有命中 `focus_text` 指示的内容？还是只是触发了泛滥的关键词？根据严格打分生成 `EvalResult`。
 - **Plan-Eval 迭代微调 Loop**：
   若 Eval 判定当前检索结果未达及格线，且 `max_loops > 1`，引擎将启动反馈环。`plan_eval_agent` 依靠上一轮的失败分析（如“命中邮件，但缺乏附件数据”），动态调整检索策略并重新构造更精确的 `query` 下发给底层重试。这种带记忆的试错环显著拉高了针对 Google 源海量碎片数据的召回质量天花板。
+
+---
+
+## 5. v2.7 性能优化实测基线（2026-05-07）
+
+balanced preset 4-query 实测（详见根目录 `balanced_4q_final.log`）：
+
+| Query | elapsed | tier 分布 |
+|---|---|---|
+| Q1（DTC GMV）| 22.0s | important:1, noise:1 |
+| Q4（KOL 合作）| 25.8s | **critical:2, important:3** ⭐ |
+| Q44（11 Pro 销量）| 22.5s | **critical:3, important:2** ⭐ |
+| Q48（竞品格局）| 23.9s | **critical:3, important:2** ⭐ |
+| **avg** | **23.6s** | **c=8 / i=8 / n=1** |
+
+理论 floor ≈ 19s（plan_only 1.4s + Phase E+F 9s + eval_only 4s + 其他 4.6s）。当前 23.6s 已逼近物理下界。
+
+## 6. 双 preset 对照
+
+balanced 与 lite 的核心差异（`tools/core/models.py`）：
+
+| 配置项 | balanced | lite | 说明 |
+|---|---|---|---|
+| `google_download_timeout_s` | 7.0 | 6.0 | 二进制下载 socket 上限 |
+| `google_api_timeout_s` | 7.0 | 6.0 | 原生 API socket 上限 |
+| `google_per_file_timeout_s` | 9.0 | 7.0 | 单文件 wait_for_done 兜底 |
+| `google_pptx_download_timeout_s` | 7.0 | 6.0 | pptx 独立 timeout |
+| `google_word_download_timeout_s` | 7.0 | 6.0 | word/docx 独立 timeout |
+| `google_native_only` | False | **True** | lite 跳过 pptx/docx/excel/txt/csv |
+| `google_enable_gmail_attachments` | True | **False** | lite 仅 gmail 正文 |
+| `google_doc_search_per_sq` | 10 | 8 | Drive list page_size |
+| `google_slide_search_per_sq` | 10 | 8 | 同上 |
+| `google_doc_candidates_per_sq` | 5 | 4 | rerank 后保留数 |
+| `google_slide_candidates_per_sq` | 4 | 3 | 同上 |
+| `google_sheet_candidates_per_sq` | 4 | 3 | sheet tab 数 |
+| `google_max_gmail_threads_per_subquery` | 3 | 2 | gmail 召回上限 |
+| `google_gmail_rerank_top_n` | 3 | 2 | gmail rerank 后保留 |
+
+- balanced：质量优先，留 docx/excel/pptx 通道兜底
+- lite：速度优先，原生文件路径 + gmail body only，平均省 −2~3s
+
+## 7. v2.7 关键流程改造（与 §3 对照）
+
+### 7.1 Phase A：5 路并发搜索
+
+`agents/google/google_source_agent.py:_search_one`：
+
+```python
+results = await asyncio.gather(
+    asyncio.to_thread(_drive_call, q_doc, doc_search_per_sq, order_by_param),
+    asyncio.to_thread(_drive_call, q_slide, slide_search_per_sq, order_by_param),
+    asyncio.to_thread(_drive_call, q_sheet, sheet_search_per_sq, order_by_param),
+    asyncio.to_thread(_drive_call, q_sheet_sidecar, 3, order_by) if q_sheet_sidecar else asyncio.sleep(0, result=[]),
+    asyncio.to_thread(_gmail_call),
+    return_exceptions=True,
+)
+```
+
+- 5 路并发：search_one 单 sq 从 4-7s（串行）压到 1.5-3s
+- `return_exceptions=True`：单路失败不阻塞其他通道
+- fallback1（max_groups=2）/ fallback2（raw_query）改为按需 gather（仅对 0 召回通道触发）
+- broad fallback：total < 3 时跨 mime 一次广义搜索（page_size=20）
+
+### 7.2 Phase A 关键词扩展层
+
+`tools/core/kw_generalization.py` + `_expand_bilingual()`：
+
+```
+plan_only LLM 输出：'nubia UK DTC March GMV'
+       │
+       ▼
+generate_grouped_keywords：
+  [['nubia'], ['UK'], ['DTC'], ['March'], ['GMV']]
+       │
+       ▼
+kw_generalization 同义词扩展（含 marketing umbrella、社媒 platform umbrella）：
+  [['nubia'],
+   ['UK', 'britain', 'england', 'united kingdom', '英国'],
+   ['DTC', 'direct', 'direct-to-consumer', '官网', '独立站', ...],
+   ['March'],
+   ['GMV', 'revenue', '销售额', '营收', ...]]
+       │
+       ▼
+_expand_bilingual（月份/季度自动 OR 中英）：
+  [..., ['March', '3月', 'Mar'], ...]
+       │
+       ▼
+Drive search query：
+  (nubia) AND (UK OR britain OR ...) AND (DTC OR direct OR ...) 
+  AND (March OR 3月 OR Mar) AND (GMV OR revenue OR ...)
+```
+
+新增 umbrella：
+- 营销 ↔ marketing/campaign/推广/promotion/投放
+- 营销活动 → kol/affiliate/paid media
+- 社媒/social media → facebook/instagram/tiktok/youtube
+
+### 7.3 自适应 candidate cap
+
+`_adaptive_cap(n_candidates, abundant_cap, moderate_cap)`：
+- ≤3 候选不砍（保护边缘 query）
+- 4-7 用 cap+1
+- ≥8 用 preset cap（aggressive）
+
+应用于 doc/slide/gmail 三路。Q1/Q55 这种候选稀疏的 query 自动跳过 cap，避免召回崩溃。
+
+### 7.4 文件读取 timeout 与 size gate 分层
+
+| 文件类型 | timeout | size gate | 备注 |
+|---|---|---|---|
+| native Docs | api_timeout=7s | 45MB（auto outline >10MB）| 50MB+ skip + fallback |
+| native Sheets | api_timeout=7s | — | tab 级 cap=4 |
+| native Slides | api_timeout=7s | 55MB（可配）| 仅在 `enable_native_slide_size_gate` 时启用 |
+| pptx | **pptx_download=7s** | **48MB（独立可配）** | 独立 timeout，比 download_timeout 更激进 |
+| word/docx | **word_download=7s** | **30MB（新增）** | filter fallback 保留 size_gate |
+| excel/csv | download_timeout=7s | — | sheet_pool 路径 |
+| gmail | shared 14 worker | — | thread fetch + 可选附件 |
+
+`_query_aware_truncate()`（slide chunk 后筛）：关键词命中 + reader_score 融合，省 file-level rerank 成本。
+
+### 7.5 X1 cross-sq pre-filter（新 Phase G-3）
+
+```
+Phase G per-sub-query Qwen rerank（top sub_query_top_n=8/sq）
+       │
+       ▼ chunk_pool 8-16
+Phase G-3：if chunk_pool > source_top_k * 2:
+  - 用 focus 全文集合作为 query（跨 sq 评估）
+  - Qwen rerank 跨 sq 收口到 source_top_k * 2 = 10
+       │
+       ▼ chunk_pool ≤ 10
+Phase H eval_only LLM
+```
+
+开关：`google_enable_cross_sq_pre_filter=True`；阈值：`google_cross_sq_pre_filter_threshold=10`。
+
+### 7.6 Wait/Event 线程安全（保留 Codex 早期修复）
+
+每个 file pool（doc/sheet/slide/gmail）的修复点：
+- `ensure_waitable()`：任务提交前预注册 asyncio.Event
+- `mark_done()`：worker 用 `loop.call_soon_threadsafe(evt.set)` 跨线程唤醒主协程
+- per_file_timeout 9s 作为最终安全网
+
+修复前症状：所有 wait_for_done 精准卡 20s 兜底。修复后：wait_done 反映真实文件完成时刻。
+
+### 7.7 跨 query LRU cache
+
+`_FILE_CONTENT_CACHE`（同进程 module-level dict）：
+- key = `f"{file_id}|{mime}"` 或 sheet 含 tab：`f"{file_id}|{mime}|{','.join(titles)}"`
+- TTL 300s，LRU 64 file（满后驱逐最旧 1/4）
+- 命中时跳过整次 `read_drive_chunks`，直接返回 cached gc_list
+- 仅在同进程多 query 场景生效（eval batch / 长跑服务）
+
+## 8. 完整流水延迟分布
+
+| # | 环节 | 平均耗时 | 范围 | 并发模型 | 卡点 |
+|---|---|---|---|---|---|
+| ① plan_only LLM (Gemini) | 1.4s | 1.0-2.0s | 串行 1 LLM call | — |
+| ② Phase A search_one | 2.6s | 1.5-5.4s | gather × N sq, 内部 5 路 | — |
+| ③ Phase B metadata_prefetch | 1.5s | 0.5-3.5s | 8-worker batchGet | — |
+| ④ Phase C+D 候选 + 合并 | 0.7s | 0.3-1.0s | Qwen rerank × 4 通道 | — |
+| ⑤ **Phase E+F read+wait** | **9.0s** | **5-15s** | type_pools 4+3+3+14 | 🔴 主卡点 |
+| ⑥ Phase G file/sq rerank | 1.6s | 0.6-2.5s | gather + Qwen | — |
+| ⑦ Phase G-3 X1 pre-filter | 0.4s | 0.3-0.5s | 单次 Qwen rerank | — |
+| ⑧ **Phase H eval_only LLM** | **4.0s** | **3-5s** | 串行 1 LLM call | 🟠 第二卡点 |
+
+**理论 floor**：1.4 + 2.6 + 1.5 + 0.7 + 9.0 + 1.6 + 0.4 + 4.0 ≈ 21.2s。当前 23.6s 接近上限。
+
+## 9. plan_only Prompt 设计
+
+`tools/core/source_query_config.py:get_source_query_rules("google")` 关键规则：
+
+1. data 类型：「品牌 + 渠道/国家 + 指标词」，月份中英由关键词层透明处理
+2. concept 类型：2-3 个关键词，不加 time_filter
+3. personal_recent 类型：`author_filter='me'` + `viewedByMeTime desc`
+4. **社媒/营销/广告类**：仅在 query 显式问"按平台分布"时枚举平台名（FB/IG/TT/YT），其它情况由关键词扩展层自动 OR
+
+设计原则：**LLM 输出语义关键词，不重复，不枚举同义词**。同义词、月份双语、marketing tactics、platform umbrella 全部下沉到 `kw_generalization.py`。
+
+## 10. 已知限制（v2.7 后）
+
+1. **数据缺失 query**：Drive 里没有相关主题文件时检索无能为力。需要 plan 层引导或"无相关数据"返回。
+2. **plan_only LLM 输出非确定性**：相同 query 多轮跑可能产出不同 sub_query → Drive 召回差异。建议 plan 结果 hash 缓存 / few-shot 锚定。
+3. **eval_only LLM RTT 物理下界 3-4s**：除非换更小 LLM 或 batch 化，无法压缩。
+4. **Phase E+F 9s 物理下界**：受 Google API 网络延迟与配额限制。
+5. **Notion 仍为 stub**：本次未涉及。

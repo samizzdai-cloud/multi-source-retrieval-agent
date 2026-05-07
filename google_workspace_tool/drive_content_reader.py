@@ -485,6 +485,7 @@ def read_drive_chunks(
     range_names: Optional[list[str]] = None,
     query: Optional[str] = None,
     enable_excel_filter: bool = False,
+    known_title: Optional[str] = None,
 ) -> list:
     """读取单个 Drive 文件并切分为 chunks。
 
@@ -591,6 +592,7 @@ def read_drive_chunks(
                 query=query,
                 max_chunk_tokens=max_chunk_tokens,
                 native_api_timeout=native_api_timeout,
+                known_title=known_title,
             )
         return []
 

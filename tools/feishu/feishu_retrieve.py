@@ -752,7 +752,7 @@ async def search_and_select_feishu_doc_candidates(
         )
         return []
 
-    # Time Post-filtering logic for non-MCP items in Tables
+    # Time post-filtering for non-MCP doc candidates.
     if time_filter:
         cutoff_timestamp = 0
         if time_filter.startswith(">"):
@@ -767,7 +767,7 @@ async def search_and_select_feishu_doc_candidates(
         if cutoff_timestamp > 0:
             # 提取所有需要验证时间的非 MCP token
             tokens_to_check = []
-            for cand in parent_candidates:
+            for cand in doc_candidates:
                 if cand.get("_source") != "mcp":
                     tok = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or ""
                     if tok:
@@ -780,7 +780,7 @@ async def search_and_select_feishu_doc_candidates(
                 meta_map = client.get_files_metadata(tokens_to_check)
                 
             filtered_cands = []
-            for cand in parent_candidates:
+            for cand in doc_candidates:
                 if cand.get("_source") == "mcp":
                     filtered_cands.append(cand)
                 else:
@@ -795,14 +795,14 @@ async def search_and_select_feishu_doc_candidates(
                     if edit_time >= cutoff_timestamp:
                         filtered_cands.append(cand)
                     else:
-                        logger.info("feishu_retrieve: filtered out table parent candidate %s (edit_time: %s < %s)", 
+                        logger.info("feishu_retrieve: filtered out doc candidate %s (edit_time: %s < %s)",
                                     tok[:12], edit_time, cutoff_timestamp)
                         
-            parent_candidates = filtered_cands
+            doc_candidates = filtered_cands
 
-    if not parent_candidates:
+    if not doc_candidates:
         logger.info(
-            "TIMING feishu.table_parent_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
+            "TIMING feishu.doc_candidate_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
             sub_query_id or "unknown", _elapsed_ms(started),
         )
         return []

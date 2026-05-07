@@ -242,6 +242,7 @@ class SourceAgentConfig:
     google_api_timeout_s: float = 12.0      # 原生文件单次 API 请求底层 Socket 超时
     google_enable_gmail: bool = True        # 默认开启 Gmail 检索
     google_enable_gmail_attachments: bool = False # balanced/deep_dive 在 preset 中覆盖开启
+    google_enable_sheet_search: bool = True  # 是否开启 Google Sheets 搜索（实验可关闭）
     google_enable_sheet_filter: bool = True  # 是否开启 Google Sheets qwen rerank 过滤
     google_enable_excel_filter: bool = True  # 是否开启 Excel/CSV qwen rerank 过滤
     google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
@@ -265,6 +266,11 @@ class SourceAgentConfig:
     google_cross_sq_pre_filter_threshold: int = 10          # chunk_pool > 此阈值才触发（默认 source_top_k * 2）
     google_native_only: bool = False                        # lite 模式开启：仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv）
     google_sheet_chunk_cap: int = 50
+    google_sheet_prefilter_trigger_count: int = 6
+    google_sheet_prefilter_qwen_trigger_count: int = 8
+    google_sheet_prefilter_close_delta: float = 0.12
+    google_sheet_metadata_max_files_structured: int = 6
+    google_sheet_metadata_max_files_concept: int = 2
     google_doc_chunk_cap: int = 60
     google_slide_chunk_cap: int = 40
     google_file_rerank_min_chunks_sheet: int = 25
@@ -361,6 +367,8 @@ class RetrieveConfig:
                               "google_word_download_timeout_s": 6.0,
                               # 仅原生 Google 文件（跳过 pptx/docx/excel/txt/csv 二进制下载）
                               "google_native_only": True,
+                              # lite 固定保持极速特征：不走 Sheet 搜索/metadata/read
+                              "google_enable_sheet_search": False,
                               # gmail 仅正文，不下附件
                               "google_enable_gmail_attachments": False,
                               # 候选/检索数量收紧
@@ -391,7 +399,7 @@ class RetrieveConfig:
                                      "google_enable_gmail_isolation": True,
                                      "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
                                      "google_doc_candidates_per_sq": 5, "google_slide_candidates_per_sq": 4,
-                                     "google_sheet_candidates_per_sq": 4,
+                                     "google_sheet_candidates_per_sq": 3,
                                      "google_max_gmail_threads_per_subquery": 3,
                                      "google_gmail_rerank_top_n": 3},
                       }},
@@ -468,6 +476,7 @@ class RetrieveConfig:
             "source_timeout_s", "sub_query_top_n",
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
+            "google_enable_sheet_search",
             "google_enable_sheet_filter", "google_enable_excel_filter",
             "google_enable_fulltext_search", "google_enable_native_slide_size_gate",
             "google_enable_conditional_file_rerank", "google_enable_type_pools",
@@ -475,10 +484,15 @@ class RetrieveConfig:
             "google_per_file_timeout_s", "google_native_doc_size_gate_bytes",
             "google_native_doc_outline_threshold_bytes", "google_native_slide_size_gate_bytes",
             "google_sheet_chunk_cap", "google_doc_chunk_cap", "google_slide_chunk_cap",
+            "google_sheet_prefilter_trigger_count", "google_sheet_prefilter_qwen_trigger_count",
+            "google_sheet_prefilter_close_delta",
+            "google_sheet_metadata_max_files_structured", "google_sheet_metadata_max_files_concept",
             "google_file_rerank_min_chunks_sheet", "google_file_rerank_min_chunks_slide",
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
             "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
             "google_gmail_attachment_max_files",
+            "google_doc_search_per_sq", "google_slide_search_per_sq", "google_sheet_search_per_sq",
+            "google_doc_candidates_per_sq", "google_slide_candidates_per_sq", "google_sheet_candidates_per_sq",
             "google_max_gmail_threads_per_subquery", "google_gmail_rerank_top_n",
         ):
             if getattr(override, f) != getattr(defaults, f):

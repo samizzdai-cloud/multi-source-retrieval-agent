@@ -302,6 +302,7 @@ def read_one(
     major_dimension: Optional[str] = None,
     drive_size: Optional[int] = None,
     native_api_timeout: int = 10,
+    known_title: Optional[str] = None,
 ) -> dict:
     """读取单个 Google Spreadsheet。
 
@@ -340,9 +341,13 @@ def read_one(
     if major_dimension:
         kwargs["majorDimension"] = major_dimension
 
-    # 获取元数据
-    metadata = _get_spreadsheet_metadata(service, file_id)
-    title = metadata.get("properties", {}).get("title", "")
+    # 获取元数据。调用方若已在 Phase B 预取过 title，则跳过这里的重复 spreadsheets.get。
+    if known_title is not None:
+        metadata = {"properties": {"title": known_title}}
+        title = known_title
+    else:
+        metadata = _get_spreadsheet_metadata(service, file_id)
+        title = metadata.get("properties", {}).get("title", "")
 
     try:
         if range_names:
@@ -608,6 +613,7 @@ def read_chunks(
     date_time_render_option: Optional[str] = None,
     major_dimension: Optional[str] = None,
     native_api_timeout: int = 10,
+    known_title: Optional[str] = None,
 ) -> list:
     """读取 Google Spreadsheet 并切分为 chunks。
 
@@ -627,6 +633,7 @@ def read_chunks(
         date_time_render_option=date_time_render_option,
         major_dimension=major_dimension,
         native_api_timeout=native_api_timeout,
+        known_title=known_title,
     )
     if result.get("error") or not result.get("sheets"):
         return []

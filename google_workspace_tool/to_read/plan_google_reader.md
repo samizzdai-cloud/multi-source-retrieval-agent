@@ -291,18 +291,17 @@ Docs API `documents().get()` 和 Sheets API `spreadsheets().get()` 均**不支�
 
 | Scope | 能力 | 对共享文件 (Drive API) | 对共享文件 (Docs/Sheets API) | 对原生文件 size |
 |-------|------|----------------------|---------------------------|----------------|
-| `drive.readonly` | 读取用户 Drive 文件 | 部分共享文件 **404** | N/A（不走 Drive API） | 不返回 size |
-| `drive` | 完整读写所有 Drive 文件 | **可访问** | N/A | 不返回 size |
+| `drive.readonly` | 读取用户 Drive 文件 | 部分共享文件 **404** | N/A（不走 Drive API） | **返回 size / quotaBytesUsed** |
+| `drive` | 完整读写所有 Drive 文件 | **可访问** | N/A | **返回 size / quotaBytesUsed** |
 | `documents.readonly` | 读取 Docs 内容 | N/A | **可访问共享 Doc** | N/A |
-| `spreadsheets.readonly` | 读取 Sheets 内容 | N/A | **可访问共享 Sheet** | N/A |
 
 **关键结论**：
 - **Sheet 索引、最大行列数** → 只能由 **Sheets API** 提供
 - **文件创建/修改时间、所有者、文件夹路径** → 由 **Drive API** 提供，需要 `drive` 或 `drive.readonly` scope
 - **共享文件读取** → Docs/Sheets API 天然支持，无需特殊设置；Drive API 需要 `drive` 完整权限
 - **`drive_content_reader.py` 的 size gate 对共享原生文件会失效** → 因为 Drive API 404 导致无法获取 size，但 doc_reader/sheet_reader 仍可正常读取内容
-- **原生文件 size** → 无论用什么 Drive scope，`size` 字段均不存在、`quotaBytesUsed=0`。size gate 对原生文件**实际不会触发**
-- **非原生文件 size** → 上传的 PDF/Word/Excel 等，`drive` 权限可正常获取 size，size gate 有效
+- **原生文件 size** → Drive API `files.get` / `files.list` **返回 `size` 与 `quotaBytesUsed`**（两者值相同，单位为字节）。size gate 对原生文件**可以触发**，已在 `google_source_agent.py` 的 doc filter 中用于跳过 >45MB 超大原生 Doc。
+- **非原生文件 size** → 上传的 PDF/Word/Excel 等，`drive.readonly` / `drive` 权限均可正常获取 size，size gate 有效
 
 ### 7.3 原始数据格式
 
