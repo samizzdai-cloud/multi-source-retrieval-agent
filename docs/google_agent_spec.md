@@ -1,7 +1,17 @@
 # Google Workspace Source Agent Architecture Specification
 
-> **v2.7（2026-05-07）综合性能优化已落地**——平均耗时 34.5s → 23.6s（−32%），critical 召回 +60%，noise −80%。
-> 详见 §6 / §7 / §8 / §9 / §10。
+> **v2.8（2026-05-07）家族化重构 + 重复 API 消除**——基于 v2.7 之上：
+> - 抽象 sheet/slide/doc 三家族统一处理（native ↔ nonnative dedup + Format tag rerank）
+> - 消除 Phase E 重复 metadata API（`_estimate_sheet_read_time` × N，binary reader `files().get` × N）
+> - Phase B sheet metadata 移除 `merges` 字段，3.3s → 1.5s（-55%）
+> - Doc fetcher 默认字段移除 `childTabs`，省去每个 doc 的 400→retry 往返
+> - 合并 nonnative worker pool；修复 Gmail dead pool bug
+> - lite preset 永久 sheet-off；balanced sheet candidates 4 → 3
+> - Sheet Phase B prefilter：per-sq 打分取 max + min_keep_per_sq floor，防止单 sq 召回归零
+> - 删除 RM 系列 hardcoded product-gen penalty，改用 stale-year + title overlap 通用兜底
+> - plan_only 已有的 `time_filter` 接入 `_drive_file_local_score`，替代 regex 推断
+>
+> 详见 §6 / §7 / §8 / §9 / §10 / §11 / §12。
 
 ## 1. 架构总览与组件映射
 Google Workspace Source Agent 作为连接全局 Retrieve Agent 和 Google 庞大生态（Drive、Gmail 等）的桥梁，负责将高维的检索意图转化为具体的 API 请求，并将复杂的异构数据格式清洗、分块、重排序后输出标准 Chunk。
@@ -220,10 +230,10 @@ Drive search query：
 | native Docs | api_timeout=7s | 45MB（auto outline >10MB）| 50MB+ skip + fallback |
 | native Sheets | api_timeout=7s | — | tab 级 cap=4 |
 | native Slides | api_timeout=7s | 55MB（可配）| 仅在 `enable_native_slide_size_gate` 时启用 |
-| pptx | **pptx_download=7s** | **48MB（独立可配）** | 独立 timeout，比 download_timeout 更激进 |
+| pptx | **pptx_download=7s** | **35MB（v2.8 收紧自 48MB）** | 实测 43MB 文件 9s 仍 0 chunks，回收预算 |
 | word/docx | **word_download=7s** | **30MB（新增）** | filter fallback 保留 size_gate |
 | excel/csv | download_timeout=7s | — | sheet_pool 路径 |
-| gmail | shared 14 worker | — | thread fetch + 可选附件 |
+| gmail | dedicated `gmail` pool（v2.8 修复 dead code，原本始终走 shared）| — | thread fetch + 可选附件 |
 
 `_query_aware_truncate()`（slide chunk 后筛）：关键词命中 + reader_score 融合，省 file-level rerank 成本。
 
@@ -293,3 +303,153 @@ Phase H eval_only LLM
 3. **eval_only LLM RTT 物理下界 3-4s**：除非换更小 LLM 或 batch 化，无法压缩。
 4. **Phase E+F 9s 物理下界**：受 Google API 网络延迟与配额限制。
 5. **Notion 仍为 stub**：本次未涉及。
+
+---
+
+## 11. v2.8 家族化（family）重构
+
+### 11.1 文件家族分类
+
+按 mime 把 Drive 文件归到三家族，每家族都有 native + nonnative 两类：
+
+| family | native | nonnative |
+|---|---|---|
+| **sheet** | Google Sheets | XLSX / XLS / XLSM / CSV |
+| **slide** | Google Slides | PPTX |
+| **doc** | Google Docs | DOCX / DOC / TXT |
+
+`_family_of(mime)` 与 `_is_native(mime)` 集中分类（[google_source_agent.py:218-228]）。
+
+读取层路径差异：native 走 API（`presentations/spreadsheets/documents.get`），nonnative 走 Drive `files().get_media` 下载 + 本地 parser。Phase E 把 nonnative 隔离到独立 `nonnative` worker pool 避免抢占 native API 线程。
+
+### 11.2 Phase A nonnative search gate
+
+新配置：
+```python
+google_nonnative_search_query_types: Dict[str, Set[str]] = {
+    "sheet": {"structured", "personal_recent"},               # concept 不召回 Excel/CSV
+    "slide": {"structured", "concept", "personal_recent"},    # 全开
+    "doc":   {"structured", "concept", "personal_recent"},    # 全开
+}
+```
+
+仅当 `sq.query_type ∈` 白名单时才在 search query 把 nonnative mime 加入 `OR` 子句。Lite preset 把 sheet 的 value 改为 `set()` 实现「sheet 全关 + slide/doc 仍搜原生 + nonnative」。
+
+### 11.3 Native ↔ nonnative 标题去重
+
+Phase A 召回后 / Phase C 之前，每家族跑一次 `_dedup_native_vs_nonnative(files)`：
+
+- 标题归一化：lowercase、去标点空格、剥末尾年份后缀
+- 同 family 内 normalized title 相同 / 子串包含 / 长度差 ≤5 → **保留 native，丢非原生**
+- "native preference" 的全部表达——**rerank 后不做任何 tie-break / bonus**
+
+### 11.4 Qwen rerank candidate 加 Format tag
+
+`_select_file_candidates` 给每个候选的 `summary` 字段加 `Format: native_slide | pptx | excel | ...`，让 Qwen rerank 看到格式信号自行判断。配合 dedup 后无需额外的 native 偏好后处理。
+
+### 11.5 Sheet Phase B per-sq 打分 + min_keep floor
+
+`_prefilter_sheet_files_before_metadata` 升级：
+
+- **Per-sq 打分取 max**：每份 sheet 对每个命中的 sub_query 单独算 `_drive_file_local_score`，取 max 作为最终分。避免合并 query_text 的稀释。
+- **`top_sq_by_fid` 归属**：score 最高的 sub_query 视为这份 sheet 的"最强归属"。
+- **`min_keep_per_sq` floor**（默认 1）：全局 cap 截断后，确保每个 sq 至少保留 floor 个候选。不足时从该 sq 的候选里按分数补齐，替换 selected 中已多于 floor 的 sq 成员里分数最低的。
+- **`effective_cap = max(metadata_max_files, n_sqs × min_keep_per_sq)`**：min_keep 优先于 cap，软上限。
+- Qwen close-rerank 输出后再次应用 floor，保证 LLM 分支也满足 per-sq 保留。
+
+### 11.6 plan_only 时间信号 → 评分
+
+`SubQuery.time_filter`（plan_only LLM 已有产出，如 `">2026-01-01"` / `"last_30_days"`）传入 `_drive_file_local_score(time_filter=...)`：
+
+- 有 time_filter：从中提取 target_year（regex `20\d{2}` 或 `last_N_days` → 当年）
+- 无 time_filter：fallback 到 `_drive_has_time_or_fresh_intent(query_text)` regex 推断
+- 规则不变：旧年份 stale penalty `min(0.35, 0.12 * (target - max(years)))`
+
+替代了 v2.7 的纯 regex 路径，结构化信号更稳定。
+
+### 11.7 删除项
+
+- `_sheet_has_new_product_intent` + RM 系列硬编码 penalty：case-specific，靠通用 stale-year + title overlap 兜底
+- `executors["shared"]` 在 `type_pools=True` 模式：被 nonnative pool 完全替代
+- Gmail 走 `shared` pool 的 dead code：现在按预期路由到 dedicated `executors["gmail"]`
+
+---
+
+## 12. v2.8 重复 API 调用消除
+
+### 12.1 `read_drive_chunks` 新参数
+
+```python
+def read_drive_chunks(
+    *, mime_type, file_id, creds, ...,
+    known_title: Optional[str] = None,
+    known_metadata: Optional[dict] = None,   # {"name", "size", "modifiedTime", "mimeType", ...}
+    known_sheet_count: Optional[int] = None,
+):
+```
+
+- **`known_metadata`** 跳过入口处的 Drive `files().get`：Phase A 搜索结果已经携带 `name/size/modifiedTime`，pool 缓存后 Phase E 透传即可。省 ~150-300ms × N files。
+- **`known_sheet_count`** 跳过 `_estimate_sheet_read_time` 的 `spreadsheets().get(fields="sheets.properties.sheetId")`：Phase B 已经缓存了 `sheet_pool.get_meta(fid).sheets`，直接用 `len()`。省 ~500-1000ms × N sheets。
+- **`known_title`** 透传到 binary readers（pptx / word / excel / text），跳过 reader 内重复的 `files().get(fields="name")`。省 ~100-200ms × N nonnative files。
+
+### 12.2 Phase B metadata fields 精简
+
+`sheet_pool.batch_fetch_metadata` 移除 `merges` 字段：
+
+```diff
+- fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties,merges)"
++ fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties)"
+```
+
+Drive 对每个 spreadsheet 会返回**全部** merge 区间，多 sheet × 多 merge 单次响应可达 MB。实测 6 sheets prefetch **3327ms → 1490ms（-55%）**。
+
+`process_section_to_markdown` 在 `merges == []` 时仍稳定输出（merge-aware 渲染轻度退化，cell 拆为 sparse 行）。如未来需 merge-aware，可在 `sheet_reader.read_one` 内补一次轻量 `spreadsheets().get(fields="sheets(properties.sheetId,merges)")` 按需调用。
+
+### 12.3 Doc fetcher 默认字段
+
+```diff
+DEFAULT_FIELDS = (
+    "documentId,title,"
+-   "tabs(tabProperties,childTabs,"
++   "tabs(tabProperties,"
+    "documentTab(body(content),lists)"
+    ")"
+)
+```
+
+`childTabs` 字段在大量文档上触发 400 `comment-specific fields when include_comments is false`，强制 fetcher 重试一次完整 fetch（~+1-2s/doc）。嵌套 tabs 极少见，扁平 tabs 覆盖 99% 文档；现有 400 fallback 兼容路径保留。
+
+### 12.4 综合收益
+
+| 指标 | v2.7 baseline | v2.8 | 变化 |
+|---|---|---|---|
+| balanced 4-query avg | 23.6s | ~22-24s（含 plan 噪声）| 持平/略好 |
+| **lite 4-query avg** | **20.3s** | **~12-14s** | **-30~40%** |
+| Phase B sheet metadata | 3.3s/6 files | 1.5s/6 files | **-55%** |
+| Doc 单文件 read | 1.8-2.4s（含 retry）| 1.0-1.5s | -30~50% |
+| Sheet `_estimate_*` 重复调用 | 0.5-1s × N | 0 | 全消 |
+| Drive `files().get` × N | 0.15-0.3s × N | 0 | 全消（pool 透传） |
+| binary `files().get` × N | 0.1-0.2s × N | 0 | 全消（known_title） |
+
+### 12.5 Preset 矩阵（v2.8 最终态）
+
+| 字段 | default | balanced | lite |
+|---|---|---|---|
+| `enable_sheet_search` | True | True | **False** |
+| `nonnative_search_query_types["sheet"]` | structured+personal_recent | 同 | (moot) |
+| `nonnative_search_query_types["slide"]` | 全 3 类 | 全 3 类 | 全 3 类 |
+| `nonnative_search_query_types["doc"]` | 全 3 类 | 全 3 类 | 全 3 类 |
+| `dedup_native_vs_nonnative` | True | True | True |
+| `sheet_min_keep_per_sq` | 1 | 1 | 1 |
+| `sheet_metadata_max_files_structured` | 6 | 6 | 6 |
+| `sheet_metadata_max_files_concept` | 2 | 2 | 2 |
+| `slide_candidates_per_sq` | 12 | 4 | 3 |
+| `doc_candidates_per_sq` | 12 | 4 | 3 |
+| `pptx_size_gate_bytes` | 35MB | 35MB | 35MB |
+| `type_pool_nonnative_workers` | 2 | 2 | 2 |
+
+### 12.6 已知尾延迟 / 仍未压平的项
+
+1. **PPTX `per_file_timeout_s=9.0`**：balanced 几乎每次有 1 个 PPTX 卡满 9s。降到 8s 节省 1s 但风险丢 9.x s 才完成的 chunks。当前**保留**作为安全网。
+2. **Phase E sheet `Ou0jy0DY` 持续 0 chunks**：tab 选择器（`select_sheets_for_sub_query`）选了不存在的 tab title，batchGet 空响应。**遗留质量问题**，与 prefilter / dedup 无关。
+3. **Q4 critical 抖动 0-3**：plan_only LLM 在 sub_query 文本上有非确定性，下游召回 + Qwen rerank 串联放大。需在 plan 层做 cache 或锚定。
