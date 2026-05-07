@@ -269,9 +269,10 @@ class SourceAgentConfig:
     google_sheet_prefilter_trigger_count: int = 6
     google_sheet_prefilter_qwen_trigger_count: int = 8
     google_sheet_prefilter_close_delta: float = 0.12
-    google_sheet_metadata_max_files_structured: int = 6
-    google_sheet_metadata_max_files_concept: int = 2
-    google_sheet_min_keep_per_sq: int = 1
+    # Per-sub_query Sheet 文件 cap（取代旧的全局 metadata_max_files_*）。
+    # 每个 sq 按自己的 query_type 取值，union 后即 Phase B prefetch 输入集合。
+    google_sheet_files_per_sq_structured: int = 3
+    google_sheet_files_per_sq_concept: int = 2
     # 家族级 nonnative 搜索 gate：仅当 sq.query_type ∈ 白名单 时才在 Phase A 召回该家族的非原生文件
     # default 涵盖 structured / concept / personal_recent；可由 preset 覆盖
     google_nonnative_search_query_types: Dict[str, Set[str]] = field(default_factory=lambda: {
@@ -545,8 +546,7 @@ class RetrieveConfig:
             "google_sheet_chunk_cap", "google_doc_chunk_cap", "google_slide_chunk_cap",
             "google_sheet_prefilter_trigger_count", "google_sheet_prefilter_qwen_trigger_count",
             "google_sheet_prefilter_close_delta",
-            "google_sheet_metadata_max_files_structured", "google_sheet_metadata_max_files_concept",
-            "google_sheet_min_keep_per_sq",
+            "google_sheet_files_per_sq_structured", "google_sheet_files_per_sq_concept",
             "google_nonnative_search_query_types", "google_dedup_native_vs_nonnative",
             "google_file_rerank_min_chunks_sheet", "google_file_rerank_min_chunks_slide",
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",

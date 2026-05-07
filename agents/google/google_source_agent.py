@@ -189,10 +189,14 @@ def _normalize_google_query_type(query_type: Optional[str]) -> str:
     return "structured"
 
 
-def _sheet_cap_for_query_types(cfg: SourceAgentConfig, query_types: Set[str]) -> int:
-    if query_types and all(qt == "concept" for qt in query_types):
-        return max(0, int(cfg.google_sheet_metadata_max_files_concept))
-    return max(0, int(cfg.google_sheet_metadata_max_files_structured))
+def _sheet_files_cap_for_sq_query_type(cfg: SourceAgentConfig, query_type: str) -> int:
+    """Per-sub_query Sheet 文件 cap，按该 sq 的 query_type 取值。
+
+    structured / personal_recent 用 structured cap；concept 走更紧的 cap。
+    """
+    if query_type == "concept":
+        return max(0, int(cfg.google_sheet_files_per_sq_concept))
+    return max(0, int(cfg.google_sheet_files_per_sq_structured))
 
 
 def _drive_has_time_or_fresh_intent(text: str) -> bool:
@@ -759,173 +763,95 @@ class GoogleSourceAgent(SourceAgent):
         if raw_count == 0:
             return set(), raw_by_id
 
-        trigger = int(self.cfg.google_sheet_prefilter_trigger_count)
-        if raw_count <= trigger:
+        # Per-sq 文件 cap（按 sq.query_type 取值）；可在 trigger 之前先汇总每个 sq 的容量
+        # 用于决定是否需要 prefilter。
+        sq_query_type: Dict[str, str] = {}
+        for sq_id in all_sq_ids:
+            qt = "structured"
+            for fid in sq_ids_by_id:
+                if sq_id in sq_ids_by_id[fid]:
+                    qts = query_type_by_id.get(fid, set())
+                    # sq's own query_type is the same across fids, so just take one
+                    if qts:
+                        qt = next(iter(qts))
+                    break
+            sq_query_type[sq_id] = qt
+        per_sq_caps = {
+            sq_id: _sheet_files_cap_for_sq_query_type(self.cfg, qt)
+            for sq_id, qt in sq_query_type.items()
+        }
+        # 任一 sq cap=0 → 该 sq 不贡献文件；若所有 sq cap=0 → 全空
+        if all(c <= 0 for c in per_sq_caps.values()):
             logger.info(
-                "TIMING google.sheet_prefilter raw=%d selected=%d local_ms=%.1f qwen_ms=0.0 reason=below_trigger",
-                raw_count, raw_count, _elapsed_ms(started),
-            )
-            return set(raw_by_id), raw_by_id
-
-        all_query_types: Set[str] = set()
-        for qts in query_type_by_id.values():
-            all_query_types.update(qts)
-        cap = _sheet_cap_for_query_types(self.cfg, all_query_types)
-        if cap <= 0:
-            logger.info(
-                "TIMING google.sheet_prefilter raw=%d selected=0 local_ms=%.1f qwen_ms=0.0 reason=cap_zero",
+                "TIMING google.sheet_prefilter raw=%d selected=0 reason=cap_zero ms=%.1f",
                 raw_count, _elapsed_ms(started),
             )
             return set(), raw_by_id
 
-        # Per-sq 打分，取 max；记录每份文件的 top_sq（用于 min_keep_per_sq floor）
-        scored: List[Tuple[float, str]] = []
-        top_sq_by_fid: Dict[str, str] = {}
-        for fid, f in raw_by_id.items():
-            channels = channels_by_id.get(fid, set())
-            best_score = -1e9
-            best_sq: Optional[str] = None
-            for sq_id in sq_ids_by_id.get(fid, set()):
+        trigger = int(self.cfg.google_sheet_prefilter_trigger_count)
+        # 当所有 sq 的命中文件数都 ≤ 自己的 cap，或总数 ≤ trigger，pass-through。
+        per_sq_counts = {
+            sq_id: sum(1 for fid in sq_ids_by_id if sq_id in sq_ids_by_id[fid])
+            for sq_id in all_sq_ids
+        }
+        all_within_cap = all(
+            per_sq_counts.get(sq_id, 0) <= per_sq_caps.get(sq_id, 0)
+            for sq_id in all_sq_ids
+        )
+        if raw_count <= trigger or all_within_cap:
+            logger.info(
+                "TIMING google.sheet_prefilter raw=%d selected=%d reason=below_trigger_or_within_cap ms=%.1f",
+                raw_count, raw_count, _elapsed_ms(started),
+            )
+            return set(raw_by_id), raw_by_id
+
+        # Per-sq 打分 + per-sq 取 top N（按 sq 各自的 query_type cap）。
+        # 同一文件可能命中多 sq，被任一 sq 选中即入选 union。
+        per_sq_scores: Dict[str, List[Tuple[float, str]]] = {}
+        score_max_by_fid: Dict[str, float] = {}
+        for sq_id in all_sq_ids:
+            sq_scores: List[Tuple[float, str]] = []
+            for fid, f in raw_by_id.items():
+                if sq_id not in sq_ids_by_id.get(fid, set()):
+                    continue
+                channels = channels_by_id.get(fid, set())
                 text = sq_text_by_pair.get((sq_id, fid), "")
                 if not text:
                     text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
                 tf = sq_time_filter.get(sq_id)
                 s = _drive_file_local_score(f, text, channels, time_filter=tf)
-                if s > best_score:
-                    best_score = s
-                    best_sq = sq_id
-            if best_sq is None:
-                # fallback: legacy union scoring path
-                text = " ".join(focus_by_id.get(fid, set()) | set(query_parts_by_id.get(fid, [])))
-                best_score = _drive_file_local_score(f, text, channels)
-                best_sq = next(iter(sq_ids_by_id.get(fid, set())), "")
-            scored.append((best_score, fid))
-            top_sq_by_fid[fid] = best_sq or ""
-        scored.sort(key=lambda x: x[0], reverse=True)
+                sq_scores.append((s, fid))
+                if s > score_max_by_fid.get(fid, -1e9):
+                    score_max_by_fid[fid] = s
+            sq_scores.sort(key=lambda x: -x[0])
+            per_sq_scores[sq_id] = sq_scores
+
+        selected_set: Set[str] = set()
+        per_sq_selected: Dict[str, List[str]] = {}
+        for sq_id in all_sq_ids:
+            cap = per_sq_caps.get(sq_id, 0)
+            picks = [fid for _, fid in per_sq_scores.get(sq_id, [])[:cap]]
+            per_sq_selected[sq_id] = picks
+            selected_set.update(picks)
         local_ms = _elapsed_ms(started)
 
-        # 全局 cap 截断后做 per-sq min_keep floor 兜底
-        min_keep_per_sq = max(0, int(getattr(self.cfg, "google_sheet_min_keep_per_sq", 1)))
-        n_sqs = len(all_sq_ids)
-        effective_cap = max(cap, n_sqs * min_keep_per_sq) if min_keep_per_sq else cap
-
-        selected_ids = [fid for _, fid in scored[:effective_cap]]
-        if min_keep_per_sq:
-            selected_set = set(selected_ids)
-            score_by_fid = {fid: s for s, fid in scored}
-            for sq_id in all_sq_ids:
-                owned = [fid for fid in selected_ids if top_sq_by_fid.get(fid) == sq_id]
-                if len(owned) >= min_keep_per_sq:
-                    continue
-                # 该 sq 命中的所有候选，按 score 降序取尚未入选的补齐
-                sq_owned_sorted = sorted(
-                    (fid for fid in sq_ids_by_id if sq_id in sq_ids_by_id[fid]),
-                    key=lambda x: -score_by_fid.get(x, 0.0),
-                )
-                need = min_keep_per_sq - len(owned)
-                for cand_fid in sq_owned_sorted:
-                    if need <= 0:
-                        break
-                    if cand_fid in selected_set:
-                        continue
-                    selected_ids.append(cand_fid)
-                    selected_set.add(cand_fid)
-                    need -= 1
-        qwen_ms = 0.0
-        reason = "local"
-        qwen_trigger = int(self.cfg.google_sheet_prefilter_qwen_trigger_count)
-        close_delta = float(self.cfg.google_sheet_prefilter_close_delta)
-        should_qwen = False
-        if raw_count > qwen_trigger and len(scored) > cap:
-            top_score = scored[0][0]
-            boundary_score = scored[min(cap - 1, len(scored) - 1)][0]
-            cutoff_score = scored[cap][0]
-            near_cutoff = sum(1 for score, _ in scored if abs(score - cutoff_score) <= 0.10)
-            should_qwen = (top_score - boundary_score) <= close_delta or near_cutoff >= 4
-
-        if should_qwen:
-            qwen_started = time.perf_counter()
-            try:
-                from tools.core.rerank import select_search_candidates
-
-                candidates = []
-                for rank, (score, fid) in enumerate(scored):
-                    f = raw_by_id[fid]
-                    channels = ",".join(sorted(channels_by_id.get(fid, set())))
-                    fmt_label = _format_label(f.get("mimeType"))
-                    candidates.append({
-                        "id": fid,
-                        "title": f.get("name", ""),
-                        "summary": (
-                            f"Title: {f.get('name', '')} | Format: {fmt_label} | "
-                            f"Desc: {f.get('description', '')} | "
-                            f"Modified: {f.get('modifiedTime', '')} | Source: {channels} | "
-                            f"LocalScore: {score:.3f} | LocalRank: {rank + 1}"
-                        ),
-                        "_file_id": fid,
-                    })
-                combined_query = "\n".join(
-                    sorted({p for parts in query_parts_by_id.values() for p in parts if p})
-                    + sorted({f for focuses in focus_by_id.values() for f in focuses if f})
-                )
-                rerank_result = select_search_candidates(
-                    query=combined_query,
-                    candidates=candidates,
-                    top_n=effective_cap,
-                    score_threshold=0.10,
-                    min_keep=min(3, effective_cap),
-                    instruct_template="qa",
-                )
-                if rerank_result.get("status") == "success":
-                    selected = list(rerank_result.get("selected_candidates") or [])
-                    reranked_ids = [c.get("_file_id") or c.get("id") for c in selected if c.get("_file_id") or c.get("id")]
-                    if reranked_ids:
-                        selected_ids = reranked_ids[:effective_cap]
-                        reason = "qwen_close"
-                        # Re-apply per-sq min_keep floor on Qwen output
-                        if min_keep_per_sq:
-                            selected_set = set(selected_ids)
-                            score_by_fid_q = {fid: s for s, fid in scored}
-                            for sq_id in all_sq_ids:
-                                owned = [fid for fid in selected_ids if top_sq_by_fid.get(fid) == sq_id]
-                                if len(owned) >= min_keep_per_sq:
-                                    continue
-                                sq_owned_sorted = sorted(
-                                    (fid for fid in sq_ids_by_id if sq_id in sq_ids_by_id[fid]),
-                                    key=lambda x: -score_by_fid_q.get(x, 0.0),
-                                )
-                                need = min_keep_per_sq - len(owned)
-                                for cand_fid in sq_owned_sorted:
-                                    if need <= 0:
-                                        break
-                                    if cand_fid in selected_set:
-                                        continue
-                                    selected_ids.append(cand_fid)
-                                    selected_set.add(cand_fid)
-                                    need -= 1
-                else:
-                    reason = "qwen_failed_local"
-            except Exception as e:
-                logger.warning("[google] sheet file prefilter qwen rerank failed: %s", e)
-                reason = "qwen_exception_local"
-            qwen_ms = _elapsed_ms(qwen_started)
-
-        allowed = set(selected_ids)
+        # Filter sheets out of search_results that we did not select
         for res in search_results:
             filtered = []
             for f in res.get("files", []):
-                if f.get("mimeType") == _MIME_SHEETS and f.get("id") not in allowed:
+                if f.get("mimeType") == _MIME_SHEETS and f.get("id") not in selected_set:
                     continue
                 filtered.append(f)
             res["files"] = filtered
 
         logger.info(
-            "TIMING google.sheet_prefilter raw=%d selected=%d cap=%d effective_cap=%d min_keep_per_sq=%d n_sqs=%d local_ms=%.1f qwen_ms=%.1f reason=%s selected_ids=%s",
-            raw_count, len(allowed), cap, effective_cap, min_keep_per_sq, n_sqs,
-            local_ms, qwen_ms, reason,
-            [fid[-8:] for fid in selected_ids],
+            "TIMING google.sheet_prefilter raw=%d selected=%d n_sqs=%d caps=%s local_ms=%.1f reason=per_sq_local selected_ids=%s",
+            raw_count, len(selected_set), len(all_sq_ids),
+            {sq_id: per_sq_caps.get(sq_id, 0) for sq_id in sorted(all_sq_ids)},
+            local_ms,
+            [fid[-8:] for fid in sorted(selected_set)],
         )
-        return allowed, raw_by_id
+        return selected_set, raw_by_id
 
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         from .google_retrieve_llm_build import build_google_plan_only_agent
@@ -1484,7 +1410,15 @@ class GoogleSourceAgent(SourceAgent):
                 fid = f.get("id")
                 if not fid:
                     continue
-                if mime == _MIME_DOCS or mime in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT):
+                # doc_pool 实质上是「binary 下载路径」的元数据池：
+                # - 原生 Google Doc 走 documents().get（在 read_drive_chunks 内部）
+                # - DOCX/TXT/XLSX/XLS/XLSM/CSV 走 Drive files().get_media 下载
+                #   并在 reader 层（excel_reader/text_reader/word_reader）解析
+                # 三者读取流均由 read_drive_chunks 按 mime 路由，所以共享同一池即可。
+                if mime == _MIME_DOCS or mime in (
+                    _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT,
+                    _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
+                ):
                     from google_workspace_tool.doc_pool import DocMeta
                     doc_pool.add_meta(DocMeta(
                         file_id=fid,
@@ -1551,9 +1485,13 @@ class GoogleSourceAgent(SourceAgent):
                         SheetSelection(file_id=fid, selected_titles=selected_titles,
                                        sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
 
-        # C2. Doc 筛选（支持原生 Doc + word/docx size gate + fallback）
+        # C2. Doc 筛选（统一处理原生 Doc + word/docx/txt + excel/csv）
+        # 注：Excel/CSV 在 Phase A 由 sheet_mimes 搜索召回（搜索语义按表格），
+        # 但读取走 binary download 路径与 Word/Doc 同池，故并入 doc 候选选择层。
+        # native Sheet（_MIME_SHEETS）走 C1 单独的 tab 选择路径。
         _DOC_SIZE_THRESHOLD = int(self.cfg.google_native_doc_size_gate_bytes)
         _WORD_SIZE_THRESHOLD = int(self.cfg.google_word_size_gate_bytes)
+        # Excel/CSV 大小上限沿用 word_size_gate；CSV 通常 < 几 MB，实际走 download_timeout 兜底
         def _doc_filter(f: dict) -> bool:
             mime = f.get("mimeType")
             size = _drive_file_size(f)
@@ -1569,14 +1507,24 @@ class GoogleSourceAgent(SourceAgent):
                     f.get("id"), size, f.get("name"),
                 )
                 return False
+            if mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO) and size and size > _WORD_SIZE_THRESHOLD:
+                logger.warning(
+                    "[google] skip oversized excel id=%s size=%s name=%.40r",
+                    f.get("id"), size, f.get("name"),
+                )
+                return False
             return True
 
+        _DOC_FAMILY_MIMES = (
+            _MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT,
+            _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
+        )
         sq_doc_selections: Dict[str, List] = {}  # sq_id → [DocSelection]
         for res in search_results:
             sq = res["sq"]
             sq_doc_selections[sq.sub_query_id] = []
             focus_text = focus_text_map[sq.sub_query_id]
-            doc_files = [f for f in res.get("files", []) if f.get("mimeType") in (_MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT)]
+            doc_files = [f for f in res.get("files", []) if f.get("mimeType") in _DOC_FAMILY_MIMES]
             # 自适应 cap：doc 候选稀疏时不砍，丰盛时按 preset cap 砍
             adaptive_doc_top_n = _adaptive_cap(
                 len(doc_files),
@@ -1873,6 +1821,9 @@ class GoogleSourceAgent(SourceAgent):
                             "modifiedTime": meta.modified_time,
                             "mimeType": mime,
                         }
+                    # Excel/CSV 走与 Word/Doc 同一池路径，但需要把 enable_excel_filter
+                    # 透传给 excel_reader / text_reader 用于行级 Qwen 过滤。
+                    is_excel_or_csv = mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV)
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=mime, creds=creds,
                         max_chunk_tokens=800,
@@ -1882,6 +1833,7 @@ class GoogleSourceAgent(SourceAgent):
                         supports_all_drives=True, query=query,
                         known_title=meta.title if meta else None,
                         known_metadata=_known_meta,
+                        enable_excel_filter=bool(self.cfg.google_enable_excel_filter) if is_excel_or_csv else False,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
