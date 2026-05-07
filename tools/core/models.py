@@ -430,6 +430,8 @@ class RetrieveConfig:
                                      "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
                                      # doc rerank 候选 +1（5→6），PPTX 已禁后把预算转给 doc 召回。
                                      "google_doc_candidates_per_sq": 6, "google_slide_candidates_per_sq": 4,
+                                     # sheet tab-level cap=3：实验证明 2 没省 wall-clock（sheet read
+                                     # 已并行，4 workers 吞得下 -28% per-read），但 important 召回 -1。
                                      "google_sheet_candidates_per_sq": 3,
                                      "google_max_gmail_threads_per_subquery": 3,
                                      "google_gmail_rerank_top_n": 3},
