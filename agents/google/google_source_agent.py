@@ -2195,11 +2195,11 @@ class GoogleSourceAgent(SourceAgent):
             executors["nonnative"] = ThreadPoolExecutor(
                 max_workers=max(1, int(self.cfg.google_type_pool_nonnative_workers))
             )
-            executors["shared"] = ThreadPoolExecutor(max_workers=14)
         else:
+            # 单池模式：所有任务共享一个池
             executors["shared"] = ThreadPoolExecutor(max_workers=12)
 
-        pool_submit_counts = {"sheet": 0, "doc": 0, "slide": 0, "gmail": 0, "nonnative": 0, "shared": 0}
+        pool_submit_counts: Dict[str, int] = {}
         try:
             # 先注册所有 wait events，避免 wait 先于 worker mark_reading 发生时直接返回空。
             for fid in merged_sheets:
@@ -2232,7 +2232,8 @@ class GoogleSourceAgent(SourceAgent):
                     if mime == _MIME_SLIDES:
                         return executors["slide"], "slide"
                     return executors["nonnative"], "nonnative"
-                return executors["shared"], "shared"
+                # 未知 channel：fallback 到 nonnative（不复用 native 池，避免抢线程）
+                return executors["nonnative"], "nonnative"
 
             for fid, titles in merged_sheets.items():
                 executor, pkey = _get_executor(fid, "sheet", sheet_pool)
@@ -2247,19 +2248,14 @@ class GoogleSourceAgent(SourceAgent):
                 executor.submit(_read_slide_task, fid)
                 pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
             if self.cfg.google_enable_gmail:
+                target_key = "gmail" if use_type_pools else "shared"
                 for tid in merged_gmail:
-                    if use_type_pools:
-                        target_key = "shared"
-                    else:
-                        target_key = "shared"
                     executors[target_key].submit(_read_gmail_task, tid)
-                    pool_submit_counts["gmail"] += 1
+                    pool_submit_counts[target_key] = pool_submit_counts.get(target_key, 0) + 1
 
             logger.info(
-                "[google] pool submits sheet=%d doc=%d slide=%d nonnative=%d gmail=%d shared=%d type_pools=%s",
-                pool_submit_counts.get("sheet", 0), pool_submit_counts.get("doc", 0),
-                pool_submit_counts.get("slide", 0), pool_submit_counts.get("nonnative", 0),
-                pool_submit_counts.get("gmail", 0), pool_submit_counts.get("shared", 0),
+                "[google] pool submits %s type_pools=%s",
+                {k: v for k, v in sorted(pool_submit_counts.items()) if v},
                 use_type_pools,
             )
 
