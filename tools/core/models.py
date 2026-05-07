@@ -255,7 +255,7 @@ class SourceAgentConfig:
     google_native_doc_size_gate_bytes: int = 45_000_000
     google_native_doc_outline_threshold_bytes: int = 10_000_000
     google_native_slide_size_gate_bytes: int = 55_000_000
-    google_pptx_size_gate_bytes: int = 48_000_000           # pptx 单独的 size gate（48MB，从 35MB 放宽）
+    google_pptx_size_gate_bytes: int = 35_000_000           # pptx 单独的 size gate（35MB；43MB 实测 9s 仍 0 chunks，回收预算）
     google_word_size_gate_bytes: int = 30_000_000           # word/docx 的 size gate
     google_pptx_download_timeout_s: float = 6.0             # pptx 独立 timeout（默认 6s，比 native API 更激进）
     google_word_download_timeout_s: float = 6.0             # word/docx 独立 timeout
@@ -393,8 +393,13 @@ class RetrieveConfig:
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
                               "google_enable_cross_sq_pre_filter": True,
-                              # lite 完全 native-only：所有家族关闭非原生召回
-                              "google_nonnative_search_query_types": {"sheet": set(), "slide": set(), "doc": set()},
+                              # lite 仅关闭 sheet 系（excel/csv 与 native sheet 一同跳过），
+                              # slide/doc 家族保持 nonnative 召回，以避免数据型 query 失去关键召回。
+                              "google_nonnative_search_query_types": {
+                                  "sheet": set(),
+                                  "slide": {"structured", "concept", "personal_recent"},
+                                  "doc":   {"structured", "concept", "personal_recent"},
+                              },
                           },
                       }},
         "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
@@ -495,6 +500,8 @@ class RetrieveConfig:
             "google_enable_gmail_isolation", "google_order_by_mode",
             "google_per_file_timeout_s", "google_native_doc_size_gate_bytes",
             "google_native_doc_outline_threshold_bytes", "google_native_slide_size_gate_bytes",
+            "google_pptx_size_gate_bytes", "google_word_size_gate_bytes",
+            "google_pptx_download_timeout_s", "google_word_download_timeout_s",
             "google_sheet_chunk_cap", "google_doc_chunk_cap", "google_slide_chunk_cap",
             "google_sheet_prefilter_trigger_count", "google_sheet_prefilter_qwen_trigger_count",
             "google_sheet_prefilter_close_delta",
