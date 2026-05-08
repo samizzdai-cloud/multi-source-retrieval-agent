@@ -128,6 +128,21 @@ def enforce_tag_caps(tags: List[str]) -> List[str]:
     return l2_kept + time_kept
 
 
+# ── 跨源/跨阶段共享：实体保真原则 ─────────────────────────────────────────
+# 在 Global Planner / 各源 plan_only / 各源 plan_eval 注入，统一拒识"自创实体"。
+
+ENTITY_FIDELITY_BLOCK = """【实体保真原则（强制 / 拒识）】
+- **不得引入** user_query / focus 中没有明确出现的具体产品名、型号、品牌、竞品、地区、时间限定。
+  · 用户问"REDMAGIC 销量"，禁止替换/扩展为"REDMAGIC 11 Pro"、"REDMAGIC 8S Pro"等具体型号。
+  · 用户问"REDMAGIC 竞品格局"，禁止自创"黑鲨"、"ROG"、"拯救者"等品牌——除非用户原话提到。
+  · 用户问"nubia 销售业务"，禁止收缩到"nubia Z70 Ultra"等具体产品线。
+- **泛指保留泛指**：user_query 用泛指词（产品/销售/营销/竞品 等）时，sub_query 必须保留泛指
+  或同义改写，不得替换为具体产品/品牌实体。
+- source_profile 列出的索引名/文件夹名仅作为路由参考，**不能据此推断用户在问那些具体实体**。
+- focus 拆分是**逻辑切面**（如 "产品" / "销售" / "渠道" / "竞品"）的拆分，不是范围扩大或收缩。
+- sub_query 是为了从源中**检索得更准**，不是为了**限定到某条产品线**。"""
+
+
 # ── 各源 Query 编写规则（供 SourceAgent 的 plan_only prompt 注入）──────────
 
 SOURCE_QUERY_RULES: Dict[str, str] = {
@@ -181,9 +196,11 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
         "0. 【Sub_query 数量预算】（少而精原则，硬纪律）：\n"
         "   - focuses 数 = 1：默认输出 1 条；仅当该 focus 包含两个明显异质切面（如 data + concept、\n"
         "     或 结构化指标 + 时间趋势）时才输出 2 条。\n"
-        "   - focuses 数 ≥ 2：所有 focus 累计 ≤ 3 条。每个 focus 至少 1 条；仅当某 focus 信息密度\n"
-        "     显著更高（多指标/多渠道/多国家）时，可分配 2 条，但全局总数不超 3。\n"
+        "   - focuses 数 ≥ 2：所有 focus 累计 ≤ 2 条。每个 focus 至少 0-1 条；优先覆盖信息密度更高的\n"
+        "     focus；其余 focus 让飞书/百炼承担。**不得为了凑齐每个 focus 而强行扩到 3 条。**\n"
         "   - 禁止为凑数拆出语义近似的 sub_query；少而精优于多而散。\n"
+        "   - **关键词宽度**：单条 sub_query 关键词 2-4 个为宜；超过 4 个会导致 Drive 全文 AND 命中崩塌；\n"
+        "     不要把多个竞品/多个产品型号/多个地区同时塞入一条。\n"
         "1. 默认情况，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配。\n"
         "2. 如果用户寻找近期修改或阅读的文件，设置 `google_enable_fulltext = false`（退化为纯标题检索），"
         "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` 或 `'modifiedTime desc'`。\n"

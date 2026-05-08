@@ -4,9 +4,9 @@
 
 | Q | Query | Latency | Focuses | TopK | Emitted | Merged | C/I/Noise | Sources | Angle MaxRedund | Schema | Error |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| Q44 | REDMAGIC 11 Pro 各站点首发销量和DTC渠… | 20.94s | 2 | 8 | 8 | 10 | 5/3/0 | bailian:1,feishu:4,google:3 | 2 | ✅ | - |
-| Q51 | nubia 的产品和销售业务和销售额等的背景信息（近6个… | 15.05s | 3 | 12 | 10 | 10 | 5/5/0 | bailian:5,feishu:5 | 1 | ✅ | - |
-| Q48 | REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知… | 21.51s | 4 | 16 | 12 | 12 | 5/7/0 | bailian:2,feishu:5,google:5 | 2 | ✅ | - |
+| Q44 | REDMAGIC 11 Pro 各站点首发销量和DTC渠… | 18.11s | 2 | 8 | 8 | 13 | 6/2/0 | bailian:4,feishu:2,google:2 | 1 | ✅ | - |
+| Q51 | nubia 的产品和销售业务和销售额等的背景信息（近6个… | 14.25s | 3 | 12 | 10 | 10 | 5/5/0 | bailian:5,feishu:5 | 1 | ✅ | - |
+| Q48 | REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知… | 15.46s | 2 | 8 | 8 | 11 | 5/3/0 | bailian:2,feishu:4,google:2 | 2 | ✅ | - |
 
 ### lite / Q44: REDMAGIC 11 Pro 各站点首发销量和DTC渠道表现
 
@@ -15,16 +15,15 @@
 {
   "focus_0": {
     "status": "satisfied",
-    "critical": 3,
-    "important": 2,
+    "critical": 2,
+    "important": 3,
     "noise": 0,
     "contributors": [
-      "bailian",
-      "feishu"
+      "bailian"
     ],
     "targets": [
-      "bailian",
-      "feishu"
+      "feishu",
+      "bailian"
     ]
   },
   "focus_1": {
@@ -43,10 +42,25 @@
   }
 }
 ```
-angle_tag distribution: {'sales-performance': 2, 'sales-data': 1, 'conversion': 1, 'supply-chain': 1, 'sales-mix': 1, 'market-performance': 1, 'cvr-trend': 1}
+angle_tag distribution: {'sales-performance': 1, 'regional-sales': 1, 'sales-composition': 1, 'conversion-metrics': 1, 'total-sales': 1, 'launch-prep': 1, 'trend-analysis': 1, 'timeline': 1}
 
 **Sample chunks (top 5)**
 1. 销售进度追踪 | 
+
+产品:
+渠道:AMZ
+:middle
+剩余库存:75
+剩余库存:75
+剩余库存:0
+累计销量:1270
+:5
+11/25-12/1:
+12/2-12/8:11
+12/9-12/15:11
+12/16-12/22:9
+12/23-12/2
+2. 销售进度追踪 | 
 
 产品:
 渠道:EU
@@ -55,31 +69,23 @@ angle_tag distribution: {'sales-performance': 2, 'sales-data': 1, 'conversion': 
 剩余库存:
 累计销量:1770
 11/25-12/1:59.00%
-2. JP月会-2026年1月 | # DTC渠道&本地仓管理<mention-user id="ou_c4c9802979c7a379aebe394dd36a31df"/>
-
-## 1月进度
-
-### 红魔
-
-<grid cols="2">
-
-<column width="
 3. Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review - DTC Channel 2026.02.10 - 2026.03.11...
+| Overview | By Color | By Day |
+|---|---|---|
+| Source: metaba
+4. Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review - DTC Channel 2026.02.10 - 2026.03.11...
 流量质量： 在流量激增的情况下，质量依然保持稳健且正向。
 
 | BR Store | Sessions | ATC Rate 
-4. JP月会-2026年1月 | # 项目进展（RM,nubia,ZTE,oladance）<mention-user id="ou_25af668039ab7d4de7a496446c4ccf3c"/>
+5. 销售进度追踪 | 
 
-### REDMAGIC
-
-list{- 11 Pro 销售进展&
-5. JP月会-2026年4月  | # DTC渠道&本地仓管理<mention-user id="ou_8be0a013db446a9a67e15e1882615b76"/>
-
-### 3月中旬~4月上旬进度
-
-#### 红魔
-
-seq{1. 3/17~3/24 11Air 
+产品:
+渠道:
+剩余库存:
+剩余库存:
+剩余库存:
+累计销量:首月
+11/25-12/1:1008
 
 ### lite / Q51: nubia 的产品和销售业务和销售额等的背景信息（近6个月）
 
@@ -87,9 +93,9 @@ seq{1. 3/17~3/24 11Air
 ```json
 {
   "focus_0": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 0,
+    "status": "noise_only",
+    "critical": 1,
+    "important": 1,
     "noise": 0,
     "contributors": [
       "bailian"
@@ -102,6 +108,274 @@ seq{1. 3/17~3/24 11Air
   "focus_1": {
     "status": "satisfied",
     "critical": 2,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "bailian",
+      "feishu"
+    ]
+  },
+  "focus_2": {
+    "status": "satisfied",
+    "critical": 3,
+    "important": 3,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "feishu",
+      "bailian"
+    ]
+  }
+}
+```
+angle_tag distribution: {'product-inventory': 1, 'business-model': 1, 'sales-performance': 1, 'financial-data': 1, 'financial-metrics': 1, 'product-timeline': 1, 'operations-optimization': 1, 'gmv-overview': 1, 'sales-overview': 1, 'regional-sales': 1}
+
+**Sample chunks (top 5)**
+1. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
+
+数据来源:ERP1.核心表现1.1成熟期主力机型库存严重积压·核心产品「Nubia Z80 Ultra」 处于成熟期,但DOS高达280.0天,远超健康水位。
+1.2清库期产品区域分化明显
+●清库款「「Nubia Z70 Ultra整体
+2. Nubia(ZTE)托管项目访谈 | ## 一、项目信息与背景
+
+list{- 品牌名称：Nubia; - 项目名称：ZTE; - 项目范围：GL/EU/UK/MX 一起上线。8 月底，  JP 是渠道混合采销; - 项目目标与核心 KPI 是什么; - 没有销售目标，主要是降
+3. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
+
+| 店铺|净销量|净销售额|优惠金额|成功订单数|客单价|毛销量|毛销售额|
+| NubiaAlphaEU|33(-10.8%)|$15,596.50|$48.73(-89.7%)|32(-3.0%)|516.97(-33.2%)|34
+4. ZTE 业务总结报告 (2025-12-22 ~ 2025-12-28) | list{- 新品「Nubia Z80 Ultra」销量环比下跌 **36%**（36台降至23台）。根据品牌首发规律，W7 相比 W6 通常应有 **16.6%** 的反弹，当前表现严重偏离预期。反观清库期产品「Nubia Z70 Ult
+5. Weekly meeting 12 | 
+
+| nubia|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Traffic流量数据|Traffic流量数据|Traffic流量数据|Traf
+
+### lite / Q48: REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度
+
+**focus_board**
+```json
+{
+  "focus_0": {
+    "status": "satisfied",
+    "critical": 3,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "bailian",
+      "feishu"
+    ]
+  },
+  "focus_1": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 9,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu",
+      "google"
+    ],
+    "targets": [
+      "bailian",
+      "feishu",
+      "google"
+    ]
+  }
+}
+```
+angle_tag distribution: {'user-feedback': 2, 'competitor': 1, 'competitor-analysis': 1, 'user-sentiment': 1, 'marketing-strategy': 1, 'crisis-management': 1, 'target-demographic': 1}
+
+**Sample chunks (top 5)**
+1. 销售进度追踪 | 
+
+:
+Xiaomi:Xiami 16
+HONER:Magic 8
+Oneplus:Oneplus 15
+Realme:Realme GT 8 pro
+iQOO:iQOO 15
+Samsung:S26 Ultra 
+2. 2024年全球高端智能手机市场竞争格局与 nubia Z60 Ultra 运营全链路战略分析报告AI-Gen | list{- **红魔 9 Pro (RedMagic 9 Pro)：** 同属中兴/nubia系。起售价相近，但纯粹定位于电竞。其拥有内置的 22,000 RPM 高速离心风扇散热（ICE 13.0 系统）、完全纯平无凸起的背部设计、52
+3. Copy of REDMAGIC Cooler 6 Marketing Proposal | ## Agenda...
+| 用户声音 User Sentiment Towards Phone Coolers Reddit ; 手机散热器的整体情感 意见分歧： 一些用户对其赞不绝口，而另一些则认为它们不必要。游戏爱好者欣赏其带来的性
+4. JP月会-2026年4月  | # 项目进展（RM,nubia,ZTE,oladance）<mention-user id="ou_25af668039ab7d4de7a496446c4ccf3c"/>
+
+### REDMAGIC
+
+#### 11 Air 上市进展
+
+s
+5. JP月会-2026年1月 | # 营销管理<mention-user id="ou_de46b765debb8399e2ae152101cb743c"/>
+
+## 【REDMAGIC】
+
+list{- **红魔 11 Pro**; - **当前执行**：; - 科技类合
+
+## balanced
+
+| Q | Query | Latency | Focuses | TopK | Emitted | Merged | C/I/Noise | Sources | Angle MaxRedund | Schema | Error |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| Q44 | REDMAGIC 11 Pro 各站点首发销量和DTC渠… | 24.38s | 2 | 8 | 8 | 9 | 6/2/0 | bailian:1,feishu:4,google:3 | 1 | ✅ | - |
+| Q51 | nubia 的产品和销售业务和销售额等的背景信息（近6个… | 17.40s | 3 | 12 | 12 | 14 | 5/7/0 | bailian:4,feishu:5,google:3 | 2 | ✅ | - |
+| Q48 | REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知… | 16.09s | 2 | 8 | 8 | 11 | 4/4/0 | bailian:1,feishu:4,google:3 | 1 | ✅ | - |
+
+### balanced / Q44: REDMAGIC 11 Pro 各站点首发销量和DTC渠道表现
+
+**focus_board**
+```json
+{
+  "focus_0": {
+    "status": "satisfied",
+    "critical": 3,
+    "important": 0,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "feishu",
+      "bailian"
+    ]
+  },
+  "focus_1": {
+    "status": "satisfied",
+    "critical": 3,
+    "important": 4,
+    "noise": 0,
+    "contributors": [
+      "feishu",
+      "google"
+    ],
+    "targets": [
+      "feishu",
+      "google"
+    ]
+  }
+}
+```
+angle_tag distribution: {'sales-performance': 2, 'regional-sales': 1, 'dtc-performance': 1, 'performance-metrics': 1, 'product-mix': 1, 'conversion-rate': 1, 'executive-summary': 1}
+
+**Sample chunks (top 5)**
+1. 销售进度追踪 | 
+
+产品:
+渠道:
+剩余库存:
+剩余库存:
+剩余库存:
+累计销量:首月
+11/25-12/1:1008
+2. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 店铺 | 净销量 | 净销售额 | 成功订单数 | 客单价 |
+| --- | --- | --- | --- | --- |
+| RedMagic EU | 1,108 (-0.7%) | $464,379.87 (+7.7%) | 
+3. [REDMAGIC] RM 11 Air Launch report | ## Sales Review 2026.02.10 - 2026.03.11...
+|  |  |  |  |  |
+|---|---|---|---|---|
+| Channel | Target | Net Sales / Qty |
+4. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | ## 三、各领域分析 > 3.6 页面转化分析
+
+list{- 本周期处于圣诞节活动周，但受物流截单影响，整体进入大促后的良性回调期。DTC渠道 Net Sales Amount 环比下滑 23.7% 至 $1,258,815，Net Sa
+5. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 指标 | 本周期数据 |
+| --- | --- |
+| 净销量 | 3,358 (-15.9%) |
+| 净销售额 | $1,258,815.00 (-23.7%) |
+| 毛销量 | 3,669 (-15.0%) |
+| 毛销售额 
+
+### balanced / Q51: nubia 的产品和销售业务和销售额等的背景信息（近6个月）
+
+**focus_board**
+```json
+{
+  "focus_0": {
+    "status": "noise_only",
+    "critical": 1,
+    "important": 3,
+    "noise": 2,
+    "contributors": [
+      "bailian",
+      "google"
+    ],
+    "targets": [
+      "bailian",
+      "google"
+    ]
+  },
+  "focus_1": {
+    "status": "satisfied",
+    "critical": 4,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "bailian",
+      "feishu"
+    ]
+  },
+  "focus_2": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 3,
+    "noise": 0,
+    "contributors": [
+      "bailian",
+      "feishu"
+    ],
+    "targets": [
+      "feishu",
+      "bailian"
+    ]
+  }
+}
+```
+angle_tag distribution: {'product-line': 2, 'product-sales': 1, 'pricing-policy': 1, 'financial-sales': 1, 'financial-performance': 1, 'channel-dtc': 1, 'financial-gmv': 1, 'business-model': 1, 'market-stats': 1, 'spec-detail': 1, 'conversion-metrics': 1}
+
+**Sample chunks (top 5)**
+1. nubia销售进度追踪 | 
+
+产品:nubia Z80U
+渠道:DTC
+10/6 - 10/12:0
+10/13 - 10/19:0
+10/20 - 10/26:0
+10/27 - 11/2:0
+11/3 - 11/9:339
+11/10 - 11/16:210
+:
+2. Nubia(ZTE)托管项目访谈 | ## 二、项目结算
+
+**[Table from: Nubia(ZTE)托管项目访谈]**
+| 商号 | 商业板块 | 服务 | 工作项 | 服务主体(拟) | 收费模式 | 币别 | 备注 | 疑问 |
+| --- | --- | ---
+3. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
+
+| 店铺|净销量|净销售额|优惠金额|成功订单数|客单价|毛销量|毛销售额|
+| NubiaAlphaEU|33(-10.8%)|$15,596.50|$48.73(-89.7%)|32(-3.0%)|516.97(-33.2%)|34
+4. NUBIA 业务总结报告 (2025-12-22 ~ 2025-12-28) | list{- 新品「Nubia Z80 Ultra」销量环比下滑 **36.1%**，尽管优惠投入增加，但表现低于品牌历史 W7 环比增长 **16.6%** 的规律，需警惕流量承接问题。相反，处于清库期的「Nubia Z70 Ultra」
+5. REDMAGIC 11 Pro Q&A  | Q | A
+Does REDMAGIC 11 Pro support dual SIM cards? | Yes, REDMAGIC 11 Pro supports Dual SIM with two active SIMs at the 
+
+### balanced / Q48: REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度
+
+**focus_board**
+```json
+{
+  "focus_0": {
+    "status": "noise_only",
+    "critical": 1,
     "important": 4,
     "noise": 0,
     "contributors": [
@@ -113,358 +387,45 @@ seq{1. 3/17~3/24 11Air
       "feishu"
     ]
   },
-  "focus_2": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "feishu",
-      "bailian"
-    ]
-  }
-}
-```
-angle_tag distribution: {'product-list': 1, 'launch-details': 1, 'sales-performance': 1, 'dtc-performance': 1, 'financial-summary': 1, 'sales-breakdown': 1, 'financial-settlement': 1, 'ops-optimization': 1, 'project-scope': 1, 'channel-management': 1}
-
-**Sample chunks (top 5)**
-1. nubia - EC Operation Calendar | 
-
- :Product Available
-2025 Event Calendar:nubia Z70 Ultra
-nubia Z60 Ultra LV & nubia Z60S Pro
-nubia Z60 Ultra
-nubia Flip
-2. ZTE项目概况 | 
-
-Teasing:2025/6/5Pre-order:2025/6/15(赠送保护壳)●Open-sales:2025/6/24Launch站点:EU, UK, GL (不含US,仅指GL-other regions) , MX●特殊情况
-3. 2024年全球高端智能手机市场竞争格局与 nubia Z60 Ultra 运营全链路战略分析报告AI-Gen | # 第一部分：公司内部运营情况与 nubia Z60 Ultra 首发效能深度剖析
-
-nubia Z60 Ultra 的全球发布策略采取了与中国国内市场同步上市的激进节奏 ()。这一策略在行业内较为罕见，成功打破了传统中国出海品牌全球发布滞
-4. ZTE 业务总结报告 (2025-12-29 ~ 2026-01-04) | 
-
-本周DTC渠道进入典型的促销后期调整阶段, Net Sales Amount 录得 $26,354(环比-32.8%), Net Sales Volume为45(环比-42.3%) 。伴随Total Coupon Amount同步下降4
-5. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
-
-NUBIA业务总结报告(2026-01-15~2026-01-21)报告周期:2026-01-15~2026-01-21 vs. 2026-01-08~2026-01-14温馨提醒:本报告由 Fastlane Data AgentTM自
-
-### lite / Q48: REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度
-
-**focus_board**
-```json
-{
-  "focus_0": {
-    "status": "noise_only",
-    "critical": 1,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
-  "focus_1": {
-    "status": "noise_only",
-    "critical": 0,
-    "important": 3,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
-  "focus_2": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "google"
-    ],
-    "targets": [
-      "bailian",
-      "google"
-    ]
-  },
-  "focus_3": {
-    "status": "satisfied",
-    "critical": 3,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "feishu",
-      "google"
-    ],
-    "targets": [
-      "feishu",
-      "google"
-    ]
-  }
-}
-```
-angle_tag distribution: {'spec-detail': 2, 'user-feedback': 2, 'competitor-analysis': 1, 'brand-positioning': 1, 'target-persona': 1, 'sales-data': 1, 'brand-awareness': 1, 'competitor': 1, 'performance-comparison': 1, 'market-reception': 1}
-
-**Sample chunks (top 5)**
-1. 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | # 市场目标 (What is Success?)
-
-### 2.1 上市产品 (2026.Q1) & 竞品分析
-
-#### REDMAGIC 11pro (游戏手机)
-
-list{- **定位：** 旗舰级专业电竞手机。; - **核心优
-2. 墨西哥区域平板价格对比 | 
-
-品牌:Redmagic
-产品名称:Redmagic Nova Gaming Tablet
-内存:12+256
-KSP:8 GEN 3 leading version chipset
-10.9" 2.8K display
-10100mAh
-3. Copy of [REDMAGIC] RM 11 Air Launch report | ## Voice of Customer (VOC) Summary...
-User feedback highlights a successful shift toward a "premium" brand identity, but
-4. 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | list{- **画像：** 16-25 岁，学生群体。; - **行为：** T1 (Faker) 和 LCK 的忠实粉丝。不一定每天玩高强度游戏，但追求“电竞美学” (Gamer Aesthetic)。; - **消费心理：** “偶像
-5. 不太正常的红魔问题回答（销售） | | 排名 | 机型 | 销量 | 占比 |
-| --- | --- | --- | --- |
-| 1 | REDMAGIC 10 Pro | 1,161件 | 44.4% |
-| 2 | （未命名SKU） | 1,144件 | 43.7%
-
-## balanced
-
-| Q | Query | Latency | Focuses | TopK | Emitted | Merged | C/I/Noise | Sources | Angle MaxRedund | Schema | Error |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| Q44 | REDMAGIC 11 Pro 各站点首发销量和DTC渠… | 20.33s | 2 | 8 | 8 | 11 | 6/2/0 | bailian:1,feishu:3,google:4 | 1 | ✅ | - |
-| Q51 | nubia 的产品和销售业务和销售额等的背景信息（近6个… | 16.13s | 3 | 12 | 9 | 9 | 7/2/0 | bailian:5,feishu:4 | 2 | ✅ | - |
-| Q48 | REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知… | 24.46s | 4 | 16 | 11 | 12 | 5/6/0 | bailian:1,feishu:5,google:5 | 2 | ✅ | - |
-
-### balanced / Q44: REDMAGIC 11 Pro 各站点首发销量和DTC渠道表现
-
-**focus_board**
-```json
-{
-  "focus_0": {
-    "status": "satisfied",
-    "critical": 3,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
   "focus_1": {
     "status": "satisfied",
     "critical": 3,
-    "important": 5,
+    "important": 9,
     "noise": 0,
     "contributors": [
+      "bailian",
       "feishu",
       "google"
     ],
     "targets": [
-      "feishu",
-      "google"
-    ]
-  }
-}
-```
-angle_tag distribution: {'sales-data': 1, 'regional-sales': 1, 'gmv-sales': 1, 'conversion-metrics': 1, 'inventory-performance': 1, 'conversion-rate': 1, 'sales-breakdown': 1, 'traffic-analysis': 1}
-
-**Sample chunks (top 5)**
-1. 销售进度追踪 | 
-
-产品:
-渠道:JP [链接](https://docs.google.com/spreadsheets/d/1SXIt8LgLMAXZa1dYM6fRcFDdv94Eqk-F_JjJkaAX5FA/edit?usp=sharing)
-剩
-2. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 店铺 | 净销量 | 净销售额 | 成功订单数 | 客单价 |
-| --- | --- | --- | --- | --- |
-| RedMagic EU | 1,108 (-0.7%) | $464,379.87 (+7.7%) | 
-3. Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review 2026.02.10 - 2026.03.11...
-|  |  |  |  |  |
-|---|---|---|---|---|
-| Channel | Target | Sales / Qty | Sal
-4. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 产品 | 浏览数 | 加购数 | 加购率 | 支付订单数 | 支付转化率 |
-| --- | --- | --- | --- | --- | --- |
-| REDMAGIC 11 Pro | 154,954 (+12.0%) | 12
-5. REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 产品 | 近2周净销量 | DOS | 风险提示 | 总库存数量 | 可用库存数量 |
-| --- | --- | --- | --- | --- | --- |
-| REDMAGIC 11Pro | 2435 | 51.0 | 健康 
-
-### balanced / Q51: nubia 的产品和销售业务和销售额等的背景信息（近6个月）
-
-**focus_board**
-```json
-{
-  "focus_0": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 0,
-    "noise": 0,
-    "contributors": [
-      "bailian"
-    ],
-    "targets": [
       "bailian",
-      "google"
-    ]
-  },
-  "focus_1": {
-    "status": "satisfied",
-    "critical": 4,
-    "important": 0,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
-  "focus_2": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 2,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "feishu",
-      "bailian"
-    ]
-  }
-}
-```
-angle_tag distribution: {'sales-performance': 2, 'product-launch': 1, 'spec-detail': 1, 'channel-operation': 1, 'dtc-operations': 1, 'financial-data': 1, 'amazon-operations': 1, 'sales-analysis': 1}
-
-**Sample chunks (top 5)**
-1. nubia - EC Operation Calendar | 
-
- :New Product Launch
-2025 Event Calendar:
-2025 Event Calendar:
-2025 Event Calendar:
-2025 Event Calendar:nubia Z70S Ult
-2. nubia Z80U竞品对比 | 
-
-参数:国际发布
-nubia Z80 Ultra:2025-11-01
-nubia Z70 Ultra:2024-11-01
-Xiaomi 15:2025-03 (MWC)
-OnePlus 13:2025-01-07
-realme GT7
-3. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
-
-Current status(2025.01.15-2025.01.21)| 2026.01.15-2025.01.21|2026.01.15-2025.01.21|2026.01.15-2025.01.21|2026.01.15-20
-4. NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | 
-
-| 店铺|净销量|净销售额|优惠金额|成功订单数|客单价|毛销量|毛销售额|
-| NubiaAlphaEU|33(-10.8%)|$15,596.50|$48.73(-89.7%)|32(-3.0%)|516.97(-33.2%)|34
-5. NUBIA 业务总结报告 (2026-01-29 ~ 2026-02-04) | | 指标 | 本周期数据 |
-| --- | --- |
-| 净销量 | 19 (-47.2%) |
-| 净销售额 | $10,824.66 (-31.8%) |
-| 毛销量 | 24 (-35.1%) |
-| 毛销售额 | $14,421
-
-### balanced / Q48: REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度
-
-**focus_board**
-```json
-{
-  "focus_0": {
-    "status": "satisfied",
-    "critical": 2,
-    "important": 1,
-    "noise": 1,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
-  "focus_1": {
-    "status": "noise_only",
-    "critical": 1,
-    "important": 3,
-    "noise": 0,
-    "contributors": [
-      "bailian",
-      "feishu"
-    ],
-    "targets": [
-      "bailian",
-      "feishu"
-    ]
-  },
-  "focus_2": {
-    "status": "noise_only",
-    "critical": 1,
-    "important": 1,
-    "noise": 0,
-    "contributors": [
-      "google"
-    ],
-    "targets": [
-      "bailian",
-      "google"
-    ]
-  },
-  "focus_3": {
-    "status": "noise_only",
-    "critical": 1,
-    "important": 3,
-    "noise": 0,
-    "contributors": [
-      "feishu",
-      "google"
-    ],
-    "targets": [
       "feishu",
       "google"
     ]
   }
 }
 ```
-angle_tag distribution: {'customer-feedback': 2, 'competitor-analysis': 1, 'market-share': 1, 'user-persona': 1, 'spec-comparison': 1, 'loyalty-data': 1, 'market-survey': 1, 'brand-awareness': 1, 'marketing-points': 1, 'growth-metrics': 1}
+angle_tag distribution: {'competitor-analysis': 1, 'user-complaint': 1, 'design-perception': 1, 'brand-positioning': 1, 'media-feedback': 1, 'target-segmentation': 1, 'performance-value': 1, 'general': 1}
 
 **Sample chunks (top 5)**
-1. 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | | 竞品 | 2026 预期型号 | 竞争优势 | 竞争劣势 (红魔的机会点) |
-| --- | --- | --- | --- |
-| 三星 | Galaxy S26 Ultra | 品牌 (90% 忠诚度)、拍照、生态、AS 售后 |
-2. 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | ## 市场背景 (Why Korea?) > 1.2 电竞 & 手机行业分析
+1. 智能纪要：11 Air Marketing proposal with Nubia team 2025年12月19日 | # 总结
 
-**[Table from: 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案]**
-| 电竞与游戏市场 (机遇) | 智能手机市场 (挑战) |
-| 
-3. 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | list{- **画像：** 16-25 岁，学生群体。; - **行为：** T1 (Faker) 和 LCK 的忠实粉丝。不一定每天玩高强度游戏，但追求“电竞美学” (Gamer Aesthetic)。; - **消费心理：** “偶像
-4. Red Magic 3 - KM-0412 | ## 竞品排查对比...
-| 规格项 | Red Magic 3 | Black Shark 2 | Asus ROG 2 | Vivo IQOO |
-|---|---|---|---|---|
-| 发布 | 2019.04.25 | 20
-5. [REDMAGIC] RM 11 Air Launch report | ## Loyalty Users Performance...
-| RM VIP Code used | 1 h | 14 h | EA | Final | VIP Users |
-|---|---|---|---|---|---|
-| E
+<whiteboard token="IKKCwe6lkhFGpDbQLrYcQCa9nCe" width="820" height="675" align="left"/>
+
+本次会议围绕 11 air 手机的产品定位、竞品分
+2. JP月会-2026年4月  | ## 客服问题追踪 > 三月总结 > REDMAGIC > 3dmark事件客服侧影响总结
+
+**[Table from: JP月会-2026年4月 ]**
+| 用户及机型 | 咨询内容及诉求 | 内容分类 |
+| --- | --- | 
+3. [REDMAGIC] RM 11 Air Launch report | ## Social Listening - Reddit/Discord/Facebook Communi...
+| 优点： 标志性透明设计强化品牌认同 透明的美学被广泛认定为“REDMAGIC核心DNA” 与10 Air的哑光表面相
+4. 品牌规范与参考体系调研 V3 | ## D. 信息分层模型与整合优先级 > 信息分层模型 > 五层模型 > L2 · 品牌策略
+
+**[Table from: 品牌规范与参考体系调研 V3]**
+| 字段 | 说明 | 示例（REDMAGIC） |
+| --- | --- 
+5. [REDMAGIC] RM 11 Air Launch report | ## Perspective and Suggestions-PR...
+What Worked:-
+
+- 头部媒体对 REDMAGIC 11 Air 的评分普遍在 8.8–9 分（满分 10 分）之间，表明其整体认可度较高，并在中高端游戏

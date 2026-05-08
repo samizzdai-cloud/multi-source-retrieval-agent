@@ -81,6 +81,9 @@ class FeishuDocPool:
         self._doc_ready_events: Dict[str, asyncio.Event] = {}
         # doc_id → 第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM 提取）
         self._doc_query: Dict[str, str] = {}
+        # doc_id → 首次 submit 进入 _reading 的 monotonic 时间戳；
+        # 供 wait_and_collect 的 per_doc_timeout 计算单 doc 等待上限
+        self._doc_submit_times: Dict[str, float] = {}
 
     async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """走注入 executor 的 to_thread；executor=None 时退回 asyncio 默认。
@@ -184,6 +187,9 @@ class FeishuDocPool:
                 if doc_id not in self._doc_ready_events:
                     self._doc_ready_events[doc_id] = asyncio.Event()
                 self._reading.add(doc_id)
+                # 记录 submit 时间（仅在首次进入 _reading 时设置）
+                if doc_id not in self._doc_submit_times:
+                    self._doc_submit_times[doc_id] = time.monotonic()
                 newly_registered.append(doc_id)
 
             # [S2.2-FIX] 路由 *仅* 对本次 submit 新登记的 doc 生效；
@@ -228,25 +234,53 @@ class FeishuDocPool:
         self,
         doc_ids: List[str],
         total_timeout: float = 12.0,
+        per_doc_timeout: Optional[float] = None,
     ) -> "List[UnifiedChunk]":
-        """等待指定文档就绪，返回原始 UnifiedChunks。"""
+        """等待指定文档就绪，返回原始 UnifiedChunks。
+
+        Args:
+            total_timeout: 整批最大等待秒数；超过后剩余 pending docs 视为超时丢弃
+            per_doc_timeout: 单 doc 最大等待秒数（自该 doc submit 起）；超过后该 doc
+                被视为超时（empty chunks），不再阻塞其他文档收集。
+                为 None 时仅由 total_timeout 控制。注意：底层 fetch 在线程池中
+                继续运行，此参数只控制"我们何时停止等待"。
+        """
         started = time.perf_counter()
         from tools.core.models import UnifiedChunk
 
         pending = set(doc_ids)
         collected_by_doc: Dict[str, List[UnifiedChunk]] = {}
         collected_docs = 0
+        per_doc_timeouts = 0
         deadline = time.monotonic() + total_timeout
 
         while pending and time.monotonic() < deadline:
             newly_done = []
+            now_t = time.monotonic()
             for doc_id in list(pending):
                 event = self._doc_ready_events.get(doc_id)
                 if event is None or event.is_set():
                     newly_done.append(doc_id)
+                    continue
+                # Per-doc timeout：自 submit 起超过 per_doc_timeout 即视为完成
+                if per_doc_timeout is not None:
+                    submit_t = self._doc_submit_times.get(doc_id)
+                    if submit_t is not None and (now_t - submit_t) >= per_doc_timeout:
+                        newly_done.append(doc_id)
+                        # 标记为 0 chunks（不动 self._doc_chunks，避免影响后续真正完成的事件）
+                        per_doc_timeouts += 1
+                        logger.info(
+                            "DocPool.wait_and_collect: per-doc timeout %s after %.1fs (limit=%.1fs)",
+                            doc_id[:16], now_t - submit_t, per_doc_timeout,
+                        )
 
             for doc_id in newly_done:
                 pending.discard(doc_id)
+                event = self._doc_ready_events.get(doc_id)
+                # 仅 event.is_set 时才使用已读 chunks；per_doc_timeout 触发的视为空
+                if event is None or not event.is_set():
+                    collected_by_doc[doc_id] = []
+                    continue
                 chunks = self._doc_chunks.get(doc_id, [])
                 if not chunks:
                     collected_by_doc[doc_id] = []
@@ -285,6 +319,11 @@ class FeishuDocPool:
             logger.warning(
                 "DocPool.wait_and_collect: total_timeout %.1fs — %d/%d docs still pending, returning %d collected",
                 total_timeout, len(pending), len(doc_ids), collected_docs,
+            )
+        if per_doc_timeouts:
+            logger.info(
+                "DocPool.wait_and_collect: per_doc_timeouts=%d (limit=%.1fs)",
+                per_doc_timeouts, per_doc_timeout or 0.0,
             )
 
         result: List[UnifiedChunk] = []

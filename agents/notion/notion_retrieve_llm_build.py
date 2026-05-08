@@ -68,10 +68,8 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 {EVAL_RUBRIC_BLOCK}
 
 ## decision=stop 时输出
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪些 chunks 能回答它，然后选出综合 top_k。
@@ -84,10 +82,8 @@ EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪�
 {EVAL_RUBRIC_BLOCK}
 
 ## 输出要求
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 # ============================================================================

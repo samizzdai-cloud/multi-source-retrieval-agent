@@ -216,6 +216,7 @@ def read_chunks(
 ) -> list:
     """读取 Excel 文档并切分为 chunks。"""
     from google_workspace_tool.chunkers import GoogleChunk
+    from google_workspace_tool.chunkers.md_chunker import estimate_tokens
     from google_workspace_tool.utils.table_utils import split_sections, process_section_to_markdown
     import io
 
@@ -273,6 +274,7 @@ def read_chunks(
                     content=md,
                     content_type="table_md",
                     heading_path=heading,
+                    token_count=estimate_tokens(md),
                     has_table=True,
                     metadata={
                         "mime_type": mime_type,

@@ -42,6 +42,12 @@ _SOURCE_PROFILES_BASE = {
     "notion": "Notion：外部合作/公共知识文档（当前未启用检索）。",
 }
 
+try:
+    from tools.core.source_query_config import ENTITY_FIDELITY_BLOCK as _ENTITY_FIDELITY_BLOCK
+except Exception:
+    _ENTITY_FIDELITY_BLOCK = ""
+
+
 _FOCUS_GUIDE = """每个 focus 必须满足：
   1. **可评估**：给任一切片能直接判断是否命中（不能是 'nubia'/'销售数据' 这类泛词）
   2. **自包含**：实体 + 维度 + 可选限定，15-40 字
@@ -161,6 +167,8 @@ def plan_query(
 ## Focus 质量要求
 
 {_FOCUS_GUIDE}
+
+{_ENTITY_FIDELITY_BLOCK}
 
 ## 数量约束（硬要求）
 

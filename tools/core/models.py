@@ -400,6 +400,10 @@ class RetrieveConfig:
                                   "slide": set(),                                          # PPTX off
                                   "doc":   {"structured", "concept", "personal_recent"},
                               },
+                              # Slide worker 3 → 5：native Slides API 单文件 3-5s，
+                              # 5 slides 通过 3 worker 池要 7.86s 等队列；5 worker 直接并发 ~5s。
+                              # API 配额 60 reads/100s/user，5 并发不触限。
+                              "google_type_pool_slide_workers": 5,
                           },
                       }},
         "balanced":  {"source_base": {}, "eval_layer_enabled": False, "eval_layer_mode": "rule",
@@ -435,6 +439,9 @@ class RetrieveConfig:
                                      # Sheet worker 4 → 8：让 typical 6 sheets/query 全并行无排队。
                                      # Drive Sheets API 配额每分钟 60 reads/user，8 并发不触限。
                                      "google_type_pool_sheet_workers": 8,
+                                     # Slide worker 3 → 5：原因同 lite（native Slides API 5s 单文件）；
+                                     # balanced 下 4-5 个 slide 文件常见。
+                                     "google_type_pool_slide_workers": 5,
                                      # Budget is handled before chunk_pool:
                                      # type-pool emergency rerank + per-sq mixed rerank.
                                      "sub_query_top_n": 10,

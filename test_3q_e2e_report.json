@@ -8,43 +8,43 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 20.94,
+    "elapsed_s": 18.11,
     "n_focuses": 2,
     "final_top_k": 8,
     "n_chunks_emitted": 8,
-    "merged_count": 10,
+    "merged_count": 13,
     "chunks_per_source": {
-      "bailian": 1,
-      "feishu": 4,
-      "google": 3
+      "bailian": 4,
+      "google": 2,
+      "feishu": 2
     },
     "chunks_per_tier": {
-      "critical": 5,
-      "important": 3
+      "critical": 6,
+      "important": 2
     },
     "angle_tag_distribution": {
-      "sales-performance": 2,
-      "sales-data": 1,
-      "conversion": 1,
-      "supply-chain": 1,
-      "sales-mix": 1,
-      "market-performance": 1,
-      "cvr-trend": 1
+      "sales-performance": 1,
+      "regional-sales": 1,
+      "sales-composition": 1,
+      "conversion-metrics": 1,
+      "total-sales": 1,
+      "launch-prep": 1,
+      "trend-analysis": 1,
+      "timeline": 1
     },
-    "angle_redundancy_max": 2,
+    "angle_redundancy_max": 1,
     "focus_board_final": {
       "focus_0": {
         "status": "satisfied",
-        "critical": 3,
-        "important": 2,
+        "critical": 2,
+        "important": 3,
         "noise": 0,
         "contributors": [
-          "bailian",
-          "feishu"
+          "bailian"
         ],
         "targets": [
-          "bailian",
-          "feishu"
+          "feishu",
+          "bailian"
         ]
       },
       "focus_1": {
@@ -67,11 +67,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
+      "销售进度追踪 | \n\n产品:\n渠道:AMZ\n:middle\n剩余库存:75\n剩余库存:75\n剩余库存:0\n累计销量:1270\n:5\n11/25-12/1:\n12/2-12/8:11\n12/9-12/15:11\n12/16-12/22:9\n12/23-12/2",
       "销售进度追踪 | \n\n产品:\n渠道:EU\n剩余库存:1515\n剩余库存:1700\n剩余库存:\n累计销量:1770\n11/25-12/1:59.00%",
-      "JP月会-2026年1月 | # DTC渠道&本地仓管理<mention-user id=\"ou_c4c9802979c7a379aebe394dd36a31df\"/>\n\n## 1月进度\n\n### 红魔\n\n<grid cols=\"2\">\n\n<column width=\"",
+      "Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review - DTC Channel 2026.02.10 - 2026.03.11...\n| Overview | By Color | By Day |\n|---|---|---|\n| Source: metaba",
       "Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review - DTC Channel 2026.02.10 - 2026.03.11...\n流量质量： 在流量激增的情况下，质量依然保持稳健且正向。\n\n| BR Store | Sessions | ATC Rate ",
-      "JP月会-2026年1月 | # 项目进展（RM,nubia,ZTE,oladance）<mention-user id=\"ou_25af668039ab7d4de7a496446c4ccf3c\"/>\n\n### REDMAGIC\n\nlist{- 11 Pro 销售进展&",
-      "JP月会-2026年4月  | # DTC渠道&本地仓管理<mention-user id=\"ou_8be0a013db446a9a67e15e1882615b76\"/>\n\n### 3月中旬~4月上旬进度\n\n#### 红魔\n\nseq{1. 3/17~3/24 11Air "
+      "销售进度追踪 | \n\n产品:\n渠道:\n剩余库存:\n剩余库存:\n剩余库存:\n累计销量:首月\n11/25-12/1:1008"
     ],
     "error": ""
   },
@@ -84,7 +84,7 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 15.05,
+    "elapsed_s": 14.25,
     "n_focuses": 3,
     "final_top_k": 12,
     "n_chunks_emitted": 10,
@@ -98,23 +98,23 @@
       "important": 5
     },
     "angle_tag_distribution": {
-      "product-list": 1,
-      "launch-details": 1,
+      "product-inventory": 1,
+      "business-model": 1,
       "sales-performance": 1,
-      "dtc-performance": 1,
-      "financial-summary": 1,
-      "sales-breakdown": 1,
-      "financial-settlement": 1,
-      "ops-optimization": 1,
-      "project-scope": 1,
-      "channel-management": 1
+      "financial-data": 1,
+      "financial-metrics": 1,
+      "product-timeline": 1,
+      "operations-optimization": 1,
+      "gmv-overview": 1,
+      "sales-overview": 1,
+      "regional-sales": 1
     },
     "angle_redundancy_max": 1,
     "focus_board_final": {
       "focus_0": {
-        "status": "satisfied",
-        "critical": 2,
-        "important": 0,
+        "status": "noise_only",
+        "critical": 1,
+        "important": 1,
         "noise": 0,
         "contributors": [
           "bailian"
@@ -127,7 +127,7 @@
       "focus_1": {
         "status": "satisfied",
         "critical": 2,
-        "important": 4,
+        "important": 1,
         "noise": 0,
         "contributors": [
           "bailian",
@@ -140,8 +140,8 @@
       },
       "focus_2": {
         "status": "satisfied",
-        "critical": 2,
-        "important": 2,
+        "critical": 3,
+        "important": 3,
         "noise": 0,
         "contributors": [
           "bailian",
@@ -158,11 +158,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
-      "nubia - EC Operation Calendar | \n\n :Product Available\n2025 Event Calendar:nubia Z70 Ultra\nnubia Z60 Ultra LV & nubia Z60S Pro\nnubia Z60 Ultra\nnubia Flip",
-      "ZTE项目概况 | \n\nTeasing:2025/6/5Pre-order:2025/6/15(赠送保护壳)●Open-sales:2025/6/24Launch站点:EU, UK, GL (不含US,仅指GL-other regions) , MX●特殊情况",
-      "2024年全球高端智能手机市场竞争格局与 nubia Z60 Ultra 运营全链路战略分析报告AI-Gen | # 第一部分：公司内部运营情况与 nubia Z60 Ultra 首发效能深度剖析\n\nnubia Z60 Ultra 的全球发布策略采取了与中国国内市场同步上市的激进节奏 ()。这一策略在行业内较为罕见，成功打破了传统中国出海品牌全球发布滞",
-      "ZTE 业务总结报告 (2025-12-29 ~ 2026-01-04) | \n\n本周DTC渠道进入典型的促销后期调整阶段, Net Sales Amount 录得 $26,354(环比-32.8%), Net Sales Volume为45(环比-42.3%) 。伴随Total Coupon Amount同步下降4",
-      "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | \n\nNUBIA业务总结报告(2026-01-15~2026-01-21)报告周期:2026-01-15~2026-01-21 vs. 2026-01-08~2026-01-14温馨提醒:本报告由 Fastlane Data AgentTM自"
+      "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | \n\n数据来源:ERP1.核心表现1.1成熟期主力机型库存严重积压·核心产品「Nubia Z80 Ultra」 处于成熟期,但DOS高达280.0天,远超健康水位。\n1.2清库期产品区域分化明显\n●清库款「「Nubia Z70 Ultra整体",
+      "Nubia(ZTE)托管项目访谈 | ## 一、项目信息与背景\n\nlist{- 品牌名称：Nubia; - 项目名称：ZTE; - 项目范围：GL/EU/UK/MX 一起上线。8 月底，  JP 是渠道混合采销; - 项目目标与核心 KPI 是什么; - 没有销售目标，主要是降",
+      "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | \n\n| 店铺|净销量|净销售额|优惠金额|成功订单数|客单价|毛销量|毛销售额|\n| NubiaAlphaEU|33(-10.8%)|$15,596.50|$48.73(-89.7%)|32(-3.0%)|516.97(-33.2%)|34",
+      "ZTE 业务总结报告 (2025-12-22 ~ 2025-12-28) | list{- 新品「Nubia Z80 Ultra」销量环比下跌 **36%**（36台降至23台）。根据品牌首发规律，W7 相比 W6 通常应有 **16.6%** 的反弹，当前表现严重偏离预期。反观清库期产品「Nubia Z70 Ult",
+      "Weekly meeting 12 | \n\n| nubia|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Sales销售数据|Traffic流量数据|Traffic流量数据|Traffic流量数据|Traf"
     ],
     "error": ""
   },
@@ -175,38 +175,35 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 21.51,
-    "n_focuses": 4,
-    "final_top_k": 16,
-    "n_chunks_emitted": 12,
-    "merged_count": 12,
+    "elapsed_s": 15.46,
+    "n_focuses": 2,
+    "final_top_k": 8,
+    "n_chunks_emitted": 8,
+    "merged_count": 11,
     "chunks_per_source": {
-      "feishu": 5,
       "bailian": 2,
-      "google": 5
+      "feishu": 4,
+      "google": 2
     },
     "chunks_per_tier": {
       "critical": 5,
-      "important": 7
+      "important": 3
     },
     "angle_tag_distribution": {
-      "competitor-analysis": 1,
-      "spec-detail": 2,
-      "brand-positioning": 1,
-      "target-persona": 1,
-      "sales-data": 1,
-      "brand-awareness": 1,
-      "user-feedback": 2,
       "competitor": 1,
-      "performance-comparison": 1,
-      "market-reception": 1
+      "competitor-analysis": 1,
+      "user-sentiment": 1,
+      "user-feedback": 2,
+      "marketing-strategy": 1,
+      "crisis-management": 1,
+      "target-demographic": 1
     },
     "angle_redundancy_max": 2,
     "focus_board_final": {
       "focus_0": {
-        "status": "noise_only",
-        "critical": 1,
-        "important": 2,
+        "status": "satisfied",
+        "critical": 3,
+        "important": 1,
         "noise": 0,
         "contributors": [
           "bailian",
@@ -218,43 +215,17 @@
         ]
       },
       "focus_1": {
-        "status": "noise_only",
-        "critical": 0,
-        "important": 3,
-        "noise": 0,
-        "contributors": [
-          "bailian",
-          "feishu"
-        ],
-        "targets": [
-          "bailian",
-          "feishu"
-        ]
-      },
-      "focus_2": {
         "status": "satisfied",
         "critical": 2,
-        "important": 2,
+        "important": 9,
         "noise": 0,
         "contributors": [
           "bailian",
-          "google"
-        ],
-        "targets": [
-          "bailian",
-          "google"
-        ]
-      },
-      "focus_3": {
-        "status": "satisfied",
-        "critical": 3,
-        "important": 2,
-        "noise": 0,
-        "contributors": [
           "feishu",
           "google"
         ],
         "targets": [
+          "bailian",
           "feishu",
           "google"
         ]
@@ -265,11 +236,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
-      "🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | # 市场目标 (What is Success?)\n\n### 2.1 上市产品 (2026.Q1) & 竞品分析\n\n#### REDMAGIC 11pro (游戏手机)\n\nlist{- **定位：** 旗舰级专业电竞手机。; - **核心优",
-      "墨西哥区域平板价格对比 | \n\n品牌:Redmagic\n产品名称:Redmagic Nova Gaming Tablet\n内存:12+256\nKSP:8 GEN 3 leading version chipset\n10.9\" 2.8K display\n10100mAh",
-      "Copy of [REDMAGIC] RM 11 Air Launch report | ## Voice of Customer (VOC) Summary...\nUser feedback highlights a successful shift toward a \"premium\" brand identity, but",
-      "🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | list{- **画像：** 16-25 岁，学生群体。; - **行为：** T1 (Faker) 和 LCK 的忠实粉丝。不一定每天玩高强度游戏，但追求“电竞美学” (Gamer Aesthetic)。; - **消费心理：** “偶像",
-      "不太正常的红魔问题回答（销售） | | 排名 | 机型 | 销量 | 占比 |\n| --- | --- | --- | --- |\n| 1 | REDMAGIC 10 Pro | 1,161件 | 44.4% |\n| 2 | （未命名SKU） | 1,144件 | 43.7%"
+      "销售进度追踪 | \n\n:\nXiaomi:Xiami 16\nHONER:Magic 8\nOneplus:Oneplus 15\nRealme:Realme GT 8 pro\niQOO:iQOO 15\nSamsung:S26 Ultra ",
+      "2024年全球高端智能手机市场竞争格局与 nubia Z60 Ultra 运营全链路战略分析报告AI-Gen | list{- **红魔 9 Pro (RedMagic 9 Pro)：** 同属中兴/nubia系。起售价相近，但纯粹定位于电竞。其拥有内置的 22,000 RPM 高速离心风扇散热（ICE 13.0 系统）、完全纯平无凸起的背部设计、52",
+      "Copy of REDMAGIC Cooler 6 Marketing Proposal | ## Agenda...\n| 用户声音 User Sentiment Towards Phone Coolers Reddit ; 手机散热器的整体情感\u000b 意见分歧： 一些用户对其赞不绝口，而另一些则认为它们不必要。游戏爱好者欣赏其带来的性",
+      "JP月会-2026年4月  | # 项目进展（RM,nubia,ZTE,oladance）<mention-user id=\"ou_25af668039ab7d4de7a496446c4ccf3c\"/>\n\n### REDMAGIC\n\n#### 11 Air 上市进展\n\ns",
+      "JP月会-2026年1月 | # 营销管理<mention-user id=\"ou_de46b765debb8399e2ae152101cb743c\"/>\n\n## 【REDMAGIC】\n\nlist{- **红魔 11 Pro**; - **当前执行**：; - 科技类合"
     ],
     "error": ""
   },
@@ -282,50 +253,49 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 20.33,
+    "elapsed_s": 24.38,
     "n_focuses": 2,
     "final_top_k": 8,
     "n_chunks_emitted": 8,
-    "merged_count": 11,
+    "merged_count": 9,
     "chunks_per_source": {
       "bailian": 1,
-      "feishu": 3,
-      "google": 4
+      "feishu": 4,
+      "google": 3
     },
     "chunks_per_tier": {
       "critical": 6,
       "important": 2
     },
     "angle_tag_distribution": {
-      "sales-data": 1,
+      "sales-performance": 2,
       "regional-sales": 1,
-      "gmv-sales": 1,
-      "conversion-metrics": 1,
-      "inventory-performance": 1,
+      "dtc-performance": 1,
+      "performance-metrics": 1,
+      "product-mix": 1,
       "conversion-rate": 1,
-      "sales-breakdown": 1,
-      "traffic-analysis": 1
+      "executive-summary": 1
     },
     "angle_redundancy_max": 1,
     "focus_board_final": {
       "focus_0": {
         "status": "satisfied",
         "critical": 3,
-        "important": 2,
+        "important": 0,
         "noise": 0,
         "contributors": [
           "bailian",
           "feishu"
         ],
         "targets": [
-          "bailian",
-          "feishu"
+          "feishu",
+          "bailian"
         ]
       },
       "focus_1": {
         "status": "satisfied",
         "critical": 3,
-        "important": 5,
+        "important": 4,
         "noise": 0,
         "contributors": [
           "feishu",
@@ -342,11 +312,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
-      "销售进度追踪 | \n\n产品:\n渠道:JP [链接](https://docs.google.com/spreadsheets/d/1SXIt8LgLMAXZa1dYM6fRcFDdv94Eqk-F_JjJkaAX5FA/edit?usp=sharing)\n剩",
+      "销售进度追踪 | \n\n产品:\n渠道:\n剩余库存:\n剩余库存:\n剩余库存:\n累计销量:首月\n11/25-12/1:1008",
       "REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 店铺 | 净销量 | 净销售额 | 成功订单数 | 客单价 |\n| --- | --- | --- | --- | --- |\n| RedMagic EU | 1,108 (-0.7%) | $464,379.87 (+7.7%) | ",
-      "Copy of [REDMAGIC] RM 11 Air Launch report | ## Sales Review 2026.02.10 - 2026.03.11...\n|  |  |  |  |  |\n|---|---|---|---|---|\n| Channel | Target | Sales / Qty | Sal",
-      "REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 产品 | 浏览数 | 加购数 | 加购率 | 支付订单数 | 支付转化率 |\n| --- | --- | --- | --- | --- | --- |\n| REDMAGIC 11 Pro | 154,954 (+12.0%) | 12",
-      "REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 产品 | 近2周净销量 | DOS | 风险提示 | 总库存数量 | 可用库存数量 |\n| --- | --- | --- | --- | --- | --- |\n| REDMAGIC 11Pro | 2435 | 51.0 | 健康 "
+      "[REDMAGIC] RM 11 Air Launch report | ## Sales Review 2026.02.10 - 2026.03.11...\n|  |  |  |  |  |\n|---|---|---|---|---|\n| Channel | Target | Net Sales / Qty |",
+      "REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | ## 三、各领域分析 > 3.6 页面转化分析\n\nlist{- 本周期处于圣诞节活动周，但受物流截单影响，整体进入大促后的良性回调期。DTC渠道 Net Sales Amount 环比下滑 23.7% 至 $1,258,815，Net Sa",
+      "REDMAGIC 业务总结报告 (2025-12-22 ~ 2025-12-28) | | 指标 | 本周期数据 |\n| --- | --- |\n| 净销量 | 3,358 (-15.9%) |\n| 净销售额 | $1,258,815.00 (-23.7%) |\n| 毛销量 | 3,669 (-15.0%) |\n| 毛销售额 "
     ],
     "error": ""
   },
@@ -359,38 +329,43 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 16.13,
+    "elapsed_s": 17.4,
     "n_focuses": 3,
     "final_top_k": 12,
-    "n_chunks_emitted": 9,
-    "merged_count": 9,
+    "n_chunks_emitted": 12,
+    "merged_count": 14,
     "chunks_per_source": {
-      "bailian": 5,
-      "feishu": 4
+      "bailian": 4,
+      "feishu": 5,
+      "google": 3
     },
     "chunks_per_tier": {
-      "critical": 7,
-      "important": 2
+      "critical": 5,
+      "important": 7
     },
     "angle_tag_distribution": {
-      "product-launch": 1,
+      "product-sales": 1,
+      "pricing-policy": 1,
+      "financial-sales": 1,
+      "financial-performance": 1,
+      "product-line": 2,
+      "channel-dtc": 1,
+      "financial-gmv": 1,
+      "business-model": 1,
+      "market-stats": 1,
       "spec-detail": 1,
-      "channel-operation": 1,
-      "sales-performance": 2,
-      "dtc-operations": 1,
-      "financial-data": 1,
-      "amazon-operations": 1,
-      "sales-analysis": 1
+      "conversion-metrics": 1
     },
     "angle_redundancy_max": 2,
     "focus_board_final": {
       "focus_0": {
-        "status": "satisfied",
-        "critical": 2,
-        "important": 0,
-        "noise": 0,
+        "status": "noise_only",
+        "critical": 1,
+        "important": 3,
+        "noise": 2,
         "contributors": [
-          "bailian"
+          "bailian",
+          "google"
         ],
         "targets": [
           "bailian",
@@ -400,7 +375,7 @@
       "focus_1": {
         "status": "satisfied",
         "critical": 4,
-        "important": 0,
+        "important": 1,
         "noise": 0,
         "contributors": [
           "bailian",
@@ -414,7 +389,7 @@
       "focus_2": {
         "status": "satisfied",
         "critical": 2,
-        "important": 2,
+        "important": 3,
         "noise": 0,
         "contributors": [
           "bailian",
@@ -431,11 +406,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
-      "nubia - EC Operation Calendar | \n\n :New Product Launch\n2025 Event Calendar:\n2025 Event Calendar:\n2025 Event Calendar:\n2025 Event Calendar:nubia Z70S Ult",
-      "nubia Z80U竞品对比 | \n\n参数:国际发布\nnubia Z80 Ultra:2025-11-01\nnubia Z70 Ultra:2024-11-01\nXiaomi 15:2025-03 (MWC)\nOnePlus 13:2025-01-07\nrealme GT7",
-      "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | \n\nCurrent status(2025.01.15-2025.01.21)| 2026.01.15-2025.01.21|2026.01.15-2025.01.21|2026.01.15-2025.01.21|2026.01.15-20",
+      "nubia销售进度追踪 | \n\n产品:nubia Z80U\n渠道:DTC\n10/6 - 10/12:0\n10/13 - 10/19:0\n10/20 - 10/26:0\n10/27 - 11/2:0\n11/3 - 11/9:339\n11/10 - 11/16:210\n:",
+      "Nubia(ZTE)托管项目访谈 | ## 二、项目结算\n\n**[Table from: Nubia(ZTE)托管项目访谈]**\n| 商号 | 商业板块 | 服务 | 工作项 | 服务主体(拟) | 收费模式 | 币别 | 备注 | 疑问 |\n| --- | --- | ---",
       "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21) | \n\n| 店铺|净销量|净销售额|优惠金额|成功订单数|客单价|毛销量|毛销售额|\n| NubiaAlphaEU|33(-10.8%)|$15,596.50|$48.73(-89.7%)|32(-3.0%)|516.97(-33.2%)|34",
-      "NUBIA 业务总结报告 (2026-01-29 ~ 2026-02-04) | | 指标 | 本周期数据 |\n| --- | --- |\n| 净销量 | 19 (-47.2%) |\n| 净销售额 | $10,824.66 (-31.8%) |\n| 毛销量 | 24 (-35.1%) |\n| 毛销售额 | $14,421"
+      "NUBIA 业务总结报告 (2025-12-22 ~ 2025-12-28) | list{- 新品「Nubia Z80 Ultra」销量环比下滑 **36.1%**，尽管优惠投入增加，但表现低于品牌历史 W7 环比增长 **16.6%** 的规律，需警惕流量承接问题。相反，处于清库期的「Nubia Z70 Ultra」",
+      "REDMAGIC 11 Pro Q&A  | Q | A\nDoes REDMAGIC 11 Pro support dual SIM cards? | Yes, REDMAGIC 11 Pro supports Dual SIM with two active SIMs at the "
     ],
     "error": ""
   },
@@ -448,39 +423,37 @@
       "feishu",
       "google"
     ],
-    "elapsed_s": 24.46,
-    "n_focuses": 4,
-    "final_top_k": 16,
-    "n_chunks_emitted": 11,
-    "merged_count": 12,
+    "elapsed_s": 16.09,
+    "n_focuses": 2,
+    "final_top_k": 8,
+    "n_chunks_emitted": 8,
+    "merged_count": 11,
     "chunks_per_source": {
-      "feishu": 5,
-      "google": 5,
+      "feishu": 4,
+      "google": 3,
       "bailian": 1
     },
     "chunks_per_tier": {
-      "critical": 5,
-      "important": 6
+      "critical": 4,
+      "important": 4
     },
     "angle_tag_distribution": {
       "competitor-analysis": 1,
-      "market-share": 1,
-      "user-persona": 1,
-      "spec-comparison": 1,
-      "loyalty-data": 1,
-      "market-survey": 1,
-      "brand-awareness": 1,
-      "marketing-points": 1,
-      "customer-feedback": 2,
-      "growth-metrics": 1
+      "user-complaint": 1,
+      "design-perception": 1,
+      "brand-positioning": 1,
+      "media-feedback": 1,
+      "target-segmentation": 1,
+      "performance-value": 1,
+      "general": 1
     },
-    "angle_redundancy_max": 2,
+    "angle_redundancy_max": 1,
     "focus_board_final": {
       "focus_0": {
-        "status": "satisfied",
-        "critical": 2,
-        "important": 1,
-        "noise": 1,
+        "status": "noise_only",
+        "critical": 1,
+        "important": 4,
+        "noise": 0,
         "contributors": [
           "bailian",
           "feishu"
@@ -491,42 +464,17 @@
         ]
       },
       "focus_1": {
-        "status": "noise_only",
-        "critical": 1,
-        "important": 3,
+        "status": "satisfied",
+        "critical": 3,
+        "important": 9,
         "noise": 0,
         "contributors": [
           "bailian",
-          "feishu"
-        ],
-        "targets": [
-          "bailian",
-          "feishu"
-        ]
-      },
-      "focus_2": {
-        "status": "noise_only",
-        "critical": 1,
-        "important": 1,
-        "noise": 0,
-        "contributors": [
-          "google"
-        ],
-        "targets": [
-          "bailian",
-          "google"
-        ]
-      },
-      "focus_3": {
-        "status": "noise_only",
-        "critical": 1,
-        "important": 3,
-        "noise": 0,
-        "contributors": [
           "feishu",
           "google"
         ],
         "targets": [
+          "bailian",
           "feishu",
           "google"
         ]
@@ -537,11 +485,11 @@
     "has_metadata_field_leak": false,
     "schema_field_count": 9,
     "sample_chunks": [
-      "🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | | 竞品 | 2026 预期型号 | 竞争优势 | 竞争劣势 (红魔的机会点) |\n| --- | --- | --- | --- |\n| 三星 | Galaxy S26 Ultra | 品牌 (90% 忠诚度)、拍照、生态、AS 售后 |",
-      "🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | ## 市场背景 (Why Korea?) > 1.2 电竞 & 手机行业分析\n\n**[Table from: 🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案]**\n| 电竞与游戏市场 (机遇) | 智能手机市场 (挑战) |\n| ",
-      "🇰🇷 红魔 (REDMAGIC) 韩国市场 GTM 方案 | list{- **画像：** 16-25 岁，学生群体。; - **行为：** T1 (Faker) 和 LCK 的忠实粉丝。不一定每天玩高强度游戏，但追求“电竞美学” (Gamer Aesthetic)。; - **消费心理：** “偶像",
-      "Red Magic 3 - KM-0412 | ## 竞品排查对比...\n| 规格项 | Red Magic 3 | Black Shark 2 | Asus ROG 2 | Vivo IQOO |\n|---|---|---|---|---|\n| 发布 | 2019.04.25 | 20",
-      "[REDMAGIC] RM 11 Air Launch report | ## Loyalty Users Performance...\n| RM VIP Code used | 1 h | 14 h | EA | Final | VIP Users |\n|---|---|---|---|---|---|\n| E"
+      "智能纪要：11 Air Marketing proposal with Nubia team 2025年12月19日 | # 总结\n\n<whiteboard token=\"IKKCwe6lkhFGpDbQLrYcQCa9nCe\" width=\"820\" height=\"675\" align=\"left\"/>\n\n本次会议围绕 11 air 手机的产品定位、竞品分",
+      "JP月会-2026年4月  | ## 客服问题追踪 > 三月总结 > REDMAGIC > 3dmark事件客服侧影响总结\n\n**[Table from: JP月会-2026年4月 ]**\n| 用户及机型 | 咨询内容及诉求 | 内容分类 |\n| --- | --- | ",
+      "[REDMAGIC] RM 11 Air Launch report | ## Social Listening - Reddit/Discord/Facebook Communi...\n| 优点：\u000b 标志性透明设计强化品牌认同\u000b 透明的美学被广泛认定为“REDMAGIC核心DNA”\u000b 与10 Air的哑光表面相",
+      "品牌规范与参考体系调研 V3 | ## D. 信息分层模型与整合优先级 > 信息分层模型 > 五层模型 > L2 · 品牌策略\n\n**[Table from: 品牌规范与参考体系调研 V3]**\n| 字段 | 说明 | 示例（REDMAGIC） |\n| --- | --- ",
+      "[REDMAGIC] RM 11 Air Launch report | ## Perspective and Suggestions-PR...\nWhat Worked:-\n\n- 头部媒体对 REDMAGIC 11 Air 的评分普遍在 8.8–9 分（满分 10 分）之间，表明其整体认可度较高，并在中高端游戏"
     ],
     "error": ""
   }

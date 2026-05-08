@@ -1158,7 +1158,10 @@ class FeishuSourceAgent(SourceAgent):
             if not d_ids:
                 return []
             try:
-                doc_chunks = await self._doc_pool.wait_and_collect(d_ids, total_timeout=doc_pool_timeout)
+                # Lite path: per-doc 6s 上限，慢 doc 不阻塞批次；其他文档继续 chunking & rerank
+                doc_chunks = await self._doc_pool.wait_and_collect(
+                    d_ids, total_timeout=doc_pool_timeout, per_doc_timeout=6.0,
+                )
                 logger.info("TIMING feishu.lite.doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
                              sq.sub_query_id, len(d_ids), len(doc_chunks), _elapsed_ms(started))
             except Exception as e:

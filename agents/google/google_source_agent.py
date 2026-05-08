@@ -930,13 +930,18 @@ class GoogleSourceAgent(SourceAgent):
         return get_source_query_rules("google")
 
     def _compute_sub_query_total_cap(self, n_focuses: int) -> int:
-        """Google 少而精预算：单 focus ≤2，多 focus ≤3。
+        """Google 少而精预算：单 focus 1-2，多 focus ≤2。
 
         通过注入到 plan_only prompt 的 ``sub_query_total_cap`` 字段引导 LLM
         自主收束，不再做后置硬截。配套 instruction 见 source_query_config
         的 google rules 第 0 节。
+
+        多 focus 收紧到 2 的理由：
+        - Google 单 sq 已会跨 doc/slide/sheet/gmail 5 路并发召回
+        - LLM 在 multi-focus 下倾向产出过多语义近似 sq；信息冗余 > 召回收益
+        - 让 feishu/bailian 承担其他 focus 的覆盖
         """
-        return 2 if n_focuses <= 1 else 3
+        return 2 if n_focuses <= 1 else 2
 
     def _post_process_sub_queries(
         self,

@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, create_model
 
 from google.adk.agents.llm_agent import LlmAgent
 from tools.core.llm_contracts import MODEL, Decision, TierAssignment, build_eval_only_model, EVAL_RUBRIC_BLOCK
+from tools.core.source_query_config import ENTITY_FIDELITY_BLOCK
 
 # ============================================================================
 # Pydantic Schemas
@@ -33,14 +34,16 @@ def build_plan_eval_model(source_top_k: int) -> Type[BaseModel]:
 # Prompts
 # ============================================================================
 
-PLAN_ONLY_INSTRUCTION = """你是检索规划器。针对给定的 source，按 focuses 拆解 sub_queries，并自主选择需要的参数。
+PLAN_ONLY_INSTRUCTION = f"""你是检索规划器。针对给定的 source，按 focuses 拆解 sub_queries，并自主选择需要的参数。
 
 用户消息里会提供：
 - focuses_block: 检索维度列表
 - source_profile_block: 目标检索源的能力画像
 - source_top_k: 该源最终产出 chunks 上限
-- sub_query_total_cap: sub_queries 总数上限
+- sub_query_total_cap: sub_queries 总数上限（**硬纪律**）
 - source_query_rules_block: 该源的 query 编写规则
+
+{ENTITY_FIDELITY_BLOCK}
 
 ## 输出要求（严格 JSON）
 - 每个 focus 至少覆盖 1 条 sub_query，最多 3 条
@@ -51,12 +54,12 @@ PLAN_ONLY_INSTRUCTION = """你是检索规划器。针对给定的 source，按 
     · indexes: 知识库索引列表
 
 输出示例（百炼源）：
-{"sub_queries": [
-  {"query": "nubia UK/英国/United Kingdom 2026年3月份 DTC 销售额和GMV表现",
-   "target_focus": "focus_0", "tags": ["DTC", "2026_Q1"], "indexes": ["nubia"]},
-  {"query": "nubia Marketplace 英国 转化率", "target_focus": "focus_1",
-   "tags": ["Marketplace"], "indexes": ["nubia"]}
-]}
+{{"sub_queries": [
+  {{"query": "nubia UK/英国/United Kingdom 2026年3月份 DTC 销售额和GMV表现",
+   "target_focus": "focus_0", "tags": ["DTC", "2026_Q1"], "indexes": ["nubia"]}},
+  {{"query": "nubia Marketplace 英国 转化率", "target_focus": "focus_1",
+   "tags": ["Marketplace"], "indexes": ["nubia"]}}
+]}}
 """
 
 PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 replan，若停止则给出 top_k。
@@ -67,17 +70,17 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 - loop_info: loop_n + min_loops + max_loops
 - source_top_k: top_k_chunk_ids 上限
 
+{ENTITY_FIDELITY_BLOCK}
+
 ## 决策规则
 - 若已有 chunks 足够覆盖所有 focus → decision="stop"
-- 否则 → decision="continue"，给出 replan_queries
+- 否则 → decision="continue"，给出 replan_queries（同样遵守上述实体保真原则）
 
 {EVAL_RUBRIC_BLOCK}
 
 ## decision=stop 时输出
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪些 chunks 能回答它，然后选出综合 top_k。
@@ -90,10 +93,8 @@ EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪�
 {EVAL_RUBRIC_BLOCK}
 
 ## 输出要求
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 # ============================================================================

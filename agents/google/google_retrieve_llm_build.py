@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, create_model
 
 from google.adk.agents.llm_agent import LlmAgent
 from tools.core.llm_contracts import MODEL, Decision, TierAssignment, build_eval_only_model, EVAL_RUBRIC_BLOCK
+from tools.core.source_query_config import ENTITY_FIDELITY_BLOCK
 
 # ============================================================================
 # Pydantic Schemas
@@ -34,19 +35,21 @@ def build_plan_eval_model(source_top_k: int) -> Type[BaseModel]:
 # Prompts
 # ============================================================================
 
-PLAN_ONLY_INSTRUCTION = """你是检索规划器。针对给定的 source，按 focuses 拆解 sub_queries，并自主选择需要的参数。
+PLAN_ONLY_INSTRUCTION = f"""你是检索规划器。针对给定的 source，按 focuses 拆解 sub_queries，并自主选择需要的参数。
 
 用户消息里会提供：
 - focuses_block: 检索维度列表
 - source_profile_block: 目标检索源的能力画像
-- current_date: 当前系统日期，用于解析“今年/本月/3月”等相对或省略年份的时间表达
+- current_date: 当前系统日期，用于解析"今年/本月/3月"等相对或省略年份的时间表达
 - source_top_k: 该源最终产出 chunks 上限
-- sub_query_total_cap: sub_queries 总数上限
-- source_query_rules_block: 该源的 query 编写规则
+- sub_query_total_cap: sub_queries 总数上限（**硬纪律**，严格遵守）
+- source_query_rules_block: 该源的 query 编写规则（含数量预算）
+
+{ENTITY_FIDELITY_BLOCK}
 
 ## 输出要求（严格 JSON）
-- 每个 focus 至少覆盖 1 条 sub_query，最多 3 条
-- sub_queries 总数不超过给定的上限
+- sub_queries 总数严格不超过 sub_query_total_cap；超出会被截断
+- 每个 focus 0-2 条；优先信息密度高的 focus，**不强求每个 focus 都有 sub_query**
 - 每条 sub_query 必填：query, target_focus
 - 每条 sub_query 选填：
     · google_enable_fulltext: 是否全文检索 (true/false/null)
@@ -58,9 +61,9 @@ PLAN_ONLY_INSTRUCTION = """你是检索规划器。针对给定的 source，按 
     · focus 只写月份但未写年份时，不要强行在 query 中补当前年份；保留月份词扩大召回，由 eval 阶段根据 current_date 降权明显历史年份。
 
 输出示例（Google源）：
-{"sub_queries": [
-  {"query": "预算方案", "target_focus": "focus_0", "google_enable_fulltext": false, "google_order_by": "viewedByMeTime desc", "time_filter": null, "author_filter": null}
-]}
+{{"sub_queries": [
+  {{"query": "预算方案", "target_focus": "focus_0", "google_enable_fulltext": false, "google_order_by": "viewedByMeTime desc", "time_filter": null, "author_filter": null}}
+]}}
 """
 
 PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 replan，若停止则给出 top_k。
@@ -72,9 +75,11 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 - loop_info: loop_n + min_loops + max_loops
 - source_top_k: top_k_chunk_ids 上限
 
+{ENTITY_FIDELITY_BLOCK}
+
 ## 决策规则
 - 若已有 chunks 足够覆盖所有 focus → decision="stop"
-- 否则 → decision="continue"，给出 replan_queries
+- 否则 → decision="continue"，给出 replan_queries（replan_queries 同样遵守上述实体保真原则）
 
 {EVAL_RUBRIC_BLOCK}
 
@@ -83,10 +88,8 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 （例如 2023-3）不能评为 critical，除非 focus 明确要求该年份。
 
 ## decision=stop 时输出
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪些 chunks 能回答它，然后选出综合 top_k。
@@ -104,10 +107,8 @@ EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪�
 （例如 2023-3）不能评为 critical，除非 focus 明确要求该年份。
 
 ## 输出要求
-- top_k_chunk_ids: 按相关度降序，最多 source_top_k 个
-- tiers: 对每个选中的 chunk 给出 (tier, relevance, answered_focuses, angle_tag)
-  - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
-  - angle_tag 必填，1-2 个英文小写词
+- top_k_chunk_ids 按相关度降序
+- answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
 """
 
 # ============================================================================
