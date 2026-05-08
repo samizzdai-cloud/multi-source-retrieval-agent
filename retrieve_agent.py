@@ -33,12 +33,11 @@ from typing_extensions import override
 from tools.core.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, SourceConfig
 from tools.core.query_planner import plan_query
 
-from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult, _run_llm_agent
+from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult
+from tools.core.eval_layer import build_eval_layer
 from tools.core.focus_board import FocusBoard
 from tools.core.final_assembler import (
-    LlmAssemblerConfig,
     assemble_final_chunks,
-    build_final_assembler_agent,
     render_final_payload,
 )
 
@@ -50,10 +49,9 @@ logger = logging.getLogger(__name__)
 # Global planner：v2.1 直接返回 flat focuses（FG 下线）
 # ─────────────────────────────────────────────────────────────────────
 def _prepare_focuses(
-    query: str, 
-    available_sources: List[str], 
+    query: str,
+    available_sources: List[str],
     bailian_allowed_indexes: Optional[List[str]] = None,
-    google_spaces: Optional[List[str]] = None,
 ) -> List[Focus]:
     """调用 query_planner，把 ``QueryPlan.focuses`` 映射到 runtime ``Focus``。
 
@@ -66,10 +64,9 @@ def _prepare_focuses(
     """
     try:
         plan = plan_query(
-            query, 
-            available_sources, 
+            query,
+            available_sources,
             bailian_allowed_indexes=bailian_allowed_indexes,
-            google_spaces=google_spaces,
             session_context="",
         )
     except Exception as e:
@@ -312,22 +309,6 @@ class RetrieveAgent(BaseAgent):
         if "bailian" in self.sources:
             # self.sources["bailian"] 是 BailianSourceAgent 的实例
             bailian_allowed = getattr(self.sources["bailian"], "_allowed_indexes", None)
-            
-        # 并发获取各个 Source Agent 需要的全局前置上下文
-        google_spaces = None
-
-        async def fetch_google_spaces():
-            from google_workspace_tool.auth_utils import get_credentials
-            from tools.google.google_retrieve import _SCOPES
-            from google_workspace_tool.drive_space_lister import list_drive_spaces_async
-            creds = get_credentials(scopes=_SCOPES)
-            spaces_info = await list_drive_spaces_async(
-                creds=creds,
-                include_shared_drives=True,
-                include_shared_folders=True,
-                include_my_drive_folders=True
-            )
-            return [s["name"] for s in spaces_info if s.get("name")]
 
         # feishu open_id: 配置优先注入；无配置时不请求，lazy 到 FeishuSourceAgent 内部按需获取
         if "feishu" in self.sources:
@@ -336,30 +317,14 @@ class RetrieveAgent(BaseAgent):
                 self.sources["feishu"]._current_open_id = configured_open_id
                 logger.info("RetrieveAgent: Injected configured Feishu open_id")
 
-        tasks = []
-        if "google" in self.sources:
-            tasks.append(fetch_google_spaces())
-        else:
-            async def null_task(): return None
-            tasks.append(null_task())
+        # Google Drive 顶级空间懒加载：仅当 SourceAgent 内部分发到 personal_recent
+        # 类型 sub_query 时才发起 list_drive_spaces_async，普通 query 不付出此代价。
 
-        try:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            if not isinstance(results[0], Exception):
-                google_spaces = results[0]
-                if google_spaces is not None:
-                    logger.info("RetrieveAgent: Fetched %d google spaces for planner context", len(google_spaces))
-            else:
-                logger.warning("RetrieveAgent: Failed to fetch google spaces: %s", results[0])
-        except Exception as e:
-            logger.warning("RetrieveAgent: Gather pre-fetch failed: %s", e)
-            
         focuses = await asyncio.to_thread(
-            _prepare_focuses, 
-            query, 
-            enabled, 
+            _prepare_focuses,
+            query,
+            enabled,
             bailian_allowed,
-            google_spaces
         )
         logger.info(
             "TIMING retrieve.prepare_focuses focuses=%d ms=%.1f",
@@ -392,41 +357,37 @@ class RetrieveAgent(BaseAgent):
             (time.perf_counter() - merge_started) * 1000.0,
         )
 
-        # 3b. 装填器（P3）：同角度降级 + 轮转配额 + 可选 LLM eval_layer + schema 回填
+        # 3b. 出口选择：
+        # - lite/balanced: 只走规则装填，不触发 final assembler LLM
+        # - deep_dive: 跳过 final assembler，直接走 eval_layer
         assemble_started = time.perf_counter()
         final_top_k = self.config.final_top_k(len(focuses))
         focus_quota = self.config.focus_quota
 
-        # LLM 触发：deep_dive 总是开；lite/balanced 仅在 candidates > final_top_k 时开
-        llm_cfg = LlmAssemblerConfig(
-            enabled=bool(merged),
-            timeout_s=self.config.eval_layer_llm_timeout_s,
-            content_preview_chars=200,
-            trigger_only_when_overflow=not self.config.eval_layer_active,
-        )
-
-        async def _llm_invoker(prompt_text: str) -> Dict:
-            agent = build_final_assembler_agent()
-            return await asyncio.wait_for(
-                _run_llm_agent(agent, prompt_text),
-                timeout=llm_cfg.timeout_s,
+        if self.config.eval_layer_active:
+            eval_layer = build_eval_layer(self.config.eval_layer_effective_mode)
+            selected = eval_layer.rank(merged, focuses, final_top_k)
+            logger.info(
+                "TIMING retrieve.eval_layer candidates=%d picked=%d cap=%d mode=%s ms=%.1f",
+                len(merged), len(selected), final_top_k, self.config.eval_layer_effective_mode,
+                (time.perf_counter() - assemble_started) * 1000.0,
             )
-
-        selected = await assemble_final_chunks(
-            chunks=merged,
-            focuses=focuses,
-            final_top_k=final_top_k,
-            focus_quota=focus_quota,
-            preset=self.config.preset,
-            query=query,
-            llm_config=llm_cfg,
-            llm_invoker=_llm_invoker,
-        )
-        logger.info(
-            "TIMING retrieve.assemble candidates=%d picked=%d cap=%d ms=%.1f",
-            len(merged), len(selected), final_top_k,
-            (time.perf_counter() - assemble_started) * 1000.0,
-        )
+        else:
+            selected = await assemble_final_chunks(
+                chunks=merged,
+                focuses=focuses,
+                final_top_k=final_top_k,
+                focus_quota=focus_quota,
+                preset=self.config.preset,
+                query=query,
+                llm_config=None,
+                llm_invoker=None,
+            )
+            logger.info(
+                "TIMING retrieve.assemble candidates=%d picked=%d cap=%d path=rule ms=%.1f",
+                len(merged), len(selected), final_top_k,
+                (time.perf_counter() - assemble_started) * 1000.0,
+            )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log_observation(merged, per_source, focuses, elapsed_ms)

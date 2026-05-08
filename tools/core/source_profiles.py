@@ -79,7 +79,7 @@ SOURCE_PROFILES: Dict[str, SourceProfile] = {
         ],
         sub_query_hints=[
             "使用强特征的英文专有名词或项目代号",
-            "根据提供的可用空间列表 (google_spaces) 定向检索",
+            "利用强特征关键词 + 时间过滤精准定位（subquery 保持 2-4 个核心词）",
         ],
     ),
     "notion": SourceProfile(

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, create_model
 
 
 # ── 全局统一模型 ─────────────────────────────────────────────────────────────
-MODEL = "gemini-3.1-flash-lite-preview"
+MODEL = "gemini-3.1-flash-lite"
 
 
 # ── 共用字面量 ──────────────────────────────────────────────────────────────

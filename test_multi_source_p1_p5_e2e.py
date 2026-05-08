@@ -74,17 +74,14 @@ async def run_one(qinfo: dict, preset: str, sources: List[str]) -> QueryResult:
     """Drive the full retrieve_agent pipeline (mirror _run_async_impl)."""
     from tools.core.models import AgentConfig
     from tools.core.focus_board import FocusBoard
-    from tools.core.final_assembler import (
-        LlmAssemblerConfig, assemble_final_chunks, render_final_payload,
-    )
+    from tools.core.eval_layer import build_eval_layer
+    from tools.core.final_assembler import assemble_final_chunks, render_final_payload
     from retrieve_agent import (
         build_retrieve_agent_from_config,
         _prepare_focuses,
         _dispatch_sources,
         _merge_across_sources,
     )
-    from agents.source_agent_base import _run_llm_agent
-    from tools.core.final_assembler import build_final_assembler_agent
 
     res = QueryResult(
         query_id=qinfo["id"], query=qinfo["query"], preset=preset, sources_enabled=list(sources),
@@ -146,24 +143,15 @@ async def run_one(qinfo: dict, preset: str, sources: List[str]) -> QueryResult:
         final_top_k = agent.config.final_top_k(len(focuses))
         res.final_top_k = final_top_k
 
-        llm_cfg = LlmAssemblerConfig(
-            enabled=bool(merged),
-            timeout_s=agent.config.eval_layer_llm_timeout_s,
-            content_preview_chars=200,
-            trigger_only_when_overflow=not agent.config.eval_layer_active,
-        )
-
-        async def _llm_invoker(prompt_text: str) -> Dict:
-            llm_agent = build_final_assembler_agent()
-            return await asyncio.wait_for(
-                _run_llm_agent(llm_agent, prompt_text), timeout=llm_cfg.timeout_s,
+        if agent.config.eval_layer_active:
+            eval_layer = build_eval_layer(agent.config.eval_layer_effective_mode)
+            selected = eval_layer.rank(merged, focuses, final_top_k)
+        else:
+            selected = await assemble_final_chunks(
+                chunks=merged, focuses=focuses, final_top_k=final_top_k,
+                focus_quota=agent.config.focus_quota, preset=preset,
+                query=qinfo["query"], llm_config=None, llm_invoker=None,
             )
-
-        selected = await assemble_final_chunks(
-            chunks=merged, focuses=focuses, final_top_k=final_top_k,
-            focus_quota=agent.config.focus_quota, preset=preset,
-            query=qinfo["query"], llm_config=llm_cfg, llm_invoker=_llm_invoker,
-        )
 
         payload = render_final_payload(qinfo["query"], selected, focuses)
         res.elapsed_s = round(time.perf_counter() - started, 2)

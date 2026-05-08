@@ -237,9 +237,14 @@ def _build_plan_only_prompt(
     profile: SourceProfile,
     source_top_k: int,
     extra_rules_block: str = "",
+    sq_budget_override: Optional[int] = None,
 ) -> str:
     """拼 plan_only 用户消息。``extra_rules_block`` 供子类注入源专业规则。"""
-    sq_budget = _sub_query_budget(len(focuses), source_top_k)
+    sq_budget = (
+        sq_budget_override
+        if sq_budget_override is not None
+        else _sub_query_budget(len(focuses), source_top_k)
+    )
     parts = [
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"source_profile_block:\n{profile.to_prompt_block()}",
@@ -402,6 +407,15 @@ class SourceAgent:
         """
         return []
 
+    # ── 子类覆写点：sub_query 总数预算（注入到 plan_only prompt） ─
+    def _compute_sub_query_total_cap(self, n_focuses: int) -> int:
+        """返回 plan_only prompt 中的 sub_query_total_cap 值。
+
+        默认走通用公式 ``_sub_query_budget``。源若需特殊收束（如 Google
+        的"少而精：单 focus ≤2 / 多 focus ≤3"），覆写返回更紧的预算。
+        """
+        return _sub_query_budget(n_focuses, self.cfg.source_top_k)
+
     # ── 子类覆写点：注入源专业规则到 plan_only prompt ────────────
     def _source_query_rules_block(self) -> str:
         """返回该源的 query 编写规则文本（供 plan_only prompt 拼接）。
@@ -448,6 +462,7 @@ class SourceAgent:
         prompt = _build_plan_only_prompt(
             focuses, self.profile, self.cfg.source_top_k,
             extra_rules_block=self._source_query_rules_block(),
+            sq_budget_override=self._compute_sub_query_total_cap(len(focuses)),
         )
         out = await _run_llm_agent(self.plan_only, prompt)
         planned = self._assign_sub_query_ids([

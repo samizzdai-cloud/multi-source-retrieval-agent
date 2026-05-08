@@ -216,7 +216,7 @@ def read_chunks(
 ) -> list:
     """读取 Excel 文档并切分为 chunks。"""
     from google_workspace_tool.chunkers import GoogleChunk
-    from utils.table_utils import split_sections, process_section_to_markdown
+    from google_workspace_tool.utils.table_utils import split_sections, process_section_to_markdown
     import io
 
     result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout, known_title=known_title)

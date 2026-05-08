@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # ── LLM constants ────────────────────────────────────────────────
 # [P2.7] 从 .env 读取模型配置，支持 lite 模型 + fallback
-LLM_MODEL       = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+LLM_MODEL       = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 LLM_FALLBACK    = os.getenv("GEMINI_FALLBACK_MODEL", "")
 LLM_MAX_TOKENS  = 8192
 LLM_TEMPERATURE = 0.0

@@ -43,36 +43,23 @@ _SOURCE_PROFILES_BASE = {
 }
 
 _FOCUS_GUIDE = """每个 focus 必须满足：
-  1. **可评估**：给任一文档切片，能直接判断是否回答了该 focus（不是泛词如"销售数据"）
-  2. **自包含**：带足上下文（实体 + 维度 + 可选限定），15-40 字为宜
-  3. **不重叠**：focuses 之间语义边界清晰，避免同一事情改写两次
+  1. **可评估**：给任一切片能直接判断是否命中（不能是 'nubia'/'销售数据' 这类泛词）
+  2. **自包含**：实体 + 维度 + 可选限定，15-40 字
+  3. **不重叠**：focuses 间语义边界清晰，禁止改写式重复
 
-正例：
-  - 'nubia 英国 2026Q1 DTC 渠道销售额与 GMV'
-  - 'hypershell 德国市场的本地化运营策略和合规要点'
-  - '项目 X 复盘会议的核心结论和下一步改进行动'
-
-反例：
-  - 'nubia'（太泛，无法评估）
-  - '销售数据'（缺实体，每条切片都会命中）
-  - '销售数据' + '销售表现'（语义重叠，等价重写）"""
+正例：'nubia 英国 2026Q1 DTC 渠道销售额与 GMV'
+反例：'销售数据' + '销售表现'（语义重叠）"""
 
 
 def _build_source_profiles_block(
-    available_sources: List[str], 
+    available_sources: List[str],
     bailian_allowed_indexes: Optional[List[str]] = None,
-    google_spaces: Optional[List[str]] = None
 ) -> str:
     lines = []
     for s in available_sources:
         desc = _SOURCE_PROFILES_BASE.get(s, '(未知源)')
         if s == "bailian" and bailian_allowed_indexes is not None:
             desc += f"（当前可用知识库项目：{', '.join(bailian_allowed_indexes)}）"
-        if s == "google" and google_spaces is not None:
-            # 只展示前 15 个以防过长
-            display_spaces = google_spaces[:15]
-            suffix = "..." if len(google_spaces) > 15 else ""
-            desc += f"\n    [可见顶级空间] {', '.join(display_spaces)}{suffix}"
         lines.append(f"  - {s}: {desc}")
     return "\n".join(lines)
 
@@ -149,7 +136,6 @@ def plan_query(
     query: str,
     available_sources: List[str],
     bailian_allowed_indexes: Optional[List[str]] = None,
-    google_spaces: Optional[List[str]] = None,
     session_context: str = "",
 ) -> QueryPlan:
     """把用户 query 拆成 flat focuses（每个 focus 独立带 targets）。
@@ -158,9 +144,8 @@ def plan_query(
     输出 ``QueryPlan`` 只含：``original_query`` + ``focuses``。
     """
     profiles_block = _build_source_profiles_block(
-        available_sources, 
+        available_sources,
         bailian_allowed_indexes=bailian_allowed_indexes,
-        google_spaces=google_spaces
     )
 
     prompt = f"""你是多源检索的「全局规划器」。职责只有两件事：
@@ -179,22 +164,19 @@ def plan_query(
 
 ## 数量约束（硬要求）
 
-- focuses 总数 ≤ {MAX_FOCUSES_TOTAL}
-- 简单 query（单实体单意图）：1-2 个 focus
-- 复杂 query（多实体 / 多维度 / 对比类）：3-{MAX_FOCUSES_TOTAL} 个
-- 判据：若两个候选 focus 可被同一条 sub_query 覆盖 → 合并为一个
-- 多实体对比：尽量对称拆分（两侧维度一致、数量一致）
-- 多实体独立问法（非对比）：各实体按实际被问到的内容独立拆分，无需强对称
+- focuses 总数 ≤ {MAX_FOCUSES_TOTAL}（简单单实体单意图 1-2 个；多实体/多维度/对比 3-{MAX_FOCUSES_TOTAL} 个）
+- 若两个候选 focus 可被同一条 sub_query 覆盖 → 合并
+- 多实体对比尽量对称拆分；非对比的独立问法按各实体实际问到的内容拆分
 
 ## 源路由规则（每个 focus 独立判断）
 
 - ``targets`` 从 {json.dumps(available_sources)} 中选，不能为空
-- 判断依据：根据提供的具体清单（如 Bailian 可用项目、Google 可见文件夹）或 Feishu 的普适性来动态决定。
-  · 内部运营事实 / 结构化表格 / 日常 SOP / 会议纪要 / 通用协作材料 → 优先 `feishu`
-  · 若发现 Query 中的实体/项目名称正好在 `bailian` 的可用知识库列表中，或者涉及跨文档语义推理 / 深度市场情报 → 分发给 `bailian`
-  · 若发现 Query 中的业务名称、团队名称正好在 `google` 的可见顶级空间/文件夹列表中，或是外部协作资料 → 分发给 `google`
-  · 多个源都能**独立**贡献有价值信息（非互为冗余）时 → 同时路由（如 `["feishu", "bailian"]`）
-- 最高优先级：用户显式指定源（如 "在飞书里找"、"#bailian"、"搜一下Drive"）时，targets 仅保留用户指定的源。
+- 判断依据：
+  · 内部运营事实 / 结构化表格 / SOP / 会议纪要 / 通用协作材料 → `feishu`
+  · query 中实体/项目名命中 `bailian` 可用知识库列表，或需跨文档语义推理 / 深度市场情报 → `bailian`
+  · 外部协作资料 / 跨部门共享文档 / 培训/营销物料 → `google`
+  · 多个源能**独立**贡献非冗余信息时 → 同时路由（如 `["feishu", "bailian"]`）
+- 用户显式指定源（如 "在飞书里找"、"#bailian"、"搜一下Drive"）时，targets 仅保留指定源（最高优先级）。
 
 ## 输出（严格 JSON，不要额外说明）
 

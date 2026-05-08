@@ -548,6 +548,10 @@ class GoogleSourceAgent(SourceAgent):
         self._doc_pool = None
         self._slide_pool = None
         self._gmail_pool = None
+        # Drive 顶级空间懒加载缓存（personal_recent 类 sub_query 触发）
+        # 仅在 sub_query.query_type == "personal_recent" 时按需拉取
+        self._drive_spaces_cache: Optional[List[str]] = None
+        self._drive_spaces_cache_ts: float = 0.0
 
     def _ensure_sheet_pool(self):
         if self._sheet_pool is None:
@@ -572,6 +576,44 @@ class GoogleSourceAgent(SourceAgent):
             from google_workspace_tool.gmail_pool import GmailPool
             self._gmail_pool = GmailPool()
         return self._gmail_pool
+
+    async def _lazy_fetch_drive_spaces(self, ttl_s: float = 300.0) -> List[str]:
+        """Lazy 拉取 Drive 顶级空间列表（带 TTL cache）。
+
+        仅当 _execute_batch 检测到至少一个 personal_recent 类型 sub_query 时调用。
+        普通 query 全程不付出 list_drive_spaces_async 的 ~700ms~1s 代价。
+
+        TTL 默认 5min；超过则刷新。返回 spaces 名字列表（含我的云端硬盘 / 共享盘等）。
+        """
+        now = time.monotonic()
+        if (
+            self._drive_spaces_cache is not None
+            and (now - self._drive_spaces_cache_ts) < ttl_s
+        ):
+            return self._drive_spaces_cache
+        try:
+            from google_workspace_tool.auth_utils import get_credentials
+            from tools.google.google_retrieve import _SCOPES
+            from google_workspace_tool.drive_space_lister import list_drive_spaces_async
+            started = time.perf_counter()
+            creds = get_credentials(scopes=_SCOPES)
+            spaces_info = await list_drive_spaces_async(
+                creds=creds,
+                include_shared_drives=True,
+                include_shared_folders=True,
+                include_my_drive_folders=True,
+            )
+            spaces = [s["name"] for s in spaces_info if s.get("name")]
+            self._drive_spaces_cache = spaces
+            self._drive_spaces_cache_ts = now
+            logger.info(
+                "[google] lazy-fetched %d drive spaces for personal_recent ms=%.1f",
+                len(spaces), (time.perf_counter() - started) * 1000.0,
+            )
+            return spaces
+        except Exception as e:
+            logger.warning("[google] lazy_fetch_drive_spaces failed: %s", e)
+            return []
 
     @staticmethod
     def _build_gmail_q(query: str, keyword_groups: Optional[List[List[str]]] = None) -> str:
@@ -887,6 +929,49 @@ class GoogleSourceAgent(SourceAgent):
         from tools.core.source_query_config import get_source_query_rules
         return get_source_query_rules("google")
 
+    def _compute_sub_query_total_cap(self, n_focuses: int) -> int:
+        """Google 少而精预算：单 focus ≤2，多 focus ≤3。
+
+        通过注入到 plan_only prompt 的 ``sub_query_total_cap`` 字段引导 LLM
+        自主收束，不再做后置硬截。配套 instruction 见 source_query_config
+        的 google rules 第 0 节。
+        """
+        return 2 if n_focuses <= 1 else 3
+
+    def _post_process_sub_queries(
+        self,
+        focuses: List[Focus],
+        sub_queries: List[SubQuery],
+    ) -> List[SubQuery]:
+        """观测器：仅在 LLM 越界时打 WARNING，不主动裁剪。
+
+        与 ``_compute_sub_query_total_cap`` + google rules instruction 联动：
+        instruction 是主收束手段；这里只在严重越界时给出反馈信号，便于
+        instruction 调优。仅当 ``len > expected_max * 2`` 时才硬截，防止
+        极端失控拖垮整个 retrieve。
+        """
+        if not sub_queries:
+            return sub_queries
+
+        n_focuses = len(focuses)
+        expected_max = self._compute_sub_query_total_cap(n_focuses)
+        actual = len(sub_queries)
+
+        if actual > expected_max:
+            logger.warning(
+                "[google] LLM exceeded budget: focuses=%d sub_queries=%d expected_max=%d "
+                "→ instruction may need tightening",
+                n_focuses, actual, expected_max,
+            )
+            # 极端兜底：> 2x 时硬截，按 LLM 原顺序保留前 expected_max 条
+            if actual > expected_max * 2:
+                logger.warning(
+                    "[google] hard-cut applied: %d -> %d (severe overshoot)",
+                    actual, expected_max,
+                )
+                return sub_queries[:expected_max]
+        return sub_queries
+
     def _post_process_top_chunks(
         self,
         focuses: List[Focus],
@@ -945,6 +1030,13 @@ class GoogleSourceAgent(SourceAgent):
 
         batch_started = time.perf_counter()
         sheet_pool = self._ensure_sheet_pool()
+
+        # ── 懒加载 Drive 顶级空间画像：仅当存在 personal_recent 类 sq 时 ──
+        has_personal_recent = any(
+            (sq.query_type or "").lower() == "personal_recent" for sq in sub_queries
+        )
+        if has_personal_recent:
+            await self._lazy_fetch_drive_spaces()
 
         # ── Phase A: 每个 sub_query 先做 Drive 搜索（只搜索，不读取）────────
         async def _search_one(sq: SubQuery) -> dict:
