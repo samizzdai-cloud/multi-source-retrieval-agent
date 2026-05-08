@@ -11,10 +11,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import logging
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from feishu_read_tool.client import FeishuClient
 from feishu_read_tool.basic_tool.bitable_read import list_tables
@@ -58,10 +61,13 @@ class TablePool:
         uat: str,
         max_sheets: int = MAX_SHEETS_PER_FOCUS,
         max_bitables: int = MAX_BITABLES_PER_FOCUS,
+        executor: Optional[concurrent.futures.Executor] = None,
     ):
         self.uat = uat
         self.max_sheets = max_sheets
         self.max_bitables = max_bitables
+        # 注入的源专属线程池；None 时走 asyncio 默认全局池
+        self._executor = executor
 
         self._cache: Dict[str, List[UnifiedChunk]] = {}
         self._reading: Set[str] = set()
@@ -75,6 +81,9 @@ class TablePool:
 
         self._sheet_struct_cache: Dict[str, List[dict]] = {}
         self._bitable_struct_cache: Dict[str, List[dict]] = {}
+        # single-flight 事件：同 token 的并发请求等待第一个完成，避免重复 API 调用
+        self._sheet_struct_inflight: Dict[str, asyncio.Event] = {}
+        self._bitable_struct_inflight: Dict[str, asyncio.Event] = {}
         self._sheet_struct_sem = asyncio.Semaphore(SHEET_STRUCTURE_CONCURRENCY)
         self._sheet_struct_bucket = PriorityTokenBucket(
             qps=SHEET_STRUCTURE_QPS,
@@ -84,6 +93,15 @@ class TablePool:
         self._bitable_struct_sem = asyncio.Semaphore(BITABLE_STRUCTURE_CONCURRENCY)
         self._sheet_read_sem = asyncio.Semaphore(SHEET_READ_CONCURRENCY)
         self._bitable_read_sem = asyncio.Semaphore(BITABLE_READ_CONCURRENCY)
+
+    async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """走注入 executor 的 to_thread；executor=None 时退回默认池。保留 contextvars 传播。"""
+        if self._executor is None:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
+        func_call = functools.partial(ctx.run, fn, *args, **kwargs)
+        return await loop.run_in_executor(self._executor, func_call)
 
     @property
     def stats(self) -> Dict:
@@ -225,35 +243,49 @@ class TablePool:
         token = self._token_of(candidate)
         if not token:
             return []
+        # 1) 缓存命中（最快路径）
         if token in self._sheet_struct_cache:
             rows = list(self._sheet_struct_cache[token])
             logger.info(
                 "TIMING table_pool.sheet_structure token=%s count=%d ms=%.1f cache=hit",
-                token[:16],
-                len(rows),
-                _elapsed_ms(started),
+                token[:16], len(rows), _elapsed_ms(started),
             )
             return rows
-        async with self._sheet_struct_sem:
-            if token in self._sheet_struct_cache:
-                return list(self._sheet_struct_cache[token])
-            try:
-                client = FeishuClient(user_access_token=self.uat)
-                tabs = await asyncio.to_thread(client.query_all_sheets_metadata, token)
-                visible_tabs = [
-                    t for t in tabs
-                    if not t.get("hidden") and t.get("resource_type") == "sheet"
-                ]
-                self._sheet_struct_cache[token] = list(visible_tabs)
-            except Exception as e:
-                logger.warning("table_pool: sheet structure fetch failed for %s: %s", token[:16], e)
-                self._sheet_struct_cache[token] = []
+        # 2) single-flight：已有同 token 在飞行 → 等它完成再取缓存
+        inflight = self._sheet_struct_inflight.get(token)
+        if inflight is not None:
+            await inflight.wait()
+            rows = list(self._sheet_struct_cache.get(token, []))
+            logger.info(
+                "TIMING table_pool.sheet_structure token=%s count=%d ms=%.1f cache=inflight",
+                token[:16], len(rows), _elapsed_ms(started),
+            )
+            return rows
+        # 3) 我是首发请求：注册 inflight 事件，发起 API
+        evt = asyncio.Event()
+        self._sheet_struct_inflight[token] = evt
+        try:
+            async with self._sheet_struct_sem:
+                if token in self._sheet_struct_cache:                # 双检
+                    return list(self._sheet_struct_cache[token])
+                try:
+                    client = FeishuClient(user_access_token=self.uat)
+                    tabs = await self._to_thread(client.query_all_sheets_metadata, token)
+                    visible_tabs = [
+                        t for t in tabs
+                        if not t.get("hidden") and t.get("resource_type") == "sheet"
+                    ]
+                    self._sheet_struct_cache[token] = list(visible_tabs)
+                except Exception as e:
+                    logger.warning("table_pool: sheet structure fetch failed for %s: %s", token[:16], e)
+                    self._sheet_struct_cache[token] = []
+        finally:
+            evt.set()
+            self._sheet_struct_inflight.pop(token, None)
         rows = list(self._sheet_struct_cache.get(token, []))
         logger.info(
             "TIMING table_pool.sheet_structure token=%s count=%d ms=%.1f cache=miss",
-            token[:16],
-            len(rows),
-            _elapsed_ms(started),
+            token[:16], len(rows), _elapsed_ms(started),
         )
         return rows
 
@@ -262,30 +294,44 @@ class TablePool:
         token = self._token_of(candidate)
         if not token:
             return []
+        # 1) 缓存命中
         if token in self._bitable_struct_cache:
             rows = list(self._bitable_struct_cache[token])
             logger.info(
                 "TIMING table_pool.bitable_structure token=%s count=%d ms=%.1f cache=hit",
-                token[:16],
-                len(rows),
-                _elapsed_ms(started),
+                token[:16], len(rows), _elapsed_ms(started),
             )
             return rows
-        async with self._bitable_struct_sem:
-            if token in self._bitable_struct_cache:
-                return list(self._bitable_struct_cache[token])
-            try:
-                tables = await asyncio.to_thread(list_tables, token, self.uat)
-                self._bitable_struct_cache[token] = list(tables)
-            except Exception as e:
-                logger.warning("table_pool: bitable structure fetch failed for %s: %s", token[:16], e)
-                self._bitable_struct_cache[token] = []
+        # 2) single-flight：等待已在飞行的同 token
+        inflight = self._bitable_struct_inflight.get(token)
+        if inflight is not None:
+            await inflight.wait()
+            rows = list(self._bitable_struct_cache.get(token, []))
+            logger.info(
+                "TIMING table_pool.bitable_structure token=%s count=%d ms=%.1f cache=inflight",
+                token[:16], len(rows), _elapsed_ms(started),
+            )
+            return rows
+        # 3) 首发请求
+        evt = asyncio.Event()
+        self._bitable_struct_inflight[token] = evt
+        try:
+            async with self._bitable_struct_sem:
+                if token in self._bitable_struct_cache:
+                    return list(self._bitable_struct_cache[token])
+                try:
+                    tables = await self._to_thread(list_tables, token, self.uat)
+                    self._bitable_struct_cache[token] = list(tables)
+                except Exception as e:
+                    logger.warning("table_pool: bitable structure fetch failed for %s: %s", token[:16], e)
+                    self._bitable_struct_cache[token] = []
+        finally:
+            evt.set()
+            self._bitable_struct_inflight.pop(token, None)
         rows = list(self._bitable_struct_cache.get(token, []))
         logger.info(
             "TIMING table_pool.bitable_structure token=%s count=%d ms=%.1f cache=miss",
-            token[:16],
-            len(rows),
-            _elapsed_ms(started),
+            token[:16], len(rows), _elapsed_ms(started),
         )
         return rows
 
@@ -466,7 +512,7 @@ class TablePool:
             row_started = time.perf_counter()
             async with self._sheet_read_sem:
                 try:
-                    chunks = await asyncio.to_thread(
+                    chunks = await self._to_thread(
                         read_sheets,
                         candidate.get("read_query", "") or "",
                         [candidate],
@@ -496,7 +542,7 @@ class TablePool:
             row_started = time.perf_counter()
             async with self._bitable_read_sem:
                 try:
-                    chunks = await asyncio.to_thread(
+                    chunks = await self._to_thread(
                         read_bitables,
                         candidate.get("read_query", "") or "",
                         [candidate],

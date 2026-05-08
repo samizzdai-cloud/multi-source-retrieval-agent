@@ -1,0 +1,236 @@
+2026-05-08 19:09:28,686 INFO p1p5_e2e: ==========================================================================================
+2026-05-08 19:09:28,686 INFO p1p5_e2e: [run] preset=balanced Q50 sources=['google']
+2026-05-08 19:09:29,733 INFO retrieve_agent: Google credentials validated successfully.
+2026-05-08 19:09:30,452 INFO p1p5_e2e: [balanced/Q50] fetched 4 google spaces
+2026-05-08 19:09:30,453 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:32,381 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent "HTTP/1.1 200 OK"
+2026-05-08 19:09:32,384 INFO tools.core.query_planner: QueryPlan: focuses_total=3
+2026-05-08 19:09:32,384 INFO tools.core.query_planner:   [focus_0] targets=['google'] text=REDMAGIC 2025年度各币种净销售额、美元净销售额及订单总数
+2026-05-08 19:09:32,384 INFO tools.core.query_planner:   [focus_1] targets=['google'] text=REDMAGIC 2025年度客单价(USD)与全站访客数统计
+2026-05-08 19:09:32,384 INFO tools.core.query_planner:   [focus_2] targets=['google'] text=REDMAGIC 2025年度加购数及最终销售转化率数据
+2026-05-08 19:09:32,385 INFO p1p5_e2e: [balanced/Q50] 3 focuses produced
+2026-05-08 19:09:32,443 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:09:32,443 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:34,490 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:09:34,491 INFO agents.source_agent_base: [google] plan produced 3 sub_queries
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_0:sq1 max_groups=2 results=4
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=slide count=2 top=['Copy of [REDMAGIC] Launch Report RM10 Air<presentation>:V8xRnEhM', '[REDMAGIC] Launch Report RM10 Air<presentation>:pSfe7Meg']
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=sheet count=1 top=['RM拒付和纠纷损失统计2024_确认版.xlsx<sheet>:WSHa2wN6']
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: [google] search sq=google:focus_0:sq1 query='REDMAGIC 2025 销售额 订单总数' doc=4 slide=2 sheet=1
+2026-05-08 19:09:37,025 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_0:sq1 files=7 gmail_threads=0 ms=2491.5
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_2:sq3 max_groups=2 results=4
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=slide count=10 top=['REDMAGIC Ads Review Format<presentation>:92DBPLgY', ' [REDMAGIC] RM 11 Pro Launch report<presentation>:ksk0YwZM', 'Copy of  [REDMAGIC] RM 11 Pro Launch report<presentation>:taxpGoC4', ' [REDMAGIC] Launch report RM10 Pro<presentation>:IYwS5ZFY', 'Copy of [REDMAGIC] RM 11 Air Launch report<presentation>:d_pZ5MWA']
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=sheet count=1 top=['nubia - Social Media Master Sheet: Planning, Cal<spreadsheet>:NCFZpFcM']
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: [google] search sq=google:focus_2:sq3 query='REDMAGIC 2025 加购 转化率' doc=4 slide=10 sheet=1
+2026-05-08 19:09:37,631 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_2:sq3 files=15 gmail_threads=0 ms=3096.5
+2026-05-08 19:09:38,279 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_1:sq2 max_groups=2 results=4
+2026-05-08 19:09:38,279 INFO agents.google.google_source_agent: [google] fallback slide sq=google:focus_1:sq2 max_groups=2 results=10
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] fallback sheet sq=google:focus_1:sq2 max_groups=2 results=5
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=slide count=10 top=['REDMAGIC 11 Pro Review Guide(1011)<presentation>:TS1eNmT0', 'REDMAGIC LAPTOP 2026 & Keyboard+Mouse Timeline<presentation>:s95Zlix8', 'GTM Timeline REDMAGIC 10S Pro-MX<presentation>:rn5mMgOM', 'GTM Timeline REDMAGIC 10S Pro<presentation>:2-U5NwVI', 'GTM Timeline REDMAGIC 10 Air<presentation>:QCptmNmw']
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=sheet count=5 top=['Riskified billing 2503 REDMAGIC.xlsx<sheet>:ilevJ8P_', 'Riskified billing 2504 REDMAGIC.xlsx<sheet>:9-JnCzng', 'Riskified billing 2501 REDMAGIC.xlsx<sheet>:sB7O6IUY', 'Riskified billing 2502 REDMAGIC.xlsx<sheet>:UZDgAsnD', 'Riskified billing 2506 REDMAGIC.xls<ms-excel>:sr84vh-C']
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] search sq=google:focus_1:sq2 query='REDMAGIC 2025 客单价 访客数' doc=4 slide=10 sheet=5
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_1:sq2 files=19 gmail_threads=3 ms=3745.4
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] Phase A summary: sub_queries=3 total_drive_files=41 total_gmail_threads=3
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: TIMING google.sheet_prefilter raw=1 selected=1 reason=below_trigger_or_within_cap ms=0.1
+2026-05-08 19:09:38,280 INFO agents.google.google_source_agent: [google] Phase B metadata_prefetch start spreadsheets=1 workers=8 batch_timeout=6.2s api_timeout=7s
+2026-05-08 19:09:40,428 INFO agents.google.google_source_agent: TIMING google.phase_b.metadata_prefetch spreadsheets=1 cached=1 missing=0 ms=2148.1
+2026-05-08 19:09:41,241 INFO agents.google.google_source_agent: [google] slide filter skipped 6 oversized pptx for sq=google:focus_1:sq2, kept 4
+2026-05-08 19:09:41,526 INFO agents.google.google_source_agent: [google] slide filter skipped 6 oversized pptx for sq=google:focus_2:sq3, kept 4
+2026-05-08 19:09:41,526 INFO agents.google.google_source_agent: [google] Phase D summary: merged_sheets=1 merged_sheet_nonnative=6 merged_docs=4 merged_slides=8 merged_gmail=3
+2026-05-08 19:09:41,526 INFO agents.google.google_source_agent: [google] Phase E queue summary sheets=1 sheet_nonnative=6 docs=4 slides=8 gmail=3 executor_workers=12 per_file_timeout=20.0s
+2026-05-08 19:09:41,526 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet file=NCFZpFcM size=524288000 selected_titles=3 gc=0 uc=0 ms=0.0
+2026-05-08 19:09:41,526 INFO agents.google.google_source_agent: [google] sheet read done 1j4JGnFDUog3UDaJYhoUTu5VBBjcAkvhsLPsNCFZpFcM: titles=3 range_names=["'Z70S Ultra Video + Assets Request'", "'Z70U_Product Video Script -pdp'", "'SM Fan Goals'"] gc=0 uc=0 size=524288000
+2026-05-08 19:09:41,528 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1CuHhC9plarz4yb7HxMF... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=1.3 error=No module named 'utils'
+2026-05-08 19:09:41,528 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1CuHhC9plarz4yb7HxMF7AR3QWSHa2wN6 (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:09:41,528 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=WSHa2wN6 mime=sheet size=438822 gc=0 uc=0 ms=2.0
+2026-05-08 19:09:41,529 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1xZHeGxz27lyEjYkRdLi... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=1.9 error=No module named 'utils'
+2026-05-08 19:09:41,529 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1xZHeGxz27lyEjYkRdLi3YKeFilevJ8P_ (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:09:41,529 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=ilevJ8P_ mime=sheet size=390675 gc=0 uc=0 ms=2.5
+2026-05-08 19:09:41,530 INFO agents.google.google_source_agent: [google] pool submits {'doc': 4, 'gmail': 3, 'nonnative': 6, 'sheet': 1, 'slide': 8} type_pools=True
+2026-05-08 19:09:41,529 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1kNQ-EVA-nCqhnyJvtJF... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=1.0 error=No module named 'utils'
+2026-05-08 19:09:41,530 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1kNQ-EVA-nCqhnyJvtJFBDJ-f9-JnCzng (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:09:41,530 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=9-JnCzng mime=sheet size=478667 gc=0 uc=0 ms=1.8
+2026-05-08 19:09:41,530 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=WSHa2wN6 size=N/A chunks=0 ms=0.0
+2026-05-08 19:09:41,531 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=ilevJ8P_ size=N/A chunks=0 ms=0.0
+2026-05-08 19:09:41,531 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=9-JnCzng size=N/A chunks=0 ms=0.0
+2026-05-08 19:09:41,531 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet file=NCFZpFcM size=524288000 chunks=0 ms=0.0
+2026-05-08 19:09:41,531 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1h3KLilVgPqJjq2vnvjv... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=0.2 error=No module named 'utils'
+2026-05-08 19:09:41,568 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1h3KLilVgPqJjq2vnvjvPlVLIUZDgAsnD (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:09:41,580 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=UZDgAsnD mime=sheet size=781314 gc=0 uc=0 ms=49.8
+2026-05-08 19:09:41,531 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1JHOKo76Ooj4oK_ErHXH... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=0.9 error=No module named 'utils'
+2026-05-08 19:09:41,658 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1JHOKo76Ooj4oK_ErHXH5G0dysB7O6IUY (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:09:41,657 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=UZDgAsnD size=N/A chunks=0 ms=126.6
+2026-05-08 19:09:41,665 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=sB7O6IUY mime=sheet size=971944 gc=0 uc=0 ms=134.8
+2026-05-08 19:09:41,721 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=sB7O6IUY size=N/A chunks=0 ms=190.6
+2026-05-08 19:09:41,722 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1ltwGidDWtbdvkPI_425... mime=application/vnd.ms-excel FAILED ms=117.1 error=No module named 'utils'
+2026-05-08 19:09:41,722 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1ltwGidDWtbdvkPI_425rx7uUsr84vh-C (application/vnd.ms-excel): No module named 'utils'
+2026-05-08 19:09:41,722 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=sr84vh-C mime=ms-excel size=2636800 gc=0 uc=0 ms=117.2
+2026-05-08 19:09:41,722 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=sr84vh-C size=N/A chunks=0 ms=190.8
+2026-05-08 19:09:42,270 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=gmail file=d76d3828 size=N/A chunks=1 ms=738.8
+2026-05-08 19:09:42,277 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=gmail file=be85b2b7 size=N/A chunks=1 ms=746.5
+2026-05-08 19:09:42,915 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=1Ixanl6qcjlwkUDI4Hnu... api_ms=1344.6 chunk_ms=1.9 total_ms=1346.5
+2026-05-08 19:09:42,917 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1Ixanl6qcjlwkUDI4Hnu... mime=application/vnd.google-apps.document chunks=5 ms=1389.0
+2026-05-08 19:09:42,917 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=RL_ocVlI mime=document size=23522 gc=5 uc=5 ms=1389.6
+2026-05-08 19:09:42,917 INFO agents.google.google_source_agent: [google] doc read done 1Ixanl6qcjlwkUDI4Hnu8pPanUcXbHyh9xf-RL_ocVlI: mime=application/vnd.google-apps.document gc=5 uc=5 size=23522
+2026-05-08 19:09:42,918 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=RL_ocVlI size=23522 chunks=5 ms=1387.2
+2026-05-08 19:09:42,918 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=RL_ocVlI size=23522 chunks=5 ms=1387.1
+2026-05-08 19:09:42,918 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=RL_ocVlI size=23522 chunks=5 ms=1362.9
+2026-05-08 19:09:42,985 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=gmail file=b80801e6 size=N/A chunks=1 ms=1453.7
+2026-05-08 19:09:43,005 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=1tF_J2Fdf67rc1Nut7vj... api_ms=1441.7 chunk_ms=0.8 total_ms=1442.5
+2026-05-08 19:09:43,005 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1tF_J2Fdf67rc1Nut7vj... mime=application/vnd.google-apps.document chunks=10 ms=1476.4
+2026-05-08 19:09:43,006 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=Ai9hMBbc mime=document size=9766 gc=10 uc=10 ms=1476.8
+2026-05-08 19:09:43,006 INFO agents.google.google_source_agent: [google] doc read done 1tF_J2Fdf67rc1Nut7vjWaYp5hoDyP7MZhOZAi9hMBbc: mime=application/vnd.google-apps.document gc=10 uc=10 size=9766
+2026-05-08 19:09:43,006 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=1475.0
+2026-05-08 19:09:43,006 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=1474.9
+2026-05-08 19:09:43,006 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=1450.6
+2026-05-08 19:09:43,115 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=10sP8k6tvU24Q1WHlUzG... api_ms=1472.2 chunk_ms=0.3 total_ms=1472.5
+2026-05-08 19:09:43,115 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=10sP8k6tvU24Q1WHlUzG... mime=application/vnd.google-apps.document chunks=2 ms=1586.8
+2026-05-08 19:09:43,115 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=e9naX1aw mime=document size=2522 gc=2 uc=2 ms=1587.0
+2026-05-08 19:09:43,115 INFO agents.google.google_source_agent: [google] doc read done 10sP8k6tvU24Q1WHlUzGAebNJPkSfhW6J9CEe9naX1aw: mime=application/vnd.google-apps.document gc=2 uc=2 size=2522
+2026-05-08 19:09:43,115 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=e9naX1aw size=2522 chunks=2 ms=1584.6
+2026-05-08 19:09:43,115 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=e9naX1aw size=2522 chunks=2 ms=1584.4
+2026-05-08 19:09:43,115 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=e9naX1aw size=2522 chunks=2 ms=1560.2
+2026-05-08 19:09:43,137 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1_JvG8L1KWtKXLCA25vf... mime=application/vnd.google-apps.presentation chunks=7 ms=1607.7
+2026-05-08 19:09:43,137 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=0nbvf9Vs mime=presentation size=28776 gc=7 uc=7 ms=1607.9
+2026-05-08 19:09:43,137 INFO agents.google.google_source_agent: [google] slide read done 1_JvG8L1KWtKXLCA25vfTcFUwgfCeMMNkijY0nbvf9Vs: mime=application/vnd.google-apps.presentation gc=7 uc=7 size=28776
+2026-05-08 19:09:43,138 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=0nbvf9Vs size=28776 chunks=7 ms=1606.7
+2026-05-08 19:09:44,233 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=19mNq3VjEJTqCszBXRdZ... api_ms=1312.7 chunk_ms=1.2 total_ms=1313.9
+2026-05-08 19:09:44,234 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=19mNq3VjEJTqCszBXRdZ... mime=application/vnd.google-apps.document chunks=10 ms=1316.5
+2026-05-08 19:09:44,234 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=8ZMj5mc0 mime=document size=9877 gc=10 uc=10 ms=1316.9
+2026-05-08 19:09:44,234 INFO agents.google.google_source_agent: [google] doc read done 19mNq3VjEJTqCszBXRdZtTxTDeqopSEsk-X08ZMj5mc0: mime=application/vnd.google-apps.document gc=10 uc=10 size=9877
+2026-05-08 19:09:44,234 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=2703.6
+2026-05-08 19:09:44,234 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=2703.5
+2026-05-08 19:09:44,234 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=2679.3
+2026-05-08 19:09:45,406 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1NxLFbhojuMUFm5b32Aq... mime=application/vnd.google-apps.presentation chunks=99 ms=3876.7
+2026-05-08 19:09:45,414 INFO agents.google.google_source_agent: [google] slide truncate 1NxLFbhojuMUFm5b32Aqc-FXsylfHDZ6YNWEpSfe7Meg: 99 -> 40 (query-aware)
+2026-05-08 19:09:45,414 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=pSfe7Meg mime=presentation size=42223068 gc=99 uc=40 ms=3885.1
+2026-05-08 19:09:45,414 INFO agents.google.google_source_agent: [google] slide read done 1NxLFbhojuMUFm5b32Aqc-FXsylfHDZ6YNWEpSfe7Meg: mime=application/vnd.google-apps.presentation gc=99 uc=40 size=42223068
+2026-05-08 19:09:45,414 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=pSfe7Meg size=42223068 chunks=40 ms=3883.7
+2026-05-08 19:09:45,573 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1T9E_dBHYPbSBsQ_im27... mime=application/vnd.google-apps.presentation chunks=31 ms=2435.9
+2026-05-08 19:09:45,574 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=MOwcCvv8 mime=presentation size=35978643 gc=31 uc=31 ms=2437.0
+2026-05-08 19:09:45,574 INFO agents.google.google_source_agent: [google] slide read done 1T9E_dBHYPbSBsQ_im278SgqOgAbiRp9N8gYMOwcCvv8: mime=application/vnd.google-apps.presentation gc=31 uc=31 size=35978643
+2026-05-08 19:09:45,575 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=MOwcCvv8 size=35978643 chunks=31 ms=4043.7
+2026-05-08 19:09:45,575 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=MOwcCvv8 size=35978643 chunks=31 ms=4019.6
+2026-05-08 19:09:46,219 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1Z6ptkLU9qWujOc7bGe1... mime=application/vnd.google-apps.presentation chunks=96 ms=4690.4
+2026-05-08 19:09:46,227 INFO agents.google.google_source_agent: [google] slide truncate 1Z6ptkLU9qWujOc7bGe1-lYIAOBBnSCnYzMkV8xRnEhM: 96 -> 40 (query-aware)
+2026-05-08 19:09:46,227 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=V8xRnEhM mime=presentation size=42206323 gc=96 uc=40 ms=4697.8
+2026-05-08 19:09:46,227 INFO agents.google.google_source_agent: [google] slide read done 1Z6ptkLU9qWujOc7bGe1-lYIAOBBnSCnYzMkV8xRnEhM: mime=application/vnd.google-apps.presentation gc=96 uc=40 size=42206323
+2026-05-08 19:09:46,227 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=V8xRnEhM size=42206323 chunks=40 ms=4696.6
+2026-05-08 19:09:46,227 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=V8xRnEhM size=42206323 chunks=40 ms=4672.2
+2026-05-08 19:09:46,912 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1s1awjv41Xd9sL5Ebq3R... mime=application/vnd.google-apps.presentation chunks=5 ms=1497.7
+2026-05-08 19:09:46,913 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=2-U5NwVI mime=presentation size=19506 gc=5 uc=5 ms=1498.2
+2026-05-08 19:09:46,913 INFO agents.google.google_source_agent: [google] slide read done 1s1awjv41Xd9sL5Ebq3RMDmLydaWUljGQBie2-U5NwVI: mime=application/vnd.google-apps.presentation gc=5 uc=5 size=19506
+2026-05-08 19:09:46,913 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=2-U5NwVI size=19506 chunks=5 ms=5382.2
+2026-05-08 19:09:46,956 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=17YSbNRdSHCl4dc44BFC... mime=application/vnd.google-apps.presentation chunks=5 ms=1381.8
+2026-05-08 19:09:46,957 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=rn5mMgOM mime=presentation size=23122 gc=5 uc=5 ms=1382.1
+2026-05-08 19:09:46,957 INFO agents.google.google_source_agent: [google] slide read done 17YSbNRdSHCl4dc44BFC3m3ZkwPe4SAI6l3xrn5mMgOM: mime=application/vnd.google-apps.presentation gc=5 uc=5 size=23122
+2026-05-08 19:09:46,957 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=rn5mMgOM size=23122 chunks=5 ms=5425.8
+2026-05-08 19:09:48,059 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=19XINiHUeUKEjQbaaycR... mime=application/vnd.google-apps.presentation chunks=10 ms=1831.5
+2026-05-08 19:09:48,059 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=92DBPLgY mime=presentation size=8741335 gc=10 uc=10 ms=1832.1
+2026-05-08 19:09:48,059 INFO agents.google.google_source_agent: [google] slide read done 19XINiHUeUKEjQbaaycRuX8RLsyMlh-YoO3g92DBPLgY: mime=application/vnd.google-apps.presentation gc=10 uc=10 size=8741335
+2026-05-08 19:09:48,059 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=92DBPLgY size=8741335 chunks=10 ms=6504.1
+2026-05-08 19:09:49,401 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1n018lI111AJgvA8vm6c... mime=application/vnd.google-apps.presentation chunks=23 ms=2488.4
+2026-05-08 19:09:49,402 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=6s8SSvIM mime=presentation size=13713011 gc=23 uc=23 ms=2489.3
+2026-05-08 19:09:49,402 INFO agents.google.google_source_agent: [google] slide read done 1n018lI111AJgvA8vm6cmGBEXsYXb9R_8taf6s8SSvIM: mime=application/vnd.google-apps.presentation gc=23 uc=23 size=13713011
+2026-05-08 19:09:49,402 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=6s8SSvIM size=13713011 chunks=23 ms=7847.1
+2026-05-08 19:09:49,402 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_0:sq1 chunks_collected=107
+2026-05-08 19:09:49,402 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_0:sq1 | raw(S=1,D=4,SL=2,G=0) → selected(S=1,D=4,SL=2,G=0) → final(S=0,D=27,SL=80,G=0)
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_1:sq2 chunks_collected=78
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_1:sq2 | raw(S=5,D=4,SL=10,G=3) → selected(S=5,D=4,SL=4,G=3) → final(S=0,D=27,SL=48,G=3)
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_2:sq3 chunks_collected=131
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_2:sq3 | raw(S=1,D=4,SL=10,G=0) → selected(S=1,D=4,SL=4,G=0) → final(S=0,D=27,SL=104,G=0)
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUES count=7
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1j4JGnFDUog3UDaJYhoUTu5VBBjcAkvhsLPsNCFZpFcM type=sheet status=zero_chunks chunks=0 error= sqs={'google:focus_2:sq3'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1CuHhC9plarz4yb7HxMF7AR3QWSHa2wN6 type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1xZHeGxz27lyEjYkRdLi3YKeFilevJ8P_ type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_1:sq2'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1kNQ-EVA-nCqhnyJvtJFBDJ-f9-JnCzng type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_1:sq2'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1h3KLilVgPqJjq2vnvjvPlVLIUZDgAsnD type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_1:sq2'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1JHOKo76Ooj4oK_ErHXH5G0dysB7O6IUY type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_1:sq2'}
+2026-05-08 19:09:49,403 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1ltwGidDWtbdvkPI_425rx7uUsr84vh-C type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_1:sq2'}
+2026-05-08 19:09:49,811 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 销售额 订单总数' input=27 selected=7 ms=408.0
+2026-05-08 19:09:49,811 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_0:sq1 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=408.5
+2026-05-08 19:09:49,950 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 销售额 订单总数' input=80 selected=7 ms=547.3
+2026-05-08 19:09:49,951 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_0:sq1 type=slide reason=type_bucket input=80 rerank_input=80 output=7 ms=548.0
+2026-05-08 19:09:49,951 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_0:sq1 before(S=0,D=27,SL=80,G=0,O=0) after=14
+2026-05-08 19:09:50,423 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 客单价 访客数' input=48 selected=7 ms=471.3
+2026-05-08 19:09:50,423 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_1:sq2 type=slide reason=type_bucket input=48 rerank_input=48 output=7 ms=472.1
+2026-05-08 19:09:50,454 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 客单价 访客数' input=27 selected=7 ms=502.1
+2026-05-08 19:09:50,454 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_1:sq2 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=502.7
+2026-05-08 19:09:50,454 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_1:sq2 before(S=0,D=27,SL=48,G=3,O=0) after=17
+2026-05-08 19:09:50,910 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 加购 转化率' input=27 selected=7 ms=454.8
+2026-05-08 19:09:50,910 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_2:sq3 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=455.5
+2026-05-08 19:09:51,009 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 加购 转化率' input=104 selected=7 ms=554.3
+2026-05-08 19:09:51,010 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_2:sq3 type=slide reason=type_bucket input=104 rerank_input=104 output=7 ms=555.2
+2026-05-08 19:09:51,010 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_2:sq3 before(S=0,D=27,SL=104,G=0,O=0) after=14
+2026-05-08 19:09:51,604 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 销售额 订单总数' input=14 selected=10 ms=593.5
+2026-05-08 19:09:51,604 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_0:sq1 chunk_rerank input=14 output=10
+2026-05-08 19:09:52,109 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 客单价 访客数' input=17 selected=10 ms=505.2
+2026-05-08 19:09:52,110 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_1:sq2 chunk_rerank input=17 output=10
+2026-05-08 19:09:52,471 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 加购 转化率' input=14 selected=10 ms=361.3
+2026-05-08 19:09:52,472 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_2:sq3 chunk_rerank input=14 output=10
+2026-05-08 19:09:52,472 INFO agents.google.google_source_agent: TIMING google.batch_total sub_queries=3 chunk_pool=23 ms=17940.7
+2026-05-08 19:09:52,525 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:09:52,525 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:56,482 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:09:56,483 INFO agents.source_agent_base: TIMING source.eval_only source=google input_chunks=23 selected=5 ms=4011.3
+2026-05-08 19:09:56,483 INFO agents.source_agent_base: [google] done: loops=1/1 (min=1), top_chunks=5, elapsed=24.10s
+2026-05-08 19:09:56,484 INFO tools.core.focus_board: FocusBoard: focus_2 SATISFIED by google (critical=2 important=1 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:09:56,484 INFO tools.core.final_assembler: assemble_final_chunks: rule path picked=5 / candidates=5 / cap=12
+2026-05-08 19:09:56,484 INFO p1p5_e2e: [done] preset=balanced Q50 elapsed=26.78s emitted=5 merged=5 C/I/N=3/2/0 err=-
+2026-05-08 19:09:56,485 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.json
+2026-05-08 19:09:56,486 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.md
+
+# P1-P5 Multi-Source E2E Report
+
+## balanced
+
+| Q | Latency | Focuses | TopK cap | Emitted | Merged | C/I/Noise | Sources | Max Angle Redundancy | Schema OK | Error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Q50 | 26.78s | 3 | 12 | 5 | 5 | 3/2/0 | google:5 | 1 | ✅ | - |
+
+### Q50 focus_board
+```json
+{
+  "focus_0": {
+    "status": "noise_only",
+    "critical": 1,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "google"
+    ],
+    "targets": [
+      "google"
+    ]
+  },
+  "focus_1": {
+    "status": "noise_only",
+    "critical": 1,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "google"
+    ],
+    "targets": [
+      "google"
+    ]
+  },
+  "focus_2": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "google"
+    ],
+    "targets": [
+      "google"
+    ]
+  }
+}
+```
+angle_tag distribution: {'sales-performance': 1, 'conversion-rate': 1, 'subs-rate': 1, 'regional-sales': 1, 'traffic-metrics': 1}
+

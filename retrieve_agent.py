@@ -33,8 +33,14 @@ from typing_extensions import override
 from tools.core.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, SourceConfig
 from tools.core.query_planner import plan_query
 
-from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult
-from tools.core.eval_layer import build_eval_layer
+from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult, _run_llm_agent
+from tools.core.focus_board import FocusBoard
+from tools.core.final_assembler import (
+    LlmAssemblerConfig,
+    assemble_final_chunks,
+    build_final_assembler_agent,
+    render_final_payload,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -174,61 +180,13 @@ def _merge_across_sources(
     return _suppress_near_duplicates(merged)
 
 
-def _render_for_answer(
-    query: str,
+def _log_observation(
     merged: List[ChunkEntry],
     per_source: List[SourceAgentResult],
     focuses: List[Focus],
     elapsed_ms: int,
-) -> Dict:
-    """渲染成 AnswerAgent 兼容的 RetrievalResult 形状。
-
-    chunks 字段映射（与旧 UnifiedChunk 对齐）：
-      text           = ChunkEntry.content
-      source_name    = metadata["source_name"]
-      source_url     = metadata["source_url"]
-      source_tool    = ChunkEntry.source
-      heading_path   = metadata["heading_path"]
-      score          = ChunkEntry.score
-      confidence_tier= ChunkEntry.tier
-      metadata       = {...} + {target_focuses, sub_query, chunk_id}
-    """
-    chunks_out = []
-    for c in merged:
-        meta = dict(c.metadata or {})
-        chunks_out.append({
-            "text": c.content,
-            "source_name": meta.get("source_name", ""),
-            "source_url": meta.get("source_url", ""),
-            "source_tool": c.source,
-            "heading_path": meta.get("heading_path", ""),
-            "score": c.score or 0.0,
-            "confidence_tier": c.tier or "",
-            "metadata": {
-                **meta,
-                "chunk_id": c.id,
-                "sub_query": c.sub_query,
-                "target_focuses": sorted(c.target_focuses),
-            },
-        })
-
-    source_stats = {r.source: len(r.top_chunks) for r in per_source}
-
-    # focus_coverage：每个 focus_id → 命中 chunk 数
-    focus_coverage = {f.focus_id: 0 for f in focuses}
-    for c in merged:
-        for fid in c.target_focuses:
-            if fid in focus_coverage:
-                focus_coverage[fid] += 1
-
-    # [S2.3] per-source × per-focus 召回分布
-    # 用 per_source（各源原始 top_chunks，未被 eval_layer 截断）归因，
-    # 对 Sprint 3 S3.1 「零召回 focus 降级」最有参考价值；
-    # merged 维度由 focus_coverage 覆盖，两者互补。
-    #
-    # 结构：{focus_id: {source: count, ...}, ...}
-    # 形状稳定 —— 所有 focus × 所有 source 都初始化为 0，
-    # 便于消费方（eval 脚本、日志 grep）直接迭代，不必防缺键。
+) -> None:
+    """观测指标打日志（不进 payload）。"""
     enabled_sources = [r.source for r in per_source]
     chunks_by_focus: Dict[str, Dict[str, int]] = {
         f.focus_id: {src: 0 for src in enabled_sources} for f in focuses
@@ -238,8 +196,6 @@ def _render_for_answer(
             for fid in c.target_focuses:
                 if fid in chunks_by_focus and r.source in chunks_by_focus[fid]:
                     chunks_by_focus[fid][r.source] += 1
-
-    # 零召回警报：一眼可见哪些 (focus, source) 对没命中 —— Sprint 3 降级判据。
     zero_pairs = [
         f"{fid}/{src}"
         for fid, per_src in chunks_by_focus.items()
@@ -249,24 +205,14 @@ def _render_for_answer(
     if zero_pairs:
         logger.info(
             "RetrieveAgent: chunks_by_focus zero-recall pairs=%s (total=%d/%d)",
-            zero_pairs,
-            len(zero_pairs),
+            zero_pairs, len(zero_pairs),
             len(chunks_by_focus) * max(len(enabled_sources), 1),
         )
-
-    return {
-        "query": query,
-        "chunks": chunks_out,
-        "source_stats": source_stats,
-        "total_sources_queried": len(per_source),
-        "total_chunks_before_filter": sum(source_stats.values()),
-        "total_time_ms": elapsed_ms,
-        "focus_coverage": focus_coverage,
-        "chunks_by_focus": chunks_by_focus,   # [S2.3] 观测指标
-        "focuses": [{"focus_id": f.focus_id, "text": f.text} for f in focuses],
-        # plan 字段保留占位（AnswerAgent 没强依赖结构，只偶尔用）
-        "plan": None,
-    }
+    source_stats = {r.source: len(r.top_chunks) for r in per_source}
+    logger.info(
+        "RetrieveAgent: source_stats=%s elapsed_ms=%d merged_chunks=%d",
+        source_stats, elapsed_ms, len(merged),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -275,11 +221,14 @@ def _render_for_answer(
 async def _dispatch_sources(
     sources: Dict[str, SourceAgent],
     focuses: List[Focus],
+    focus_board: Optional[FocusBoard] = None,
 ) -> List[SourceAgentResult]:
     """按 focus.targets 把 focuses 路由到对应 SourceAgent 后并发执行。
 
     每源超时各自独立（``SourceAgent.cfg.source_timeout_s``），未命中任何 focus
     的源被整体跳过（返回空结果但保留在 per_source 里，供调用方统计）。
+
+    P4: 在每源完成后立即向 ``focus_board`` 回填，跨源共享 focus 满足状态。
     """
     # 按源拆 focuses
     per_source_focuses: Dict[str, List[Focus]] = {name: [] for name in sources}
@@ -296,13 +245,27 @@ async def _dispatch_sources(
             logger.info("[%s] no focus routed, skip", name)
             return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=0.0)
         timeout_s = agent.cfg.source_timeout_s
+        # P4: 把 focus_board 注入 source_agent（plan_eval focus-aware 用）
+        if focus_board is not None:
+            setattr(agent, "_focus_board", focus_board)
         try:
-            return await asyncio.wait_for(agent.run(fs), timeout=timeout_s)
+            result = await asyncio.wait_for(agent.run(fs), timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
+            return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
         except Exception as e:
             logger.exception("[%s] failed: %s", name, e)
-        return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
+            return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
+        finally:
+            if focus_board is not None:
+                setattr(agent, "_focus_board", None)
+        # P4: 完成即上报到 board（即便 0 chunks 也走，方便 contributors 记录）
+        if focus_board is not None and result.top_chunks:
+            try:
+                await focus_board.report(name, result.top_chunks)
+            except Exception as e:
+                logger.exception("[%s] focus_board.report failed: %s", name, e)
+        return result
 
     return await asyncio.gather(*[_one(n, a) for n, a in sources.items()])
 
@@ -406,8 +369,14 @@ class RetrieveAgent(BaseAgent):
         logger.info("RetrieveAgent: %d focuses produced", len(focuses))
 
         # 2. Dispatch（每源超时独立走 SourceAgent.cfg.source_timeout_s）
+        # P4: 实例化 FocusBoard，跨源共享 focus 满足状态（plan_eval focus-aware 与早停依赖）
+        focus_board = FocusBoard.from_focuses(focuses, quota=self.config.focus_quota)
         dispatch_started = time.perf_counter()
-        per_source = await _dispatch_sources(self.sources, focuses)
+        per_source = await _dispatch_sources(self.sources, focuses, focus_board=focus_board)
+        # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
+        for fid in focus_board.unsatisfied_focus_ids():
+            focus_board.mark_terminal(fid, status="noise_only")
+        logger.info("FocusBoard final: %s", focus_board.snapshot())
         logger.info(
             "TIMING retrieve.dispatch sources=%d ms=%.1f",
             len(self.sources),
@@ -423,41 +392,48 @@ class RetrieveAgent(BaseAgent):
             (time.perf_counter() - merge_started) * 1000.0,
         )
 
-        # 3b. EvalLayer（deep_dive 模式）：LLM 最终分配，覆盖 focus & query
-        if self.config.eval_layer_active and merged:
-            try:
-                eval_started = time.perf_counter()
-                layer = build_eval_layer(self.config.eval_layer_effective_mode)
-                before = len(merged)
-                n_sources = len([r for r in per_source if r.top_chunks])
-                eval_top_k = len(focuses) * max(n_sources, 1) * 3
-                merged = layer.rank(merged, focuses, top_k=eval_top_k)
-                logger.info(
-                    "RetrieveAgent: eval_layer mode=%s %d→%d chunks (top_k=%d = %d focuses × %d sources × 3)",
-                    self.config.eval_layer_effective_mode, before, len(merged),
-                    eval_top_k, len(focuses), max(n_sources, 1),
-                )
-                logger.info(
-                    "TIMING retrieve.eval_layer before=%d after=%d ms=%.1f",
-                    before,
-                    len(merged),
-                    (time.perf_counter() - eval_started) * 1000.0,
-                )
-            except Exception as e:
-                logger.exception("eval_layer failed, fallback to merged: %s", e)
+        # 3b. 装填器（P3）：同角度降级 + 轮转配额 + 可选 LLM eval_layer + schema 回填
+        assemble_started = time.perf_counter()
+        final_top_k = self.config.final_top_k(len(focuses))
+        focus_quota = self.config.focus_quota
 
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+        # LLM 触发：deep_dive 总是开；lite/balanced 仅在 candidates > final_top_k 时开
+        llm_cfg = LlmAssemblerConfig(
+            enabled=bool(merged),
+            timeout_s=self.config.eval_layer_llm_timeout_s,
+            content_preview_chars=200,
+            trigger_only_when_overflow=not self.config.eval_layer_active,
+        )
 
-        render_started = time.perf_counter()
-        payload = _render_for_answer(query, merged, per_source, focuses, elapsed_ms)
-        logger.info(
-            "TIMING retrieve.render chunks=%d ms=%.1f",
-            len(payload.get("chunks") or []),
-            (time.perf_counter() - render_started) * 1000.0,
+        async def _llm_invoker(prompt_text: str) -> Dict:
+            agent = build_final_assembler_agent()
+            return await asyncio.wait_for(
+                _run_llm_agent(agent, prompt_text),
+                timeout=llm_cfg.timeout_s,
+            )
+
+        selected = await assemble_final_chunks(
+            chunks=merged,
+            focuses=focuses,
+            final_top_k=final_top_k,
+            focus_quota=focus_quota,
+            preset=self.config.preset,
+            query=query,
+            llm_config=llm_cfg,
+            llm_invoker=_llm_invoker,
         )
         logger.info(
-            "RetrieveAgent: done in %dms, merged=%d chunks, source_stats=%s",
-            elapsed_ms, len(merged), payload["source_stats"],
+            "TIMING retrieve.assemble candidates=%d picked=%d cap=%d ms=%.1f",
+            len(merged), len(selected), final_top_k,
+            (time.perf_counter() - assemble_started) * 1000.0,
+        )
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _log_observation(merged, per_source, focuses, elapsed_ms)
+        payload = render_final_payload(query, selected, focuses)
+        logger.info(
+            "RetrieveAgent: done in %dms, picked=%d / merged=%d (cap=%d)",
+            elapsed_ms, len(selected), len(merged), final_top_k,
         )
 
         yield self._make_event(ctx, payload)

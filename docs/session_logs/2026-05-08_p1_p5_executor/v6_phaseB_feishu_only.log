@@ -1,0 +1,225 @@
+2026-05-08 19:09:09,650 INFO p1p5_e2e: ==========================================================================================
+2026-05-08 19:09:09,650 INFO p1p5_e2e: [run] preset=balanced Q50 sources=['feishu']
+2026-05-08 19:09:12,287 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:14,133 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent "HTTP/1.1 200 OK"
+2026-05-08 19:09:14,135 INFO tools.core.query_planner: QueryPlan: focuses_total=3
+2026-05-08 19:09:14,135 INFO tools.core.query_planner:   [focus_0] targets=['feishu'] text=redmagic 2025年度净销售额（原货币及USD）的统计数据
+2026-05-08 19:09:14,135 INFO tools.core.query_planner:   [focus_1] targets=['feishu'] text=redmagic 2025年度订单数与客单价(USD)的运营指标
+2026-05-08 19:09:14,135 INFO tools.core.query_planner:   [focus_2] targets=['feishu'] text=redmagic 2025年度访客数、加购数及转化率的流量表现
+2026-05-08 19:09:14,136 INFO p1p5_e2e: [balanced/Q50] 3 focuses produced
+2026-05-08 19:09:14,188 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:09:14,189 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:15,754 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:09:15,756 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_0 mode=structured before=1 after=1 qtypes=['structured'] queries=['redmagic 销售数据']
+2026-05-08 19:09:15,757 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_1 mode=structured before=1 after=1 qtypes=['structured'] queries=['redmagic 运营指标']
+2026-05-08 19:09:15,758 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_2 mode=unknown before=1 after=1 qtypes=['structured'] queries=['redmagic 转化率表现']
+2026-05-08 19:09:15,758 INFO agents.source_agent_base: [feishu] plan produced 3 sub_queries
+2026-05-08 19:09:16,848 INFO tools.feishu.feishu_retrieve: _simplify_feishu_query: 'redmagic 运营指标' → 'redmagic' (brand only)
+2026-05-08 19:09:16,848 INFO tools.feishu.feishu_retrieve: feishu_retrieve: ZERO results, retry with simplified 'redmagic'
+2026-05-08 19:09:16,994 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_2:sq3 raw=1 selected=1 ms=1229.3
+2026-05-08 19:09:17,250 WARNING feishu_read_tool.client: batch_query failed with status 400: {"code":99992402,"msg":"field validation failed","error":{"log_id":"202605081909177FD47034E12826A0D5F0","troubleshooter":"排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=202605081909177FD47034E12826A0D5F0&code=99992402&method_id=7090001410158460956","field_violations":[{"field":"request_docs[*].doc_token","description":"request_docs[*].doc_token is required"},{"field":"request_docs[*].doc_type","description":"request_docs[*].doc_type is required"}]}}
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate KAG1dpWVBozx (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate DoGSdUyRdoAh (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MSrJdih3HoJT (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate NswbdLQVloe4 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Kmr6dBUyloIH (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate DQ2rd6Mt2oBa (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MVY3dpcVoo8Z (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate VTcidjiKloZm (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate FS47dJBznoIp (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate ANU2dxaOJoA9 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate JIdXdbmNjoKF (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate KPU9dhe6Goy3 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,251 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Eu9TdR62fodk (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:17,567 INFO tools.feishu.feishu_retrieve: feishu_retrieve: doc candidate selection sub_query_id=feishu:focus_0:sq1 query_type=structured raw=20 selected=4 threshold=0.33 min_keep=3 top_k=4
+2026-05-08 19:09:17,567 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_0:sq1 raw=20 selected=4 ms=1802.9
+2026-05-08 19:09:17,922 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=YtxnbDNYiaurdDsO count=1 ms=354.5 cache=miss
+2026-05-08 19:09:17,922 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=YtxnbDNYiaurdDsO count=1 ms=354.7 cache=pool
+2026-05-08 19:09:17,922 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_2:sq3 raw=1 children_total=1 selected_parents=1 ms=2157.0
+2026-05-08 19:09:17,922 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_2:sq3 doc=1 table=1 ms=2158.4
+2026-05-08 19:09:18,029 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=YtxnbDNYiaurdDsO count=1 ms=0.0 cache=hit
+2026-05-08 19:09:18,029 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=YtxnbDNYiaurdDsO count=1 ms=0.3 cache=pool
+2026-05-08 19:09:18,473 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=G8O6sN9hYhUfGit9 count=8 ms=443.9 cache=miss
+2026-05-08 19:09:18,473 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=G8O6sN9hYhUfGit9 count=8 ms=444.1 cache=pool
+2026-05-08 19:09:18,528 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=Mt54briZcaKQEFsO count=2 ms=498.4 cache=miss
+2026-05-08 19:09:18,528 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=Mt54briZcaKQEFsO count=2 ms=498.5 cache=pool
+2026-05-08 19:09:18,533 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=TqcHb1VXiamm4jso count=3 ms=504.4 cache=miss
+2026-05-08 19:09:18,533 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=TqcHb1VXiamm4jso count=3 ms=504.5 cache=pool
+2026-05-08 19:09:18,533 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=TqcHb1VXiamm4jso count=3 ms=500.5 cache=inflight
+2026-05-08 19:09:18,533 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=TqcHb1VXiamm4jso count=3 ms=500.5 cache=pool
+2026-05-08 19:09:18,533 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_1:sq2 raw=1 children_total=3 selected_parents=1 ms=2768.5
+2026-05-08 19:09:18,536 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=S4swbS3G9a74nmsY count=2 ms=507.9 cache=miss
+2026-05-08 19:09:18,536 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=S4swbS3G9a74nmsY count=2 ms=507.9 cache=pool
+2026-05-08 19:09:18,558 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=DBySbm71IaZ8SYsd count=1 ms=529.1 cache=miss
+2026-05-08 19:09:18,558 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=DBySbm71IaZ8SYsd count=1 ms=529.2 cache=pool
+2026-05-08 19:09:18,859 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_0:sq1 raw=6 children_total=17 selected_parents=4 ms=3094.8
+2026-05-08 19:09:18,860 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_0:sq1 doc=4 table=4 ms=3096.2
+2026-05-08 19:09:19,176 WARNING feishu_read_tool.client: batch_query failed with status 400: {"code":99992402,"msg":"field validation failed","error":{"log_id":"202605081909195F2391E202698FA49561","troubleshooter":"排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=202605081909195F2391E202698FA49561&code=99992402&method_id=7090001410158460956","field_violations":[{"field":"request_docs[*].doc_token","description":"request_docs[*].doc_token is required"},{"field":"request_docs[*].doc_type","description":"request_docs[*].doc_type is required"}]}}
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate SZHOdG8qtooe (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MdXLd0wC2o2z (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate UQzAdGpnYozg (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate XWQ6dZTfqoEy (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Lma7dPZ9eoTN (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate XgcRdL0HjoHa (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate YTVWdRZMTolK (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate SnJmdZrQJogs (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate UFU1dX7lFonc (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,177 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate YHgNdDVrbonA (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:09:19,508 INFO tools.feishu.feishu_retrieve: feishu_retrieve: doc candidate selection sub_query_id=feishu:focus_1:sq2 query_type=structured raw=20 selected=4 threshold=0.33 min_keep=3 top_k=4
+2026-05-08 19:09:19,509 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_1:sq2 raw=20 selected=4 ms=3743.8
+2026-05-08 19:09:19,509 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_1:sq2 doc=4 table=1 ms=3745.4
+2026-05-08 19:09:19,509 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_prepare_search sub_queries=3 ms=3751.6
+2026-05-08 19:09:19,509 INFO agents.feishu.feishu_source_agent: [feishu] doc route_hint block=3 mcp=6 total=9
+2026-05-08 19:09:19,510 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.submit selected=9 new_block=3 new_mcp=6 ms=0.2
+2026-05-08 19:09:19,510 INFO agents.feishu.feishu_source_agent: TIMING feishu.submit_doc docs=9 preset=balanced ms=3752.0
+2026-05-08 19:09:19,516 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_prepare docs=9 tables=6 ms=3758.1
+2026-05-08 19:09:19,527 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:09:19,528 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:09:19,533 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:09:19,533 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:09:19,536 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:09:19,536 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:09:21,236 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:09:21,347 INFO tools.feishu.feishu_doc_pool: DocPool: mcp done RS2Vw4u1EiQTVikF → 1 chunks
+2026-05-08 19:09:21,347 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_mcp doc=RS2Vw4u1EiQTVikF chunks=1 ms=1808.3
+2026-05-08 19:09:21,452 INFO tools.feishu.feishu_doc_pool: DocPool: mcp done O5vHdtmCqoA2Huxv → 9 chunks
+2026-05-08 19:09:21,452 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_mcp doc=O5vHdtmCqoA2Huxv chunks=9 ms=1916.2
+2026-05-08 19:09:21,541 INFO tools.feishu.feishu_doc_pool: DocPool: mcp done WOkxwSxBPivP2SkK → 13 chunks
+2026-05-08 19:09:21,543 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_mcp doc=WOkxwSxBPivP2SkK chunks=13 ms=2003.4
+2026-05-08 19:09:21,547 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry VVCWdqIkiolNvVx6 (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:09:21,582 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry JiYTdYpm1orJMNxf (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:09:21,721 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry XT7VdRC8Fofv7sxG (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:09:22,517 INFO feishu_read_tool.chunker: chunker v2: 18 chunks from 15 pre-chunks (doc FyvEdDv2soq1asxjfTGcMzGsnTd)
+2026-05-08 19:09:22,518 INFO feishu_read_tool.docx_pipeline: Stage 4: built 19 chunks total (before merge: 19)
+2026-05-08 19:09:22,518 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 19 chunks directly
+2026-05-08 19:09:22,518 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 19 scored chunks, returning to caller for budget decisions
+2026-05-08 19:09:22,518 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done FyvEdDv2soq1asxj → 19 chunks
+2026-05-08 19:09:22,518 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=FyvEdDv2soq1asxj chunks=19 ms=2984.6
+2026-05-08 19:09:22,612 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=G8O6sN9hYhUfGit9 type=SHEET chunks=2 ms=3089.2
+2026-05-08 19:09:22,913 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=DBySbm71IaZ8SYsd type=BITABLE chunks=1 ms=3390.3
+2026-05-08 19:09:22,964 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=YtxnbDNYiaurdDsO type=BITABLE chunks=1 ms=3441.9
+2026-05-08 19:09:22,964 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_2:sq3 parents=1 chunks=1 ms=3441.8
+2026-05-08 19:09:23,039 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=Mt54briZcaKQEFsO type=BITABLE chunks=2 ms=3516.9
+2026-05-08 19:09:23,357 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:09:23,434 INFO tools.feishu.feishu_doc_pool: DocPool: mcp done XT7VdRC8Fofv7sxG → 13 chunks
+2026-05-08 19:09:23,434 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_mcp doc=XT7VdRC8Fofv7sxG chunks=13 ms=3896.0
+2026-05-08 19:09:23,650 INFO feishu_read_tool.chunker: chunker v2: 4 chunks from 1 pre-chunks (doc Pvr8dCeujoRMpTxJjCjcK9HinQb)
+2026-05-08 19:09:23,650 INFO feishu_read_tool.chunker: post-merge: 23 → 18 chunks (merged 5)
+2026-05-08 19:09:23,650 INFO feishu_read_tool.docx_pipeline: Stage 4: built 18 chunks total (before merge: 23)
+2026-05-08 19:09:23,650 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 18 chunks directly
+2026-05-08 19:09:23,650 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 18 scored chunks, returning to caller for budget decisions
+2026-05-08 19:09:23,651 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done Pvr8dCeujoRMpTxJ → 18 chunks
+2026-05-08 19:09:23,651 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=Pvr8dCeujoRMpTxJ chunks=18 ms=4123.7
+2026-05-08 19:09:23,679 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=TqcHb1VXiamm4jso type=BITABLE chunks=2 ms=4157.0
+2026-05-08 19:09:23,679 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_1:sq2 parents=1 chunks=2 ms=4156.8
+2026-05-08 19:09:23,752 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed VVCWdqIkiolNvVx6: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/VVCWdqIkiolNvVx67zrcgLAznld/blocks/VVCWdqIkiolNvVx67zrcgLAznld/children, documentID=VVCWdqIkiolNvVx67zrcgLAznld
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:09:23,763 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=S4swbS3G9a74nmsY type=BITABLE chunks=2 ms=4240.1
+2026-05-08 19:09:23,763 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_0:sq1 parents=4 chunks=7 ms=4240.2
+2026-05-08 19:09:23,768 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:09:23,778 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 33 chunks from 3/4 docs (timeout=20.0s)
+2026-05-08 19:09:23,778 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=4 collected_docs=3 chunks=33 ms=4237.5
+2026-05-08 19:09:23,778 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_1:sq2 docs=4 chunks=33 ms=4255.2
+2026-05-08 19:09:24,011 INFO feishu_read_tool.chunker: chunker v2: 4 chunks from 1 pre-chunks (doc CULPd3cY8okCRtxBSEgcMluInrb)
+2026-05-08 19:09:24,012 INFO feishu_read_tool.chunker: post-merge: 23 → 18 chunks (merged 5)
+2026-05-08 19:09:24,012 INFO feishu_read_tool.docx_pipeline: Stage 4: built 18 chunks total (before merge: 23)
+2026-05-08 19:09:24,012 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 18 chunks directly
+2026-05-08 19:09:24,012 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 18 scored chunks, returning to caller for budget decisions
+2026-05-08 19:09:24,337 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='redmagic 运营指标' input=33 selected=8 ms=559.4
+2026-05-08 19:09:24,337 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_1:sq2 raw=33 selected=8 ms=0
+2026-05-08 19:09:24,337 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_1:sq2 doc=8 table=2 total=10 ms=4814.9
+2026-05-08 19:09:24,338 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed JiYTdYpm1orJMNxf: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/JiYTdYpm1orJMNxfJWEc2ZBinnd/blocks/JiYTdYpm1orJMNxfJWEc2ZBinnd/children, documentID=JiYTdYpm1orJMNxfJWEc2ZBinnd
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done CULPd3cY8okCRtxB → 18 chunks
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=CULPd3cY8okCRtxB chunks=18 ms=4813.2
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 40 chunks from 3/4 docs (timeout=20.0s)
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=4 collected_docs=3 chunks=40 ms=4797.6
+2026-05-08 19:09:24,338 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_0:sq1 docs=4 chunks=40 ms=4815.3
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 18 chunks from 1/1 docs (timeout=20.0s)
+2026-05-08 19:09:24,338 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=1 collected_docs=1 chunks=18 ms=4797.6
+2026-05-08 19:09:24,338 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_2:sq3 docs=1 chunks=18 ms=4815.3
+2026-05-08 19:09:24,840 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='redmagic 销售数据' input=40 selected=8 ms=501.7
+2026-05-08 19:09:24,840 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_0:sq1 raw=40 selected=8 ms=0
+2026-05-08 19:09:24,840 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_0:sq1 doc=8 table=7 total=15 ms=5317.4
+2026-05-08 19:09:25,497 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='redmagic 转化率表现' input=18 selected=8 ms=656.6
+2026-05-08 19:09:25,497 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_2:sq3 raw=18 selected=8 ms=0
+2026-05-08 19:09:25,497 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_2:sq3 doc=8 table=1 total=9 ms=5974.6
+2026-05-08 19:09:25,498 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_total sub_queries=3 chunk_pool=34 ms=9740.1
+2026-05-08 19:09:25,556 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:09:25,557 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:09:27,967 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:09:27,967 INFO agents.source_agent_base: TIMING source.eval_only source=feishu input_chunks=34 selected=5 ms=2469.6
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi summary total=6 submitted=6 final_selected=0 wasted=6 skipped=0 read_ms=21835.3 read_chunks=10
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=S4swbS3G9a74nmsY title='Monthly meeting to do follow up' doc_type=BITABLE score=0.416 rank=1 selected_child_count=2 structure_child_count=2 child_ratio=1.000 read_ms=4240.1 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=TqcHb1VXiamm4jso title='用户使用日志' doc_type=BITABLE score=1.000 rank=1 selected_child_count=2 structure_child_count=3 child_ratio=0.667 read_ms=4157.0 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_1'] sub_query_ids=['feishu:focus_1:sq2']
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=Mt54briZcaKQEFsO title='Track & Ship' doc_type=BITABLE score=0.472 rank=4 selected_child_count=2 structure_child_count=2 child_ratio=1.000 read_ms=3516.9 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=YtxnbDNYiaurdDsO title='用户使用日志 2.0' doc_type=BITABLE score=1.000 rank=1 selected_child_count=1 structure_child_count=1 child_ratio=1.000 read_ms=3441.9 read_chunks=1 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_2'] sub_query_ids=['feishu:focus_2:sq3']
+2026-05-08 19:09:27,967 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=DBySbm71IaZ8SYsd title='metabase 看板清单' doc_type=BITABLE score=0.427 rank=5 selected_child_count=1 structure_child_count=1 child_ratio=1.000 read_ms=3390.3 read_chunks=1 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:09:27,968 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=G8O6sN9hYhUfGit9 title='RM-11pro新品checklist-25-11-07' doc_type=SHEET score=0.425 rank=6 selected_child_count=2 structure_child_count=8 child_ratio=0.250 read_ms=3089.2 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:09:27,968 INFO agents.source_agent_base: [feishu] done: loops=1/1 (min=1), top_chunks=5, elapsed=13.83s
+2026-05-08 19:09:27,968 INFO tools.core.focus_board: FocusBoard: focus_0 SATISFIED by feishu (critical=2 important=0 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:09:27,968 INFO tools.core.focus_board: FocusBoard: focus_1 SATISFIED by feishu (critical=2 important=1 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:09:27,968 INFO tools.core.focus_board: FocusBoard: focus_2 SATISFIED by feishu (critical=2 important=0 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:09:27,969 INFO tools.core.final_assembler: assemble_final_chunks: rule path picked=5 / candidates=5 / cap=12
+2026-05-08 19:09:27,969 INFO p1p5_e2e: [done] preset=balanced Q50 elapsed=17.19s emitted=5 merged=5 C/I/N=4/1/0 err=-
+2026-05-08 19:09:27,969 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.json
+2026-05-08 19:09:27,969 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.md
+
+# P1-P5 Multi-Source E2E Report
+
+## balanced
+
+| Q | Latency | Focuses | TopK cap | Emitted | Merged | C/I/Noise | Sources | Max Angle Redundancy | Schema OK | Error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Q50 | 17.19s | 3 | 12 | 5 | 5 | 4/1/0 | feishu:5 | 1 | ✅ | - |
+
+### Q50 focus_board
+```json
+{
+  "focus_0": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 0,
+    "noise": 0,
+    "contributors": [
+      "feishu"
+    ],
+    "targets": [
+      "feishu"
+    ]
+  },
+  "focus_1": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "feishu"
+    ],
+    "targets": [
+      "feishu"
+    ]
+  },
+  "focus_2": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 0,
+    "noise": 0,
+    "contributors": [
+      "feishu"
+    ],
+    "targets": [
+      "feishu"
+    ]
+  }
+}
+```
+angle_tag distribution: {'sales-performance': 1, 'regional-sales': 1, 'funnel-conversion': 1, 'product-conversion': 1, 'affiliate-metrics': 1}
+

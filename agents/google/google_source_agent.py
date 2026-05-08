@@ -533,13 +533,15 @@ class GoogleSourceAgent(SourceAgent):
     """Google SourceAgent（完整版，含 SheetPool 跨 sub_query 合并读取）。"""
 
     source = "google"
+    DEFAULT_EXECUTOR_WORKERS: int = 20      # google 并发 I/O 最重，给最多线程
 
-    def __init__(self, cfg: Optional[SourceAgentConfig] = None):
+    def __init__(self, cfg: Optional[SourceAgentConfig] = None, executor_workers: Optional[int] = None):
         cfg = cfg or SourceAgentConfig()
         profile = get_profile("google")
         super().__init__(
             profile=profile,
             cfg=cfg,
+            executor_workers=executor_workers,
         )
         # Pool 跨 run() 调用持久化
         self._sheet_pool = None  # lazy init
@@ -1078,11 +1080,11 @@ class GoogleSourceAgent(SourceAgent):
 
             # 5 路并发；任何单路异常不阻塞其他路（return_exceptions=True）
             phase_a_tasks = [
-                asyncio.to_thread(_drive_call, q_doc, self.cfg.google_doc_search_per_sq, order_by_param),
-                asyncio.to_thread(_drive_call, q_slide, self.cfg.google_slide_search_per_sq, order_by_param),
-                asyncio.to_thread(_drive_call, q_sheet, self.cfg.google_sheet_search_per_sq, order_by_param) if q_sheet else asyncio.sleep(0, result=[]),
-                asyncio.to_thread(_drive_call, q_sheet_sidecar, 3, order_by) if q_sheet_sidecar else asyncio.sleep(0, result=[]),
-                asyncio.to_thread(_gmail_call),
+                self._to_thread(_drive_call, q_doc, self.cfg.google_doc_search_per_sq, order_by_param),
+                self._to_thread(_drive_call, q_slide, self.cfg.google_slide_search_per_sq, order_by_param),
+                self._to_thread(_drive_call, q_sheet, self.cfg.google_sheet_search_per_sq, order_by_param) if q_sheet else asyncio.sleep(0, result=[]),
+                self._to_thread(_drive_call, q_sheet_sidecar, 3, order_by) if q_sheet_sidecar else asyncio.sleep(0, result=[]),
+                self._to_thread(_gmail_call),
             ]
             results = await asyncio.gather(*phase_a_tasks, return_exceptions=True)
 
@@ -1148,7 +1150,7 @@ class GoogleSourceAgent(SourceAgent):
                 ), self.cfg.google_sheet_search_per_sq))
             if fb1_specs:
                 fb1_results = await asyncio.gather(
-                    *[asyncio.to_thread(_drive_call, q, ps, order_by_param) for _, q, ps in fb1_specs],
+                    *[self._to_thread(_drive_call, q, ps, order_by_param) for _, q, ps in fb1_specs],
                     return_exceptions=True,
                 )
                 for (name, _, _), r in zip(fb1_specs, fb1_results):
@@ -1186,7 +1188,7 @@ class GoogleSourceAgent(SourceAgent):
                 ), self.cfg.google_sheet_search_per_sq))
             if fb2_specs:
                 fb2_results = await asyncio.gather(
-                    *[asyncio.to_thread(_drive_call, q, ps, order_by_param) for _, q, ps in fb2_specs],
+                    *[self._to_thread(_drive_call, q, ps, order_by_param) for _, q, ps in fb2_specs],
                     return_exceptions=True,
                 )
                 for (name, _, _), r in zip(fb2_specs, fb2_results):
@@ -1213,7 +1215,7 @@ class GoogleSourceAgent(SourceAgent):
                     mime_types=broad_mimes, max_groups=1,
                 )
                 try:
-                    broad_files = await asyncio.to_thread(
+                    broad_files = await self._to_thread(
                         _drive_call, broad_q, 20, order_by_param,
                     ) or []
                     seen_ids = {f.get("id") for f in (files_doc + files_slide + files_sheet) if f.get("id")}
@@ -1234,7 +1236,7 @@ class GoogleSourceAgent(SourceAgent):
             # Slide title-biased fallback（slide 仍空才触发）
             if len(files_slide) == 0 and keyword_groups:
                 try:
-                    files_slide = await asyncio.to_thread(
+                    files_slide = await self._to_thread(
                         _drive_call,
                         _build_search_q(
                             sq.query, keyword_groups=_title_keyword_groups(), enable_fulltext=False,
@@ -1248,7 +1250,7 @@ class GoogleSourceAgent(SourceAgent):
                     logger.warning("[google] fallback title slide search failed for sq=%s: %s", sq.sub_query_id, e)
             if len(files_slide) == 0:
                 try:
-                    files_slide = await asyncio.to_thread(
+                    files_slide = await self._to_thread(
                         _drive_call,
                         _build_search_q(
                             sq.query, keyword_groups=None, enable_fulltext=False,
@@ -2358,7 +2360,7 @@ class GoogleSourceAgent(SourceAgent):
                 rerank_input = uc_list
                 if len(rerank_input) > 120:
                     rerank_input = _query_aware_truncate(rerank_input, sq.query, 120)
-                selected = await asyncio.to_thread(
+                selected = await self._to_thread(
                     _select_chunks_for_sub_query,
                     query=sq.query,
                     focus_text=focus_text_map.get(sq.sub_query_id, sq.query),

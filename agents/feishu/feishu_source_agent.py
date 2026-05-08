@@ -601,6 +601,8 @@ class FeishuSourceAgent(SourceAgent):
 
     source = "feishu"
 
+    DEFAULT_EXECUTOR_WORKERS: int = 16
+
     def __init__(
         self,
         cfg: Optional[SourceAgentConfig] = None,
@@ -609,17 +611,23 @@ class FeishuSourceAgent(SourceAgent):
         doc_pool: Optional[object] = None,
         table_pool: Optional[object] = None,
         preset: str = "balanced",
+        executor_workers: Optional[int] = None,
     ):
         cfg = cfg or SourceAgentConfig()
         profile = get_profile("feishu")
         super().__init__(
-            profile=profile, cfg=cfg,
+            profile=profile, cfg=cfg, executor_workers=executor_workers,
         )
         self._uat = uat
         self._default_query_type = default_query_type
         self._doc_pool = doc_pool
         self._table_pool = table_pool
         self._preset = preset
+        # 把源专属 executor 注入给 doc_pool / table_pool（如果有 _executor 字段）
+        for pool in (doc_pool, table_pool):
+            if pool is not None and hasattr(pool, "_executor"):
+                if pool._executor is None:
+                    pool._executor = self._executor
 
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         from .feishu_retrieve_llm_build import build_feishu_plan_only_agent
@@ -780,7 +788,7 @@ class FeishuSourceAgent(SourceAgent):
                 # 个人极速通道：走专用的纯 MCP 搜索，并强制 route_hint="mcp"
                 try:
                     from feishu_read_tool.search import search_feishu_mcp_pure
-                    raw_result = await asyncio.to_thread(
+                    raw_result = await self._to_thread(
                         search_feishu_mcp_pure,
                         query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
                         owner_ids=owner_ids, sort_rule="EDIT_TIME"
@@ -804,6 +812,7 @@ class FeishuSourceAgent(SourceAgent):
                     sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
                     query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
                     sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
+                    executor=self._executor,
                 )
                 table_task: asyncio.Task = None
                 if qt == "structured":
@@ -813,6 +822,7 @@ class FeishuSourceAgent(SourceAgent):
                         sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
                         direct_limit=3 if self._preset in ("lite", "balanced") else 6,
                         wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
+                        executor=self._executor,
                     )
 
                 if table_task is not None:
@@ -889,9 +899,9 @@ class FeishuSourceAgent(SourceAgent):
                 rd_started = time.perf_counter()
                 try:
                     if doc_type == "SHEET":
-                        chunks = await asyncio.to_thread(read_sheets, rq, [cand], self._uat)
+                        chunks = await self._to_thread(read_sheets, rq, [cand], self._uat)
                     elif doc_type == "BITABLE":
-                        chunks = await asyncio.to_thread(read_bitables, rq, [cand], self._uat)
+                        chunks = await self._to_thread(read_bitables, rq, [cand], self._uat)
                     else:
                         chunks = []
                     read_ms = _elapsed_ms(rd_started)
@@ -1070,7 +1080,7 @@ class FeishuSourceAgent(SourceAgent):
             try:
                 if qt == "personal_recent":
                     from feishu_read_tool.search import search_feishu_mcp_pure
-                    raw_result = await asyncio.to_thread(
+                    raw_result = await self._to_thread(
                         search_feishu_mcp_pure,
                         query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
                         owner_ids=owner_ids, sort_rule="EDIT_TIME"
@@ -1078,7 +1088,7 @@ class FeishuSourceAgent(SourceAgent):
                     raw = raw_result.get("items", [])
                 else:
                     from feishu_read_tool.search import search_feishu_docs
-                    result = await asyncio.to_thread(
+                    result = await self._to_thread(
                         search_feishu_docs, query=sq.query, count=20,
                         uat=self._uat, time_filter=sq.time_filter, owner_ids=owner_ids
                     )
@@ -1092,7 +1102,7 @@ class FeishuSourceAgent(SourceAgent):
                         except Exception:
                             pass
                         if simplified:
-                            r2 = await asyncio.to_thread(
+                            r2 = await self._to_thread(
                                 search_feishu_docs, query=simplified, count=20, uat=self._uat,
                                 owner_ids=owner_ids
                             )

@@ -11,9 +11,12 @@
 """
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import logging
 import time
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from feishu_read_tool.pipeline_models import Chunk, PipelineConfig
 
@@ -25,6 +28,9 @@ logger = logging.getLogger(__name__)
 # ── 路由参数 ─────────────────────────────────────────────────────
 
 BLOCK_API_CONCURRENCY = 4  # 提升并发，减少排队等待（原为3）
+MCP_CONCURRENCY = 6        # 飞书 MCP 接口 QPS 上限（避免 NETWORK:5002 频控）
+MCP_RETRY_BACKOFF_S = 0.8  # MCP 失败重试 1 次时的 backoff
+MCP_MAX_ATTEMPTS = 2       # 初次 + 1 次重试 = 共 2 次
 
 
 def _elapsed_ms(start: float) -> float:
@@ -44,9 +50,16 @@ class FeishuDocPool:
       Block API 全局并发 semaphore 仍在 pool 级共享（缓存决定语义不受 query_type 影响）
     """
 
-    def __init__(self, uat: str, query_type: str = "structured"):
+    def __init__(
+        self,
+        uat: str,
+        query_type: str = "structured",
+        executor: Optional[concurrent.futures.Executor] = None,
+    ):
         self.uat = uat
         self.default_query_type = query_type
+        # 注入的源专属线程池；None 时走 asyncio 默认全局池（向后兼容）
+        self._executor = executor
 
         # 共享缓存: doc_id → List[Chunk]
         self._doc_chunks: Dict[str, List[Chunk]] = {}
@@ -62,10 +75,24 @@ class FeishuDocPool:
         self._lock = asyncio.Lock()
         # Block API 全局并发控制（跨所有 sub_query 共享，防止 99991400 限频）
         self._block_api_sem = asyncio.Semaphore(BLOCK_API_CONCURRENCY)
+        # MCP 全局并发控制（QPS=6，防止 NETWORK:5002 request trigger frequency limit）
+        self._mcp_sem = asyncio.Semaphore(MCP_CONCURRENCY)
         # doc 完成通知 (渐进式：一篇完成立即通知等待的 task)
         self._doc_ready_events: Dict[str, asyncio.Event] = {}
         # doc_id → 第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM 提取）
         self._doc_query: Dict[str, str] = {}
+
+    async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """走注入 executor 的 to_thread；executor=None 时退回 asyncio 默认。
+
+        与 ``asyncio.to_thread`` 同义：保留 contextvars 传播。
+        """
+        if self._executor is None:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
+        func_call = functools.partial(ctx.run, fn, *args, **kwargs)
+        return await loop.run_in_executor(self._executor, func_call)
 
     def _get_doc_id(self, candidate: dict) -> str:
         return candidate.get("id", candidate.get("document_id", candidate.get("doc_id", "")))
@@ -295,7 +322,7 @@ class FeishuDocPool:
                     try:
                         # run_rag_pipeline 是同步的，放线程池
                         # 传真实 sub_query（用于 Stage 4 大表 LLM 提取），跳过 Stage 2+5 评分
-                        rag = await asyncio.to_thread(
+                        rag = await self._to_thread(
                             run_rag_pipeline,
                             query=self._doc_query.get(doc_id, ""),
                             candidates=[doc],
@@ -358,14 +385,20 @@ class FeishuDocPool:
         async def _read_one(doc: dict):
             doc_id = doc["id"]
             doc_started = time.perf_counter()
-            for attempt in range(3):
+            # MCP_MAX_ATTEMPTS = 2 → 初次 + 1 次重试；每次都过 QPS 信号量
+            for attempt in range(MCP_MAX_ATTEMPTS):
                 try:
-                    result = await asyncio.to_thread(
-                        fetch_doc_markdown, doc_id, self.uat, 300000,
-                    )
+                    async with self._mcp_sem:
+                        result = await self._to_thread(
+                            fetch_doc_markdown, doc_id, self.uat, 300000,
+                        )
                     if result["status"] != "success":
-                        if attempt < 2:
-                            await asyncio.sleep(0.3 * (attempt + 1))
+                        if attempt < MCP_MAX_ATTEMPTS - 1:
+                            logger.info(
+                                "DocPool: mcp retry %s (attempt=%d) reason=%s",
+                                doc_id[:16], attempt + 1, result.get("message", "")[:80],
+                            )
+                            await asyncio.sleep(MCP_RETRY_BACKOFF_S)
                             continue
                         logger.warning("DocPool: mcp failed %s: %s", doc_id[:16], result.get("message"))
                         self._doc_chunks[doc_id] = []
@@ -388,10 +421,17 @@ class FeishuDocPool:
                     )
                     break
                 except Exception as e:
-                    if attempt < 2:
-                        await asyncio.sleep(0.3 * (attempt + 1))
+                    if attempt < MCP_MAX_ATTEMPTS - 1:
+                        logger.info(
+                            "DocPool: mcp retry %s (attempt=%d) exc=%s",
+                            doc_id[:16], attempt + 1, type(e).__name__,
+                        )
+                        await asyncio.sleep(MCP_RETRY_BACKOFF_S)
                         continue
-                    logger.warning("DocPool: mcp failed %s after 3 retries: %s", doc_id[:16], e)
+                    logger.warning(
+                        "DocPool: mcp failed %s after %d attempts: %s",
+                        doc_id[:16], MCP_MAX_ATTEMPTS, e,
+                    )
                     self._doc_chunks[doc_id] = []
 
             self._done.add(doc_id)

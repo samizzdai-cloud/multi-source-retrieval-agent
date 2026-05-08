@@ -453,3 +453,41 @@ DEFAULT_FIELDS = (
 1. **PPTX `per_file_timeout_s=9.0`**：balanced 几乎每次有 1 个 PPTX 卡满 9s。降到 8s 节省 1s 但风险丢 9.x s 才完成的 chunks。当前**保留**作为安全网。
 2. **Phase E sheet `Ou0jy0DY` 持续 0 chunks**：tab 选择器（`select_sheets_for_sub_query`）选了不存在的 tab title，batchGet 空响应。**遗留质量问题**，与 prefilter / dedup 无关。
 3. **Q4 critical 抖动 0-3**：plan_only LLM 在 sub_query 文本上有非确定性，下游召回 + Qwen rerank 串联放大。需在 plan 层做 cache 或锚定。
+---
+
+## 13. v2.9 每源独立线程池接入（2026-05-08）
+
+> 配合 `spec_plan.md §23` 的 v4.0 架构跃迁，Google Agent 同步迁移到源专属
+> ThreadPoolExecutor。验证日志 `docs/session_logs/2026-05-08_p1_p5_executor/`。
+
+### 13.1 改动要点
+
+`agents/google/google_source_agent.py`：
+
+```python
+class GoogleSourceAgent(SourceAgent):
+    DEFAULT_EXECUTOR_WORKERS: int = 20      # google 5 路并发 × N sub_query，最重
+
+    def __init__(self, cfg=None, executor_workers=None):
+        super().__init__(profile=..., cfg=cfg, executor_workers=executor_workers)
+```
+
+11 处 `await asyncio.to_thread(...)` → `await self._to_thread(...)`，覆盖 Phase A 5 路
+Drive search、fallback search、Phase E 文件下载等所有 IO 提交点。
+
+### 13.2 收益
+
+- Phase A `search_one`：`asyncio.gather(...)` 内部 5 路 to_thread 不再受全局 12-worker
+  默认池压制，多源场景下 search_one 不再"同毫秒批量释放"
+- Phase E read+wait：跨 sub_query 的文件下载共享 google 专属 20 worker，避免与 feishu
+  doc_pool block_api / mcp 混在同一全局池
+- 多源（bailian+feishu+google）协同 Q50/balanced 从 28.93s → 27.92s + emit 5→10
+
+### 13.3 后续候选
+
+- Phase E type_pool（doc/slide/sheet/gmail/nonnative）当前用独立 ThreadPoolExecutor
+  做 worker 隔离；与源专属池并存。后续可考虑把 type_pool 也下沉到 source._executor
+  下作为子池，进一步统一资源管理。
+- `google_workspace_tool/drive_profile_generator.py` 当前在生产路径无活跃调用，故未
+  接入 executor 注入。若未来加入热路径，应同步改造。
+

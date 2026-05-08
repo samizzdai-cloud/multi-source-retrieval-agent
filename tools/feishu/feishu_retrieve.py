@@ -17,12 +17,33 @@
 """
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import logging
 import os
 from collections import defaultdict
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+
+async def _exec_to_thread(
+    executor: Optional[concurrent.futures.Executor],
+    fn: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """模块级 to_thread helper：executor=None 走默认池，否则走源专属池。
+
+    保留 contextvars 传播以匹配 ``asyncio.to_thread`` 语义。
+    """
+    if executor is None:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    loop = asyncio.get_event_loop()
+    ctx = contextvars.copy_context()
+    func_call = functools.partial(ctx.run, fn, *args, **kwargs)
+    return await loop.run_in_executor(executor, func_call)
 
 from dotenv import load_dotenv
 
@@ -703,6 +724,7 @@ async def search_and_select_feishu_doc_candidates(
     focus_text: str = "",
     sub_query_id: str = "",
     owner_ids: Optional[List[str]] = None,
+    executor: Optional[concurrent.futures.Executor] = None,
 ) -> List[dict]:
     """执行 Feishu doc 搜索并返回当前 sub_query 选中的候选文档。
 
@@ -710,13 +732,16 @@ async def search_and_select_feishu_doc_candidates(
     1. 原 query 直接搜索
     2. 零结果 → _simplify_feishu_query 简化重试
     3. 仍零结果 → _try_brand_case_variant 品牌变体 fallback
+
+    ``executor``: 源专属线程池；None 时走 asyncio 默认（向后兼容）。
     """
     started = time.perf_counter()
     query_type = _normalize_query_type(query_type)
     try:
         # Step 1: 原 query 直接搜索（不做品牌变体并发）
-        doc_result = await asyncio.to_thread(
-            search_feishu_docs, query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+        doc_result = await _exec_to_thread(
+            executor, search_feishu_docs,
+            query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
         )
         doc_candidates = doc_result.get("items", [])
 
@@ -725,8 +750,9 @@ async def search_and_select_feishu_doc_candidates(
             simplified = _simplify_feishu_query(query)
             if simplified:
                 logger.info("feishu_retrieve: ZERO results, retry with simplified '%s'", simplified)
-                retry_result = await asyncio.to_thread(
-                    search_feishu_docs, query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                retry_result = await _exec_to_thread(
+                    executor, search_feishu_docs,
+                    query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
                 )
                 doc_candidates = retry_result.get("items", [])
 
@@ -735,8 +761,9 @@ async def search_and_select_feishu_doc_candidates(
             variant = _try_brand_case_variant(query)
             if variant:
                 logger.info("feishu_retrieve: still ZERO, try brand variant '%s'", variant)
-                variant_result = await asyncio.to_thread(
-                    search_feishu_docs, query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                variant_result = await _exec_to_thread(
+                    executor, search_feishu_docs,
+                    query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
                 )
                 doc_candidates = variant_result.get("items", [])
 
@@ -842,6 +869,7 @@ async def search_and_select_feishu_table_candidates(
     direct_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     owner_ids: Optional[List[str]] = None,
+    executor: Optional[concurrent.futures.Executor] = None,
 ) -> List[dict]:
     """执行 Feishu table 搜索，全局 child rerank，返回已选中子表的父文件候选。
 
@@ -852,6 +880,8 @@ async def search_and_select_feishu_table_candidates(
        TABLE_CHILD_SELECT_GLOBAL_TOP_K 个 child，再按 parent 分组，每个 parent
        最多保留 TABLE_CHILD_SELECT_TOP_K 个 child（按分数截断多余的）
     4. 返回有 selected children 的 parent 列表
+
+    ``executor``: 源专属线程池；None 时走 asyncio 默认。
     """
     started = time.perf_counter()
     query_type = _normalize_query_type(query_type)
@@ -859,8 +889,8 @@ async def search_and_select_feishu_table_candidates(
         return []
 
     try:
-        raw_result = await asyncio.to_thread(
-            search_feishu_tables,
+        raw_result = await _exec_to_thread(
+            executor, search_feishu_tables,
             query=query,
             count=page_size,
             uat=token,

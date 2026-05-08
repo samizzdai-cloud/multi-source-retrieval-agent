@@ -28,6 +28,42 @@ Tier = Literal["critical", "important", "noise"]
 Decision = Literal["continue", "stop"]
 
 
+# ── 共享 eval rubric（P2）──────────────────────────────────────────────
+# 所有 SourceAgent 的 eval_only / plan_eval prompt 必须 include 此 block，
+# 保证跨源 tier / angle_tag 标准统一。
+EVAL_RUBRIC_BLOCK = """\
+## 综合判 tier 维度（按以下 4 项加权决定 critical / important / noise）
+
+[A] 回答完整度
+  - 含决定性事实/数字/结论 → 倾向 critical
+  - 部分回答或概括 → 倾向 important
+  - 只是相关背景 → important 或 noise
+
+[B] 时间符合性（仅当 query 含明显时间窗 / temporal_filter 启用）
+  - 文档/邮件时间在窗内 → 维持原 tier
+  - 过期但仍可作背景 → 降一级
+  - 严重过期 → noise
+
+[C] 角度对齐（chunk 是否回答了 focus 真正想问的角度）
+  - on_target 直接回答 focus 核心问题 → 维持 tier
+  - adjacent 相关但角度偏 → 降一级
+  - off_target 偏题 → noise
+
+[D] 角度标记 angle_tag（必须输出）
+  用 1-2 个英文小写词概括该 chunk 回答的角度
+  例: "pricing" / "timeline" / "competitor" / "user-feedback" / "spec-detail" / "policy"
+  同 focus 内不同 chunk 的 angle_tag 越分散越好（多视角覆盖）；
+  无法判断时填 "general"。
+
+## 时空/实体一致性硬约束
+特别关注 chunk 的时间范围、地区、产品型号、品牌是否与 focus 一致；
+不一致直接判 noise，无论文本相似度多高。
+
+## 信息密度偏好
+优先选择包含具体数据（数字、表格、明确事实）而非泛泛描述的 chunks。
+"""
+
+
 # 注：避免 ``ConfigDict(extra="forbid")`` / ``additionalProperties=false``，
 # 因为 Gemini ``response_schema`` 不接受这些字段（会报 Invalid JSON payload）。
 
@@ -44,6 +80,11 @@ class TierAssignment(BaseModel):
     - ``relevance``：LLM 直接给的 [0, 1] 连续分，取代 retrieve 原生 score。
     - ``answered_focuses``：LLM 判断该 chunk 实际回答了哪些 focus_id
       （可为空 / 多个；用于 eval_layer 的跨 focus 覆盖奖励）。
+
+    P2 新增：
+    - ``angle_tag``：LLM 标注该 chunk 回答 focus 的角度（1-2 个英文小写词，
+      如 "pricing" / "timeline" / "competitor"）。同 focus 内多 chunk 同 angle_tag
+      时，装填器会按 relevance 降级冗余条目，提升角度多样性。
     """
     chunk_id: str = Field(..., description="chunk 唯一 id")
     tier: Tier = Field(..., description="critical / important / noise")
@@ -54,6 +95,10 @@ class TierAssignment(BaseModel):
     answered_focuses: List[str] = Field(
         default_factory=list,
         description="该 chunk 实际回答了哪些 focus_id（LLM 视角，可跨 focus）",
+    )
+    angle_tag: str = Field(
+        default="",
+        description="该 chunk 回答 focus 的角度，1-2 个英文小写词；用于同角度去重",
     )
 
 
@@ -83,6 +128,7 @@ def tiers_list_to_map(tiers: Optional[List[dict]]) -> Dict[str, Dict]:
             "tier": item.get("tier"),
             "relevance": float(item.get("relevance", 0.5) or 0.5),
             "answered_focuses": list(item.get("answered_focuses") or []),
+            "angle_tag": str(item.get("angle_tag") or "").strip().lower(),
         }
     return out
 
@@ -135,6 +181,31 @@ def needs_eval(loop_n: int, min_loops: int, max_loops: int) -> bool:
     if min_loops == 1 and max_loops == 1:
         return False
     return True
+
+
+# ── final_assembler LLM schema（P3）────────────────────────────────────
+class FinalAssemblerOutput(BaseModel):
+    """LLM eval_layer 输出：仅含 chunk_id 索引，schema 与最终 chunk schema 解耦。
+
+    selections 用 List 而非 Dict，因 Gemini response_schema 不支持 additionalProperties。
+    每项含 (focus_id, chunk_ids)。
+    """
+    selections: List["FinalSelectionEntry"] = Field(
+        ..., description="每个 focus 的选中 chunk_id 列表（保持 focus 顺序）",
+    )
+    rationale: str = Field(
+        default="", description="一句话说明本次选择关键考量",
+    )
+
+
+class FinalSelectionEntry(BaseModel):
+    focus_id: str = Field(..., description="focus 标识")
+    chunk_ids: List[str] = Field(
+        default_factory=list, description="该 focus 选中的 chunk_id 列表",
+    )
+
+
+FinalAssemblerOutput.model_rebuild()
 
 
 def enforce_loop_bounds(

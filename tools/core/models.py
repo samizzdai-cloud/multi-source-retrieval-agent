@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Literal, Optional, Set
+from typing import ClassVar, Dict, List, Literal, Optional, Set
 
 
 @dataclass
@@ -310,25 +310,12 @@ class SourceAgentConfig:
     google_max_gmail_threads_per_subquery: int = 10  # Gmail 搜索默认返回 thread 数
     google_gmail_rerank_top_n: int = 3               # snippet rerank 后保留 thread 数
 
-
-# ── SourceAgent 预设（Phase 4b）────────────────────────────────────
-# 预设语义：
-# - STRICT: 单轮、召回少、快速；适合 planner 路由明确的场景
-# - LOOSE : 多轮 replan、召回多；适合 query 模糊需要 SourceAgent 自纠的场景
-# 数值为 Phase 4b Step B 实验前的占位，实验后会回填最终值
-STRICT_SOURCE_CFG = SourceAgentConfig(
-    source_top_k=5,
-    min_loops=1, max_loops=1,
-    sub_query_top_n=8,
-    source_timeout_s=25.0,
-)
-
-LOOSE_SOURCE_CFG = SourceAgentConfig(
-    source_top_k=8,
-    min_loops=1, max_loops=2,
-    sub_query_top_n=12,
-    source_timeout_s=40.0,
-)
+    # ── 时间符合性（P1）─────────────────────────────────────────────
+    # eval LLM 在判 tier 时会读这两个字段：若 chunk 文档/邮件时间在窗外 → 降一级；
+    # 严重过期 → noise。eval prompt 内化为 rubric，不输出独立 chunk 字段。
+    temporal_filter_enabled: bool = False
+    temporal_filter_window_days: Optional[int] = None    # None = 不过滤
+    temporal_filter_field: str = "modified"              # "modified" / "created" / "sent_at"
 
 
 # ── eval_layer 模式（Phase 4b）────────────────────────────────────
@@ -336,12 +323,12 @@ EvalLayerMode = Literal["rule", "llm_tool"]
 
 # ── RetrieveConfig 一体化档位（Phase 4c）──────────────────────────
 # 档位语义：
-#   lite      : STRICT 基底 + eval_layer 关 + doc 全走 MCP（无 table）
+#   lite      : 单轮快路径 + eval_layer 关 + doc 全走 MCP（无 table）
 #               极简快速路径，doc[:8] MCP-only，跳过 table 流水线
-#   balanced  : STRICT 基底 + eval_layer 关 + doc block_api/mcp 混合 + table 标准
-#               当前默认生产模式，质量与速度平衡（原 lite 逻辑）
-#   deep_dive : LOOSE  基底 + llm_tool eval_layer + doc block_api/mcp 混合 + table 宽松
-#               模糊 query + 多源噪声大
+#   balanced  : 单轮快路径 + eval_layer 关 + doc block_api/mcp 混合 + table 标准
+#               当前默认生产模式，质量与速度平衡
+#   deep_dive : 多轮宽召回 + llm_tool eval_layer + doc block_api/mcp 混合 + table 宽松
+#               适合模糊 query + 多源噪声大场景
 RetrievePreset = Literal["lite", "balanced", "deep_dive"]
 
 
@@ -349,9 +336,10 @@ RetrievePreset = Literal["lite", "balanced", "deep_dive"]
 class RetrieveConfig:
     """retrieve_agent 顶层配置。
 
-    推荐用 ``preset`` 一键切档（见 RetrievePreset 注释）；需要微调时用
-    ``source_configs[source]`` 覆写单源字段，或显式设置 ``source_preset`` /
-    ``eval_layer_enabled`` / ``eval_layer_mode`` 覆盖 preset 推导值。
+    外部仅暴露三个旋钮：``preset`` / ``enabled_sources`` / ``source_configs``。
+    其余 source_base / eval_layer_* 行为完全由 preset 推导（见 _PRESET_DEFAULTS）；
+    eval_layer 细粒度参数与 model 为内部常量，不再支持外部覆盖——如需调整请改
+    preset 表或常量本身，避免外部调用方手动旋调子参导致档位语义漂移。
     """
     enabled_sources: List[str] = field(default_factory=lambda: ["feishu", "bailian"])
     source_configs: Dict[str, SourceAgentConfig] = field(default_factory=dict)
@@ -359,23 +347,27 @@ class RetrieveConfig:
     # ── 一体化档位（Phase 4c）──
     preset: RetrievePreset = "lite"
 
-    # ── preset 显式覆盖通道（向后兼容 + 细粒度手动覆盖）──
-    # 这些字段为 None/默认值时走 preset 推导；非默认时覆盖 preset。
-    # exp_phase4b*.py 显式设置 source_configs + eval_layer_enabled=True/False 的写法继续生效。
-    source_preset: Optional[Literal["strict", "loose"]] = None
-    eval_layer_enabled: Optional[bool] = None
-    eval_layer_mode: Optional[EvalLayerMode] = None
+    # ── 内部常量（不作为构造参数；调整请改源码或 preset 表）──
+    EVAL_LAYER_TOP_K: ClassVar[int] = 12
+    EVAL_LAYER_LLM_TIMEOUT_S: ClassVar[float] = 15.0
+    EVAL_LAYER_LLM_MAX_INPUT: ClassVar[int] = 22
+    MODEL: ClassVar[str] = "gemini-3.1-flash-lite-preview"
 
-    # ── eval_layer 细粒度旋钮（Phase 4b）──
-    eval_layer_top_k: int = 12             # 兜底上限；实际值由 min(n_focuses*3, CAP) 计算
-    eval_layer_llm_timeout_s: float = 15.0 # LlmEvalLayer 单次 LLM 超时
-    eval_layer_llm_max_input: int = 22     # LlmEvalLayer 直灌 LLM 的最大 chunk 数，超过则 rule 预筛
-
-    model: str = "gemini-3.1-flash-lite-preview"   # 全局统一 LLM
+    # 兼容旧调用：保留小写别名属性，但只读
+    @property
+    def eval_layer_top_k(self) -> int: return self.EVAL_LAYER_TOP_K
+    @property
+    def eval_layer_llm_timeout_s(self) -> float: return self.EVAL_LAYER_LLM_TIMEOUT_S
+    @property
+    def eval_layer_llm_max_input(self) -> int: return self.EVAL_LAYER_LLM_MAX_INPUT
+    @property
+    def model(self) -> str: return self.MODEL
 
     # ── preset 推导内部表 ───────────────────────────────────────
     _PRESET_DEFAULTS = {
-        "lite":      {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
+        "lite":      {"source_base": {}, "eval_layer_enabled": False, "eval_layer_mode": "rule",
+                      "focus_quota": {"critical_min": 2, "important_min": 0},
+                      "final_top_k_per_focus": 4,
                       "source_overrides": {
                           "google": {
                               # 激进 timeout：lite 主打速度
@@ -410,7 +402,9 @@ class RetrieveConfig:
                               },
                           },
                       }},
-        "balanced":  {"source_preset": "strict", "eval_layer_enabled": False, "eval_layer_mode": "rule",
+        "balanced":  {"source_base": {}, "eval_layer_enabled": False, "eval_layer_mode": "rule",
+                      "focus_quota": {"critical_min": 2, "important_min": 0},
+                      "final_top_k_per_focus": 4,
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
                           "google": {"google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
@@ -453,7 +447,10 @@ class RetrieveConfig:
                                      "google_max_gmail_threads_per_subquery": 3,
                                      "google_gmail_rerank_top_n": 3},
                       }},
-        "deep_dive": {"source_preset": "loose",  "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
+        "deep_dive": {"source_base": {"source_top_k": 8, "max_loops": 2, "sub_query_top_n": 12, "source_timeout_s": 40.0},
+                      "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
+                      "focus_quota": {"critical_min": 2, "important_min": 0},
+                      "final_top_k_per_focus": 5,
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
@@ -497,24 +494,29 @@ class RetrieveConfig:
     }
 
     @property
-    def effective_source_preset(self) -> Optional[Literal["strict", "loose"]]:
-        """实际生效的 source_preset：显式设置优先，否则从 preset 推导。"""
-        if self.source_preset is not None:
-            return self.source_preset
-        return self._PRESET_DEFAULTS.get(self.preset, {}).get("source_preset")  # type: ignore[return-value]
+    def focus_quota(self) -> Dict[str, int]:
+        """每 focus 满足判据：{critical_min, important_min}。完全由 preset 推导。"""
+        return self._PRESET_DEFAULTS.get(self.preset, {}).get(
+            "focus_quota", {"critical_min": 2, "important_min": 0}
+        )
+
+    @property
+    def final_top_k_per_focus(self) -> int:
+        """retrieve_agent 出口的每 focus 平均上限（× n_focuses 得到 final_top_k 硬上限）。"""
+        return int(self._PRESET_DEFAULTS.get(self.preset, {}).get("final_top_k_per_focus", 4))
+
+    def final_top_k(self, n_focuses: int) -> int:
+        """硬上限。候选不足时输出实际数量，可少不可多。"""
+        return self.final_top_k_per_focus * max(1, n_focuses)
 
     @property
     def eval_layer_active(self) -> bool:
-        """eval_layer 是否启用：显式设置优先，否则从 preset 推导。"""
-        if self.eval_layer_enabled is not None:
-            return self.eval_layer_enabled
+        """eval_layer 是否启用：完全由 preset 推导（lite/balanced=False, deep_dive=True）。"""
         return bool(self._PRESET_DEFAULTS.get(self.preset, {}).get("eval_layer_enabled", False))
 
     @property
     def eval_layer_effective_mode(self) -> EvalLayerMode:
-        """eval_layer 模式：显式设置优先，否则从 preset 推导。"""
-        if self.eval_layer_mode is not None:
-            return self.eval_layer_mode
+        """eval_layer 模式：完全由 preset 推导。"""
         return self._PRESET_DEFAULTS.get(self.preset, {}).get("eval_layer_mode", "rule")  # type: ignore[return-value]
 
     def config_for(self, source: str) -> SourceAgentConfig:
@@ -524,20 +526,19 @@ class RetrieveConfig:
     def effective_config_for(self, source: str) -> SourceAgentConfig:
         """取某源的最终生效配置。
 
-        优先级：``source_configs[source]`` 显式字段 > preset 内 source_overrides >
-        ``effective_source_preset`` 基底 > ``SourceAgentConfig()``。
+        优先级：``source_configs[source]`` 显式字段 >
+                preset.source_overrides[source] >
+                preset.source_base >
+                ``SourceAgentConfig()`` 默认值。
         """
-        # 1) 基底 = effective preset 或 默认
-        sp = self.effective_source_preset
-        if sp == "strict":
-            base = replace(STRICT_SOURCE_CFG)
-        elif sp == "loose":
-            base = replace(LOOSE_SOURCE_CFG)
-        else:
-            base = SourceAgentConfig()
+        preset_def = self._PRESET_DEFAULTS.get(self.preset) or {}
+
+        # 1) 基底 = 默认 SourceAgentConfig + preset.source_base
+        base_kwargs = preset_def.get("source_base") or {}
+        base = replace(SourceAgentConfig(), **base_kwargs) if base_kwargs else SourceAgentConfig()
 
         # 2) preset 内 per-source 覆写（如 balanced.bailian.max_loops=2）
-        preset_overrides = (self._PRESET_DEFAULTS.get(self.preset) or {}).get("source_overrides", {})
+        preset_overrides = preset_def.get("source_overrides", {})
         if source in preset_overrides:
             diff = {k: v for k, v in preset_overrides[source].items()}
             base = replace(base, **diff)

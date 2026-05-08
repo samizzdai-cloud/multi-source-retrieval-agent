@@ -1,0 +1,434 @@
+2026-05-08 19:09:56,863 INFO p1p5_e2e: ==========================================================================================
+2026-05-08 19:09:56,863 INFO p1p5_e2e: [run] preset=balanced Q50 sources=['bailian', 'feishu', 'google']
+2026-05-08 19:09:59,555 INFO retrieve_agent: Google credentials validated successfully.
+2026-05-08 19:10:00,304 INFO p1p5_e2e: [balanced/Q50] fetched 4 google spaces
+2026-05-08 19:10:00,305 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:10:02,129 INFO httpx: HTTP Request: POST https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent "HTTP/1.1 200 OK"
+2026-05-08 19:10:02,133 INFO tools.core.query_planner: QueryPlan: focuses_total=3
+2026-05-08 19:10:02,133 INFO tools.core.query_planner:   [focus_0] targets=['google', 'feishu'] text=REDMAGIC 2025年度净销售额（原货币及USD）的财务统计与报表数据
+2026-05-08 19:10:02,133 INFO tools.core.query_planner:   [focus_1] targets=['google', 'feishu'] text=REDMAGIC 2025年度订单数与客单价(USD)的运营指标记录
+2026-05-08 19:10:02,133 INFO tools.core.query_planner:   [focus_2] targets=['google', 'feishu'] text=REDMAGIC 2025年度访客数、加购数及转化率等流量转化表现
+2026-05-08 19:10:02,134 INFO p1p5_e2e: [balanced/Q50] 3 focuses produced
+2026-05-08 19:10:02,134 INFO retrieve_agent: [bailian] no focus routed, skip
+2026-05-08 19:10:02,188 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:10:02,188 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:10:02,226 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:10:02,226 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:10:03,657 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:10:03,659 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_0 mode=structured before=1 after=1 qtypes=['structured'] queries=['REDMAGIC 销售']
+2026-05-08 19:10:03,660 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_1 mode=structured before=1 after=1 qtypes=['structured'] queries=['REDMAGIC 运营']
+2026-05-08 19:10:03,660 INFO agents.feishu.feishu_source_agent: [feishu] plan query stabilized focus=focus_1 before=['REDMAGIC 运营'] after=['redmagic USD 订单']
+2026-05-08 19:10:03,660 INFO agents.feishu.feishu_source_agent: [feishu] plan sanitize focus=focus_2 mode=unknown before=1 after=1 qtypes=['structured'] queries=['REDMAGIC 表现']
+2026-05-08 19:10:03,660 INFO agents.source_agent_base: [feishu] plan produced 3 sub_queries
+2026-05-08 19:10:03,773 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:10:03,774 INFO agents.source_agent_base: [google] plan produced 3 sub_queries
+2026-05-08 19:10:06,076 WARNING feishu_read_tool.client: batch_query failed with status 400: {"code":99992402,"msg":"field validation failed","error":{"log_id":"20260508191006F56031602B98F6A80485","troubleshooter":"排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=20260508191006F56031602B98F6A80485&code=99992402&method_id=7090001410158460956","field_violations":[{"field":"request_docs[*].doc_token","description":"request_docs[*].doc_token is required"},{"field":"request_docs[*].doc_type","description":"request_docs[*].doc_type is required"}]}}
+2026-05-08 19:10:06,078 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate GomxdQg7yo24 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,078 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate WuuKd7ApFoOy (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,078 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate CM8hdFaWdoYv (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,078 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate H3f4d7UXwoPg (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,439 INFO tools.feishu.feishu_retrieve: feishu_retrieve: doc candidate selection sub_query_id=feishu:focus_1:sq2 query_type=structured raw=20 selected=4 threshold=0.33 min_keep=3 top_k=4
+2026-05-08 19:10:06,440 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_1:sq2 raw=20 selected=4 ms=2772.1
+2026-05-08 19:10:06,653 WARNING feishu_read_tool.client: batch_query failed with status 400: {"code":99992402,"msg":"field validation failed","error":{"field_violations":[{"field":"request_docs[*].doc_token","description":"request_docs[*].doc_token is required"},{"field":"request_docs[*].doc_type","description":"request_docs[*].doc_type is required"}],"log_id":"202605081910069091AB2EA95BFBA3BF25","troubleshooter":"排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=202605081910069091AB2EA95BFBA3BF25&code=99992402&method_id=7090001410158460956"}}
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate UFU1dX7lFonc (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Lma7dPZ9eoTN (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate KAG1dpWVBozx (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate XohLdjfZPoLm (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate BpnBdeXrOoEl (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate IqGMdUoADopu (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate LBu4dvW3zo60 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate VTcidjiKloZm (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate DOjHdxZbLoa8 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate PBNldLmYkoZC (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate WsE1dirjko9K (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate CwYNdUtsCoQY (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Hce4d4fXAozt (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MSrJdih3HoJT (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate SCfpdNl9Dooc (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:06,654 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MVY3dpcVoo8Z (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:07,053 INFO tools.feishu.feishu_retrieve: feishu_retrieve: doc candidate selection sub_query_id=feishu:focus_2:sq3 query_type=structured raw=20 selected=4 threshold=0.33 min_keep=3 top_k=4
+2026-05-08 19:10:07,053 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_2:sq3 raw=20 selected=4 ms=3385.7
+2026-05-08 19:10:07,054 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=P5j6sWqZohZxtxt6 count=18 ms=1412.8 cache=miss
+2026-05-08 19:10:07,054 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=P5j6sWqZohZxtxt6 count=18 ms=1413.1 cache=pool
+2026-05-08 19:10:07,054 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=X1bSsA5IHh1EyYtF count=5 ms=1407.5 cache=miss
+2026-05-08 19:10:07,054 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=X1bSsA5IHh1EyYtF count=5 ms=1407.7 cache=pool
+2026-05-08 19:10:07,055 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=Y6MNsmWwQhI3rXtt count=12 ms=1410.1 cache=miss
+2026-05-08 19:10:07,055 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=Y6MNsmWwQhI3rXtt count=12 ms=1410.2 cache=pool
+2026-05-08 19:10:07,055 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=ABlxbIQsUa6Wuqs0 count=8 ms=1411.7 cache=miss
+2026-05-08 19:10:07,055 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=ABlxbIQsUa6Wuqs0 count=8 ms=1411.7 cache=pool
+2026-05-08 19:10:07,055 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=D1GQb3A7QaZqXmsB count=1 ms=1408.8 cache=miss
+2026-05-08 19:10:07,055 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=D1GQb3A7QaZqXmsB count=1 ms=1408.8 cache=pool
+2026-05-08 19:10:07,055 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=QtmkbsbIxaB6ccsj count=1 ms=1411.2 cache=miss
+2026-05-08 19:10:07,055 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=QtmkbsbIxaB6ccsj count=1 ms=1411.3 cache=pool
+2026-05-08 19:10:07,057 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=Y6MNsmWwQhI3rXtt count=12 ms=0.0 cache=hit
+2026-05-08 19:10:07,058 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=Y6MNsmWwQhI3rXtt count=12 ms=1.0 cache=pool
+2026-05-08 19:10:07,620 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_1:sq2 raw=6 children_total=45 selected_parents=2 ms=3952.4
+2026-05-08 19:10:08,358 WARNING feishu_read_tool.client: batch_query failed with status 400: {"code":99992402,"msg":"field validation failed","error":{"log_id":"20260508191008576611E915BA81A0067E","troubleshooter":"排查建议查看(Troubleshooting suggestions): https://open.feishu.cn/search?from=openapi&log_id=20260508191008576611E915BA81A0067E&code=99992402&method_id=7090001410158460956","field_violations":[{"field":"request_docs[*].doc_token","description":"request_docs[*].doc_token is required"},{"field":"request_docs[*].doc_type","description":"request_docs[*].doc_type is required"}]}}
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Lma7dPZ9eoTN (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate MSrJdih3HoJT (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate KAG1dpWVBozx (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate DoGSdUyRdoAh (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate CwYNdUtsCoQY (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate VTcidjiKloZm (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate SCfpdNl9Dooc (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate NswbdLQVloe4 (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Z5uZdhOzOoEC (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,359 INFO tools.feishu.feishu_retrieve: feishu_retrieve: filtered out doc candidate Kmr6dBUyloIH (edit_time: 0.0 < 1735660800.0)
+2026-05-08 19:10:08,730 INFO tools.feishu.feishu_retrieve: feishu_retrieve: doc candidate selection sub_query_id=feishu:focus_0:sq1 query_type=structured raw=20 selected=4 threshold=0.33 min_keep=3 top_k=4
+2026-05-08 19:10:08,730 INFO tools.feishu.feishu_retrieve: TIMING feishu.doc_candidate_select sub_query_id=feishu:focus_0:sq1 raw=20 selected=4 ms=5062.8
+2026-05-08 19:10:08,730 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=FukZbEG2KacyuksR count=6 ms=1673.9 cache=miss
+2026-05-08 19:10:08,731 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=FukZbEG2KacyuksR count=6 ms=1674.1 cache=pool
+2026-05-08 19:10:08,731 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=YvevsMkfThCDLytm count=3 ms=1675.3 cache=miss
+2026-05-08 19:10:08,731 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=YvevsMkfThCDLytm count=3 ms=1675.5 cache=pool
+2026-05-08 19:10:08,731 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=Mt54briZcaKQEFsO count=2 ms=1674.3 cache=miss
+2026-05-08 19:10:08,731 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=Mt54briZcaKQEFsO count=2 ms=1674.4 cache=pool
+2026-05-08 19:10:08,731 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_1:sq2 doc=4 table=2 ms=5064.3
+2026-05-08 19:10:08,731 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=OjuabVcWoazHrUsr count=5 ms=1674.7 cache=miss
+2026-05-08 19:10:08,731 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=OjuabVcWoazHrUsr count=5 ms=1674.8 cache=pool
+2026-05-08 19:10:08,731 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=HJmlbI80ja1vPmst count=1 ms=1674.9 cache=miss
+2026-05-08 19:10:08,731 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=HJmlbI80ja1vPmst count=1 ms=1674.9 cache=pool
+2026-05-08 19:10:08,731 INFO tools.feishu.table_pool: TIMING table_pool.sheet_structure token=JhU9sE13whC15XtN count=8 ms=1110.7 cache=miss
+2026-05-08 19:10:08,732 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=sheet parent=JhU9sE13whC15XtN count=8 ms=1110.9 cache=pool
+2026-05-08 19:10:08,732 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=YtxnbDNYiaurdDsO count=1 ms=1111.0 cache=miss
+2026-05-08 19:10:08,732 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=YtxnbDNYiaurdDsO count=1 ms=1111.0 cache=pool
+2026-05-08 19:10:08,732 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=S4swbS3G9a74nmsY count=2 ms=1111.1 cache=miss
+2026-05-08 19:10:08,732 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=S4swbS3G9a74nmsY count=2 ms=1111.1 cache=pool
+2026-05-08 19:10:08,732 INFO tools.feishu.table_pool: TIMING table_pool.bitable_structure token=TqcHb1VXiamm4jso count=3 ms=1111.1 cache=miss
+2026-05-08 19:10:08,732 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_structure kind=bitable parent=TqcHb1VXiamm4jso count=3 ms=1111.2 cache=pool
+2026-05-08 19:10:09,223 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_0:sq1 raw=6 children_total=29 selected_parents=5 ms=5556.0
+2026-05-08 19:10:09,517 INFO tools.feishu.feishu_retrieve: TIMING feishu.table_parent_select sub_query_id=feishu:focus_2:sq3 raw=4 children_total=14 selected_parents=4 ms=5849.0
+2026-05-08 19:10:09,518 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_0:sq1 doc=4 table=5 ms=5850.9
+2026-05-08 19:10:09,518 INFO agents.feishu.feishu_source_agent: TIMING feishu.prepare_one sub_query_id=feishu:focus_2:sq3 doc=4 table=4 ms=5850.9
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_1:sq2 max_groups=2 results=4
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback sheet sq=google:focus_1:sq2 max_groups=2 results=5
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=slide count=3 top=['[REDMAGIC] RM 11 Air Launch report<presentation>:l0-3K2x0', 'Copy of [REDMAGIC] Launch Report RM10 Air<presentation>:V8xRnEhM', '[REDMAGIC] Launch Report RM10 Air<presentation>:pSfe7Meg']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_1:sq2 channel=sheet count=5 top=['Riskified billing 2503 REDMAGIC.xlsx<sheet>:ilevJ8P_', 'Riskified billing 2504 REDMAGIC.xlsx<sheet>:9-JnCzng', 'Riskified billing 2501 REDMAGIC.xlsx<sheet>:sB7O6IUY', 'Riskified billing 2502 REDMAGIC.xlsx<sheet>:UZDgAsnD', 'Riskified billing 2506 REDMAGIC.xls<ms-excel>:sr84vh-C']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] search sq=google:focus_1:sq2 query='REDMAGIC 2025 订单 客单价 运营' doc=4 slide=3 sheet=5
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_1:sq2 files=12 gmail_threads=0 ms=5722.4
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_2:sq3 max_groups=2 results=4
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback sheet sq=google:focus_2:sq3 max_groups=2 results=5
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=slide count=10 top=['REDMAGIC Ads Review Format<presentation>:92DBPLgY', ' [REDMAGIC] RM 11 Pro Launch report<presentation>:ksk0YwZM', 'Copy of  [REDMAGIC] RM 11 Pro Launch report<presentation>:taxpGoC4', 'Copy of [REDMAGIC] RM 11 Air Launch report<presentation>:d_pZ5MWA', ' [REDMAGIC] Launch report RM10 Pro<presentation>:IYwS5ZFY']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_2:sq3 channel=sheet count=5 top=['Riskified billing 2503 REDMAGIC.xlsx<sheet>:ilevJ8P_', 'Riskified billing 2504 REDMAGIC.xlsx<sheet>:9-JnCzng', 'Riskified billing 2501 REDMAGIC.xlsx<sheet>:sB7O6IUY', 'Riskified billing 2502 REDMAGIC.xlsx<sheet>:UZDgAsnD', 'Riskified billing 2506 REDMAGIC.xls<ms-excel>:sr84vh-C']
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] search sq=google:focus_2:sq3 query='REDMAGIC 2025 访客 加购 转化率' doc=4 slide=10 sheet=5
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_2:sq3 files=19 gmail_threads=0 ms=5722.1
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback doc sq=google:focus_0:sq1 max_groups=2 results=4
+2026-05-08 19:10:09,518 INFO agents.google.google_source_agent: [google] fallback sheet sq=google:focus_0:sq1 max_groups=2 results=5
+2026-05-08 19:10:09,519 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=doc count=4 top=['REDMAGIC MWC Press Release_Feb 28<document>:RL_ocVlI', 'Untitled document<document>:e9naX1aw', 'REDMAGIC 10 S Pro & Tablet 2 Product Training Su<document>:Ai9hMBbc', 'Copy of REDMAGIC 10 S Pro & Tablet 2 Product Tra<document>:8ZMj5mc0']
+2026-05-08 19:10:09,519 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=slide count=10 top=['REDMAGIC Ads Review Format<presentation>:92DBPLgY', 'REDMAGIC 10 Air Ads Review<presentation>:g3rBZNYs', 'sen - 10 air - REDMAGIC Product Ads Review Forma<presentation>:6s8SSvIM', 'Copy of [REDMAGIC] Launch Report RM10 Air<presentation>:V8xRnEhM', '[REDMAGIC] Launch Report RM10 Air<presentation>:pSfe7Meg']
+2026-05-08 19:10:09,519 INFO agents.google.google_source_agent: [google] candidates sq=google:focus_0:sq1 channel=sheet count=5 top=['Riskified billing 2503 REDMAGIC.xlsx<sheet>:ilevJ8P_', 'Riskified billing 2504 REDMAGIC.xlsx<sheet>:9-JnCzng', 'Riskified billing 2501 REDMAGIC.xlsx<sheet>:sB7O6IUY', 'Riskified billing 2502 REDMAGIC.xlsx<sheet>:UZDgAsnD', 'Riskified billing 2506 REDMAGIC.xls<ms-excel>:sr84vh-C']
+2026-05-08 19:10:09,519 INFO agents.google.google_source_agent: [google] search sq=google:focus_0:sq1 query='REDMAGIC 2025 净销售额 财务 报表' doc=4 slide=10 sheet=5
+2026-05-08 19:10:09,519 INFO agents.google.google_source_agent: TIMING google.search_one sq=google:focus_0:sq1 files=19 gmail_threads=0 ms=5726.0
+2026-05-08 19:10:09,519 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_prepare_search sub_queries=3 ms=5858.2
+2026-05-08 19:10:09,519 INFO agents.feishu.feishu_source_agent: [feishu] doc route_hint block=3 mcp=7 total=10
+2026-05-08 19:10:09,519 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.submit selected=10 new_block=3 new_mcp=7 ms=0.1
+2026-05-08 19:10:09,519 INFO agents.feishu.feishu_source_agent: TIMING feishu.submit_doc docs=10 preset=balanced ms=5858.5
+2026-05-08 19:10:09,522 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_prepare docs=10 tables=6 ms=5862.0
+2026-05-08 19:10:09,532 INFO agents.google.google_source_agent: [google] Phase A summary: sub_queries=3 total_drive_files=50 total_gmail_threads=0
+2026-05-08 19:10:10,429 INFO agents.google.google_source_agent: [google] slide filter skipped 6 oversized pptx for sq=google:focus_0:sq1, kept 4
+2026-05-08 19:10:10,704 INFO agents.google.google_source_agent: [google] slide filter skipped 6 oversized pptx for sq=google:focus_2:sq3, kept 4
+2026-05-08 19:10:10,704 INFO agents.google.google_source_agent: [google] Phase D summary: merged_sheets=0 merged_sheet_nonnative=5 merged_docs=4 merged_slides=5 merged_gmail=0
+2026-05-08 19:10:10,704 INFO agents.google.google_source_agent: [google] Phase E queue summary sheets=0 sheet_nonnative=5 docs=4 slides=5 gmail=0 executor_workers=12 per_file_timeout=20.0s
+2026-05-08 19:10:10,705 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1kNQ-EVA-nCqhnyJvtJF... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=0.7 error=No module named 'utils'
+2026-05-08 19:10:10,706 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1kNQ-EVA-nCqhnyJvtJFBDJ-f9-JnCzng (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:10:10,706 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=9-JnCzng mime=sheet size=478667 gc=0 uc=0 ms=1.0
+2026-05-08 19:10:10,718 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1xZHeGxz27lyEjYkRdLi... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=13.2 error=No module named 'utils'
+2026-05-08 19:10:10,718 INFO agents.google.google_source_agent: [google] pool submits {'doc': 4, 'nonnative': 5, 'slide': 5} type_pools=True
+2026-05-08 19:10:10,754 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1xZHeGxz27lyEjYkRdLi3YKeFilevJ8P_ (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:10:10,791 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1JHOKo76Ooj4oK_ErHXH... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=85.0 error=No module named 'utils'
+2026-05-08 19:10:10,826 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:10:10,834 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:10:10,835 INFO feishu_read_tool.docx_pipeline: Stage 2: SKIP (scoring disabled), passing 1 candidates through
+2026-05-08 19:10:10,835 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=ilevJ8P_ mime=sheet size=390675 gc=0 uc=0 ms=130.7
+2026-05-08 19:10:10,858 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1JHOKo76Ooj4oK_ErHXH5G0dysB7O6IUY (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:10:10,865 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:10:10,875 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:10:10,876 INFO feishu_read_tool.docx_pipeline: Stage 3: fetching blocks for 1 docs (max_concurrency=5)
+2026-05-08 19:10:10,877 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=ilevJ8P_ size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,877 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=sB7O6IUY mime=sheet size=971944 gc=0 uc=0 ms=171.3
+2026-05-08 19:10:10,880 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1h3KLilVgPqJjq2vnvjv... mime=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet FAILED ms=3.4 error=No module named 'utils'
+2026-05-08 19:10:10,881 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1h3KLilVgPqJjq2vnvjvPlVLIUZDgAsnD (application/vnd.openxmlformats-officedocument.spreadsheetml.sheet): No module named 'utils'
+2026-05-08 19:10:10,881 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=UZDgAsnD mime=sheet size=781314 gc=0 uc=0 ms=4.5
+2026-05-08 19:10:10,880 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=9-JnCzng size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,881 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=sB7O6IUY size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=UZDgAsnD size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=ilevJ8P_ size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=9-JnCzng size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=sB7O6IUY size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=UZDgAsnD size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet_nonnative file=ilevJ8P_ size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet_nonnative file=9-JnCzng size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet_nonnative file=sB7O6IUY size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet_nonnative file=UZDgAsnD size=N/A chunks=0 ms=0.0
+2026-05-08 19:10:10,882 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1ltwGidDWtbdvkPI_425... mime=application/vnd.ms-excel FAILED ms=1.0 error=No module named 'utils'
+2026-05-08 19:10:10,882 WARNING google_workspace_tool.drive_content_reader: [drive_content_reader] read_chunks failed for 1ltwGidDWtbdvkPI_425rx7uUsr84vh-C (application/vnd.ms-excel): No module named 'utils'
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.file_read type=sheet_nonnative file=sr84vh-C mime=ms-excel size=2636800 gc=0 uc=0 ms=1.4
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=sheet_nonnative file=sr84vh-C size=N/A chunks=0 ms=0.3
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=sheet_nonnative file=sr84vh-C size=N/A chunks=0 ms=0.2
+2026-05-08 19:10:10,882 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=sheet_nonnative file=sr84vh-C size=N/A chunks=0 ms=0.2
+2026-05-08 19:10:11,333 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=1tF_J2Fdf67rc1Nut7vj... api_ms=618.5 chunk_ms=2.2 total_ms=620.8
+2026-05-08 19:10:11,335 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1tF_J2Fdf67rc1Nut7vj... mime=application/vnd.google-apps.document chunks=10 ms=629.9
+2026-05-08 19:10:11,336 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=10sP8k6tvU24Q1WHlUzG... api_ms=629.1 chunk_ms=0.3 total_ms=629.4
+2026-05-08 19:10:11,338 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=Ai9hMBbc mime=document size=9766 gc=10 uc=10 ms=632.5
+2026-05-08 19:10:11,338 INFO agents.google.google_source_agent: [google] doc read done 1tF_J2Fdf67rc1Nut7vjWaYp5hoDyP7MZhOZAi9hMBbc: mime=application/vnd.google-apps.document gc=10 uc=10 size=9766
+2026-05-08 19:10:11,338 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=10sP8k6tvU24Q1WHlUzG... mime=application/vnd.google-apps.document chunks=2 ms=632.8
+2026-05-08 19:10:11,338 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=e9naX1aw mime=document size=2522 gc=2 uc=2 ms=633.0
+2026-05-08 19:10:11,338 INFO agents.google.google_source_agent: [google] doc read done 10sP8k6tvU24Q1WHlUzGAebNJPkSfhW6J9CEe9naX1aw: mime=application/vnd.google-apps.document gc=2 uc=2 size=2522
+2026-05-08 19:10:11,350 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=468.5
+2026-05-08 19:10:11,358 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=475.5
+2026-05-08 19:10:11,358 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=Ai9hMBbc size=9766 chunks=10 ms=475.6
+2026-05-08 19:10:11,358 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=e9naX1aw size=2522 chunks=2 ms=475.8
+2026-05-08 19:10:11,358 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=e9naX1aw size=2522 chunks=2 ms=475.7
+2026-05-08 19:10:11,358 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=e9naX1aw size=2522 chunks=2 ms=475.6
+2026-05-08 19:10:11,629 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=YtxnbDNYiaurdDsO type=BITABLE chunks=1 ms=2099.5
+2026-05-08 19:10:11,631 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=1Ixanl6qcjlwkUDI4Hnu... api_ms=900.4 chunk_ms=0.5 total_ms=900.9
+2026-05-08 19:10:11,631 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1Ixanl6qcjlwkUDI4Hnu... mime=application/vnd.google-apps.document chunks=5 ms=926.5
+2026-05-08 19:10:11,632 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=RL_ocVlI mime=document size=23522 gc=5 uc=5 ms=927.0
+2026-05-08 19:10:11,632 INFO agents.google.google_source_agent: [google] doc read done 1Ixanl6qcjlwkUDI4Hnu8pPanUcXbHyh9xf-RL_ocVlI: mime=application/vnd.google-apps.document gc=5 uc=5 size=23522
+2026-05-08 19:10:11,632 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=RL_ocVlI size=23522 chunks=5 ms=750.1
+2026-05-08 19:10:11,632 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=RL_ocVlI size=23522 chunks=5 ms=750.1
+2026-05-08 19:10:11,632 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=RL_ocVlI size=23522 chunks=5 ms=750.1
+2026-05-08 19:10:12,125 INFO google_workspace_tool.readers.doc_reader: [TIMING] doc.reader file_id=19mNq3VjEJTqCszBXRdZ... api_ms=785.2 chunk_ms=0.7 total_ms=785.9
+2026-05-08 19:10:12,126 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=19mNq3VjEJTqCszBXRdZ... mime=application/vnd.google-apps.document chunks=10 ms=787.7
+2026-05-08 19:10:12,126 INFO agents.google.google_source_agent: TIMING google.file_read type=doc file=8ZMj5mc0 mime=document size=9877 gc=10 uc=10 ms=788.1
+2026-05-08 19:10:12,126 INFO agents.google.google_source_agent: [google] doc read done 19mNq3VjEJTqCszBXRdZtTxTDeqopSEsk-X08ZMj5mc0: mime=application/vnd.google-apps.document gc=10 uc=10 size=9877
+2026-05-08 19:10:12,126 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=1244.4
+2026-05-08 19:10:12,126 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=1244.3
+2026-05-08 19:10:12,126 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=doc file=8ZMj5mc0 size=9877 chunks=10 ms=1244.4
+2026-05-08 19:10:12,339 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry TKMudqQ3ooo8dNxF (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,436 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1n018lI111AJgvA8vm6c... mime=application/vnd.google-apps.presentation chunks=23 ms=1729.9
+2026-05-08 19:10:12,437 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=6s8SSvIM mime=presentation size=13713011 gc=23 uc=23 ms=1731.0
+2026-05-08 19:10:12,437 INFO agents.google.google_source_agent: [google] slide read done 1n018lI111AJgvA8vm6cmGBEXsYXb9R_8taf6s8SSvIM: mime=application/vnd.google-apps.presentation gc=23 uc=23 size=13713011
+2026-05-08 19:10:12,437 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=6s8SSvIM size=13713011 chunks=23 ms=1555.4
+2026-05-08 19:10:12,438 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=6s8SSvIM size=13713011 chunks=23 ms=1556.1
+2026-05-08 19:10:12,439 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry XRxudAfPToIJwTxv (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,448 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=Mt54briZcaKQEFsO type=BITABLE chunks=2 ms=2918.7
+2026-05-08 19:10:12,449 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry HA9QdrKAjoYptnxk (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,591 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry EWs8d9a8WocbmXxb (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,591 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry JiYTdYpm1orJMNxf (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,592 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry XT7VdRC8Fofv7sxG (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:12,592 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=TqcHb1VXiamm4jso type=BITABLE chunks=2 ms=3062.1
+2026-05-08 19:10:12,592 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_2:sq3 parents=2 chunks=3 ms=3062.1
+2026-05-08 19:10:12,607 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=Y6MNsmWwQhI3rXtt type=SHEET chunks=3 ms=3077.0
+2026-05-08 19:10:12,752 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=HJmlbI80ja1vPmst type=BITABLE chunks=1 ms=3222.0
+2026-05-08 19:10:12,752 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_0:sq1 parents=2 chunks=3 ms=3221.9
+2026-05-08 19:10:13,190 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1NxLFbhojuMUFm5b32Aq... mime=application/vnd.google-apps.presentation chunks=99 ms=2484.1
+2026-05-08 19:10:13,199 INFO agents.google.google_source_agent: [google] slide truncate 1NxLFbhojuMUFm5b32Aqc-FXsylfHDZ6YNWEpSfe7Meg: 99 -> 40 (query-aware)
+2026-05-08 19:10:13,199 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=pSfe7Meg mime=presentation size=42223068 gc=99 uc=40 ms=2493.0
+2026-05-08 19:10:13,199 INFO agents.google.google_source_agent: [google] slide read done 1NxLFbhojuMUFm5b32Aqc-FXsylfHDZ6YNWEpSfe7Meg: mime=application/vnd.google-apps.presentation gc=99 uc=40 size=42223068
+2026-05-08 19:10:13,199 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=pSfe7Meg size=42223068 chunks=40 ms=2317.5
+2026-05-08 19:10:13,200 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=pSfe7Meg size=42223068 chunks=40 ms=2317.5
+2026-05-08 19:10:13,200 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=pSfe7Meg size=42223068 chunks=40 ms=2317.5
+2026-05-08 19:10:13,303 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:10:13,370 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:10:13,441 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=19XINiHUeUKEjQbaaycR... mime=application/vnd.google-apps.presentation chunks=10 ms=1004.4
+2026-05-08 19:10:13,442 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=92DBPLgY mime=presentation size=8741335 gc=10 uc=10 ms=1004.7
+2026-05-08 19:10:13,442 INFO agents.google.google_source_agent: [google] slide read done 19XINiHUeUKEjQbaaycRuX8RLsyMlh-YoO3g92DBPLgY: mime=application/vnd.google-apps.presentation gc=10 uc=10 size=8741335
+2026-05-08 19:10:13,442 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=92DBPLgY size=8741335 chunks=10 ms=2560.1
+2026-05-08 19:10:13,442 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=92DBPLgY size=8741335 chunks=10 ms=2560.0
+2026-05-08 19:10:13,551 INFO feishu_read_tool.chunker: chunker v2: 1 chunks from 1 pre-chunks (doc OGu1d1O54oueJYxiHUGcZBYYnGc)
+2026-05-08 19:10:13,551 INFO feishu_read_tool.chunker: post-merge: 14 → 13 chunks (merged 1)
+2026-05-08 19:10:13,551 INFO feishu_read_tool.docx_pipeline: Stage 4: built 13 chunks total (before merge: 14)
+2026-05-08 19:10:13,551 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 13 chunks directly
+2026-05-08 19:10:13,551 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 13 scored chunks, returning to caller for budget decisions
+2026-05-08 19:10:13,551 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done OGu1d1O54oueJYxi → 13 chunks
+2026-05-08 19:10:13,551 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=OGu1d1O54oueJYxi chunks=13 ms=2732.1
+2026-05-08 19:10:13,732 INFO feishu_read_tool.chunker: chunker v2: 1 chunks from 1 pre-chunks (doc N6GodwmNIoQEtaxSgBhcWLRZn2d)
+2026-05-08 19:10:13,732 INFO feishu_read_tool.chunker: post-merge: 14 → 13 chunks (merged 1)
+2026-05-08 19:10:13,732 INFO feishu_read_tool.docx_pipeline: Stage 4: built 13 chunks total (before merge: 14)
+2026-05-08 19:10:13,732 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 13 chunks directly
+2026-05-08 19:10:13,732 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 13 scored chunks, returning to caller for budget decisions
+2026-05-08 19:10:13,733 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done N6GodwmNIoQEtaxS → 13 chunks
+2026-05-08 19:10:13,733 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=N6GodwmNIoQEtaxS chunks=13 ms=2914.0
+2026-05-08 19:10:13,847 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1Z6ptkLU9qWujOc7bGe1... mime=application/vnd.google-apps.presentation chunks=96 ms=3141.4
+2026-05-08 19:10:13,854 INFO agents.google.google_source_agent: [google] slide truncate 1Z6ptkLU9qWujOc7bGe1-lYIAOBBnSCnYzMkV8xRnEhM: 96 -> 40 (query-aware)
+2026-05-08 19:10:13,855 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=V8xRnEhM mime=presentation size=42206323 gc=96 uc=40 ms=3149.1
+2026-05-08 19:10:13,855 INFO agents.google.google_source_agent: [google] slide read done 1Z6ptkLU9qWujOc7bGe1-lYIAOBBnSCnYzMkV8xRnEhM: mime=application/vnd.google-apps.presentation gc=96 uc=40 size=42206323
+2026-05-08 19:10:13,855 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_0:sq1 type=slide file=V8xRnEhM size=42206323 chunks=40 ms=2973.3
+2026-05-08 19:10:13,856 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=V8xRnEhM size=42206323 chunks=40 ms=2973.7
+2026-05-08 19:10:13,856 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_2:sq3 type=slide file=V8xRnEhM size=42206323 chunks=40 ms=2973.6
+2026-05-08 19:10:13,856 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed HA9QdrKAjoYptnxk: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/HA9QdrKAjoYptnxkfR9cJ4Gzn1e/blocks/HA9QdrKAjoYptnxkfR9cJ4Gzn1e/children, documentID=HA9QdrKAjoYptnxkfR9cJ4Gzn1e
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:13,856 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed JiYTdYpm1orJMNxf: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/JiYTdYpm1orJMNxfJWEc2ZBinnd/blocks/JiYTdYpm1orJMNxfJWEc2ZBinnd/children, documentID=JiYTdYpm1orJMNxfJWEc2ZBinnd
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:13,921 INFO feishu_read_tool.docx_pipeline: Stage 4: building chunks for 1 docs
+2026-05-08 19:10:13,937 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed TKMudqQ3ooo8dNxF: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/TKMudqQ3ooo8dNxFfAZc10O2nRb/blocks/TKMudqQ3ooo8dNxFfAZc10O2nRb/children, documentID=TKMudqQ3ooo8dNxFfAZc10O2nRb
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:14,171 INFO feishu_read_tool.chunker: chunker v2: 4 chunks from 1 pre-chunks (doc V0aDd5S6XoJOu6x3vQtckxULnWe)
+2026-05-08 19:10:14,172 INFO feishu_read_tool.chunker: post-merge: 23 → 18 chunks (merged 5)
+2026-05-08 19:10:14,172 INFO feishu_read_tool.docx_pipeline: Stage 4: built 18 chunks total (before merge: 23)
+2026-05-08 19:10:14,172 INFO feishu_read_tool.docx_pipeline: Stage 5: SKIP (scoring disabled), converting 18 chunks directly
+2026-05-08 19:10:14,172 INFO feishu_read_tool.docx_pipeline: Stage 5 complete: 18 scored chunks, returning to caller for budget decisions
+2026-05-08 19:10:14,174 INFO tools.feishu.feishu_doc_pool: DocPool: block_api done V0aDd5S6XoJOu6x3 → 18 chunks
+2026-05-08 19:10:14,174 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_block_api doc=V0aDd5S6XoJOu6x3 chunks=18 ms=3355.2
+2026-05-08 19:10:14,468 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed EWs8d9a8WocbmXxb: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/EWs8d9a8WocbmXxbeFzc0VIcntf/blocks/EWs8d9a8WocbmXxbeFzc0VIcntf/children, documentID=EWs8d9a8WocbmXxbeFzc0VIcntf
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:14,597 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 13 chunks from 1/4 docs (timeout=20.0s)
+2026-05-08 19:10:14,597 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=4 collected_docs=1 chunks=13 ms=3721.5
+2026-05-08 19:10:14,598 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_2:sq3 docs=4 chunks=13 ms=5067.8
+2026-05-08 19:10:15,054 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='REDMAGIC 表现' input=13 selected=8 ms=456.3
+2026-05-08 19:10:15,054 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_2:sq3 raw=13 selected=8 ms=0
+2026-05-08 19:10:15,054 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_2:sq3 doc=8 table=3 total=11 ms=5524.6
+2026-05-08 19:10:15,055 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed XT7VdRC8Fofv7sxG: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/XT7VdRC8Fofv7sxGHCqcXFURnSb/blocks/XT7VdRC8Fofv7sxGHCqcXFURnSb/children, documentID=XT7VdRC8Fofv7sxGHCqcXFURnSb
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:15,055 INFO tools.feishu.feishu_doc_pool: DocPool: mcp retry Pvr8dCeujoRMpTxJ (attempt=1) reason=[NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unav
+2026-05-08 19:10:15,055 WARNING tools.feishu.feishu_doc_pool: DocPool: mcp failed XRxudAfPToIJwTxv: [NETWORK:5002] Failed to get child blocks
+💡 Suggestion: Network temporarily unavailable, please try again later
+📍 Context: api=/open-apis/docx/v1/documents/XRxudAfPToIJwTxvUihcqXGunBh/blocks/XRxudAfPToIJwTxvUihcqXGunBh/children, documentID=XRxudAfPToIJwTxvUihcqXGunBh
+🔗 Caused by: request trigger frequency limit
+2026-05-08 19:10:15,055 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 26 chunks from 2/4 docs (timeout=20.0s)
+2026-05-08 19:10:15,055 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=4 collected_docs=2 chunks=26 ms=4179.5
+2026-05-08 19:10:15,056 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_1:sq2 docs=4 chunks=26 ms=5525.8
+2026-05-08 19:10:17,750 INFO google_workspace_tool.drive_content_reader: [TIMING] drive.reader file_id=1dYAL0iODb1x0sJpOQqM... mime=application/vnd.google-apps.presentation chunks=134 ms=4551.1
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] slide truncate 1dYAL0iODb1x0sJpOQqMhcl0c5hni5OrPN-jl0-3K2x0: 134 -> 40 (query-aware)
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: TIMING google.file_read type=slide file=l0-3K2x0 mime=presentation size=54860307 gc=134 uc=40 ms=4560.6
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] slide read done 1dYAL0iODb1x0sJpOQqMhcl0c5hni5OrPN-jl0-3K2x0: mime=application/vnd.google-apps.presentation gc=134 uc=40 size=54860307
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: TIMING google.wait_done sq=google:focus_1:sq2 type=slide file=l0-3K2x0 size=54860307 chunks=40 ms=6877.9
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_0:sq1 chunks_collected=140
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_0:sq1 | raw(S=5,D=4,SL=10,G=0) → selected(S=5,D=4,SL=4,G=0) → final(S=0,D=27,SL=113,G=0)
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_1:sq2 chunks_collected=147
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_1:sq2 | raw(S=5,D=4,SL=3,G=0) → selected(S=5,D=4,SL=3,G=0) → final(S=0,D=27,SL=120,G=0)
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] Phase F sq=google:focus_2:sq3 chunks_collected=140
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FUNNEL sq=google:focus_2:sq3 | raw(S=5,D=4,SL=10,G=0) → selected(S=5,D=4,SL=4,G=0) → final(S=0,D=27,SL=113,G=0)
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUES count=5
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1kNQ-EVA-nCqhnyJvtJFBDJ-f9-JnCzng type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1', 'google:focus_2:sq3', 'google:focus_1:sq2'}
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1xZHeGxz27lyEjYkRdLi3YKeFilevJ8P_ type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1', 'google:focus_2:sq3', 'google:focus_1:sq2'}
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1JHOKo76Ooj4oK_ErHXH5G0dysB7O6IUY type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1', 'google:focus_2:sq3', 'google:focus_1:sq2'}
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1h3KLilVgPqJjq2vnvjvPlVLIUZDgAsnD type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1', 'google:focus_2:sq3', 'google:focus_1:sq2'}
+2026-05-08 19:10:17,760 INFO agents.google.google_source_agent: [google] FILE_READ_ISSUE 1ltwGidDWtbdvkPI_425rx7uUsr84vh-C type=sheet_nonnative status=zero_chunks chunks=0 error= sqs={'google:focus_0:sq1', 'google:focus_2:sq3', 'google:focus_1:sq2'}
+2026-05-08 19:10:18,152 INFO tools.feishu.feishu_doc_pool: DocPool: mcp done Pvr8dCeujoRMpTxJ → 21 chunks
+2026-05-08 19:10:18,153 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.read_mcp doc=Pvr8dCeujoRMpTxJ chunks=21 ms=7276.7
+2026-05-08 19:10:18,158 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 净销售额 财务 报 input=27 selected=7 ms=397.7
+2026-05-08 19:10:18,159 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_0:sq1 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=398.0
+2026-05-08 19:10:18,185 INFO tools.feishu.feishu_doc_pool: DocPool.wait_and_collect: 52 chunks from 3/4 docs (timeout=20.0s)
+2026-05-08 19:10:18,185 INFO tools.feishu.feishu_doc_pool: TIMING doc_pool.wait_and_collect docs=4 collected_docs=3 chunks=52 ms=7308.8
+2026-05-08 19:10:18,185 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_doc_wait sub_query_id=feishu:focus_0:sq1 docs=4 chunks=52 ms=8655.0
+2026-05-08 19:10:18,328 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 净销售额 财务 报 input=113 selected=7 ms=567.6
+2026-05-08 19:10:18,697 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='REDMAGIC 销售' input=52 selected=8 ms=512.5
+2026-05-08 19:10:18,697 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_0:sq1 raw=52 selected=8 ms=0
+2026-05-08 19:10:18,697 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_0:sq1 doc=8 table=3 total=11 ms=9167.7
+2026-05-08 19:10:18,698 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_0:sq1 type=slide reason=type_bucket input=113 rerank_input=113 output=7 ms=937.2
+2026-05-08 19:10:18,698 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_0:sq1 before(S=0,D=27,SL=113,G=0,O=0) after=14
+2026-05-08 19:10:19,132 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 订单 客单价 运营 input=27 selected=7 ms=434.1
+2026-05-08 19:10:19,133 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_1:sq2 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=434.6
+2026-05-08 19:10:19,775 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 订单 客单价 运营 input=120 selected=7 ms=1076.6
+2026-05-08 19:10:19,775 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_1:sq2 type=slide reason=type_bucket input=120 rerank_input=120 output=7 ms=1077.1
+2026-05-08 19:10:19,775 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_1:sq2 before(S=0,D=27,SL=120,G=0,O=0) after=14
+2026-05-08 19:10:20,233 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 访客 加购 转化率 input=27 selected=7 ms=457.8
+2026-05-08 19:10:20,234 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_2:sq3 type=doc reason=type_bucket input=27 rerank_input=27 output=7 ms=458.1
+2026-05-08 19:10:20,310 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 访客 加购 转化率 input=113 selected=7 ms=533.9
+2026-05-08 19:10:20,310 INFO agents.google.google_source_agent: TIMING google.type_pool_rerank sq=google:focus_2:sq3 type=slide reason=type_bucket input=113 rerank_input=113 output=7 ms=534.7
+2026-05-08 19:10:20,311 INFO agents.google.google_source_agent: [google] type_pool sq=google:focus_2:sq3 before(S=0,D=27,SL=113,G=0,O=0) after=14
+2026-05-08 19:10:20,664 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 净销售额 财务 报 input=14 selected=10 ms=353.0
+2026-05-08 19:10:20,664 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_0:sq1 chunk_rerank input=14 output=10
+2026-05-08 19:10:20,989 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 订单 客单价 运营 input=14 selected=10 ms=325.4
+2026-05-08 19:10:20,990 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_1:sq2 chunk_rerank input=14 output=10
+2026-05-08 19:10:21,324 INFO agents.google.google_source_agent: TIMING google.chunk_select mode=rerank query='REDMAGIC 2025 访客 加购 转化率 input=14 selected=10 ms=334.1
+2026-05-08 19:10:21,324 INFO agents.google.google_source_agent: [google] Phase G sq=google:focus_2:sq3 chunk_rerank input=14 output=10
+2026-05-08 19:10:21,324 INFO agents.google.google_source_agent: TIMING google.batch_total sub_queries=3 chunk_pool=19 ms=17531.5
+2026-05-08 19:10:21,364 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:10:21,364 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:10:22,909 INFO agents.feishu.feishu_source_agent: TIMING feishu.table_read token=P5j6sWqZohZxtxt6 type=SHEET chunks=2 ms=13379.4
+2026-05-08 19:10:22,910 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_table_wait sub_query_id=feishu:focus_1:sq2 parents=2 chunks=5 ms=13379.9
+2026-05-08 19:10:23,324 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select mode=rerank query='redmagic USD 订单' input=26 selected=8 ms=414.1
+2026-05-08 19:10:23,324 INFO agents.feishu.feishu_source_agent: TIMING feishu.chunk_select_doc sub_query_id=feishu:focus_1:sq2 raw=26 selected=8 ms=0
+2026-05-08 19:10:23,324 INFO agents.feishu.feishu_source_agent: TIMING feishu.execute_one_total sub_query_id=feishu:focus_1:sq2 doc=8 table=5 total=13 ms=13794.3
+2026-05-08 19:10:23,325 INFO agents.feishu.feishu_source_agent: TIMING feishu.batch_total sub_queries=3 chunk_pool=32 ms=19664.0
+2026-05-08 19:10:23,364 INFO google_adk.google.adk.models.google_llm: Sending out request, model: gemini-3.1-flash-lite-preview, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2026-05-08 19:10:23,364 INFO google_genai.models: AFC is enabled with max remote calls: 10.
+2026-05-08 19:10:25,400 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:10:25,402 INFO agents.source_agent_base: TIMING source.eval_only source=google input_chunks=19 selected=5 ms=4077.9
+2026-05-08 19:10:25,402 INFO agents.source_agent_base: [google] done: loops=1/1 (min=1), top_chunks=5, elapsed=23.21s
+2026-05-08 19:10:25,402 INFO tools.core.focus_board: FocusBoard: focus_1 SATISFIED by google (critical=2 important=0 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:10:25,829 INFO google_adk.google.adk.models.google_llm: Response received from the model.
+2026-05-08 19:10:25,832 INFO agents.source_agent_base: TIMING source.eval_only source=feishu input_chunks=32 selected=5 ms=2507.2
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi summary total=6 submitted=6 final_selected=0 wasted=6 skipped=0 read_ms=27758.7 read_chunks=11
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=P5j6sWqZohZxtxt6 title='RM S&OP 20260506 11Spro首销最终版' doc_type=SHEET score=0.486 rank=1 selected_child_count=2 structure_child_count=18 child_ratio=0.111 read_ms=13379.4 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_1'] sub_query_ids=['feishu:focus_1:sq2']
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=HJmlbI80ja1vPmst title='✅任务管理 P0 - REDMAGIC DTC US' doc_type=BITABLE score=0.521 rank=3 selected_child_count=1 structure_child_count=1 child_ratio=1.000 read_ms=3222.0 read_chunks=1 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=Y6MNsmWwQhI3rXtt title='新国家测试订单跟进表' doc_type=SHEET score=0.473 rank=4 selected_child_count=2 structure_child_count=12 child_ratio=0.167 read_ms=3077.0 read_chunks=3 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_1'] sub_query_ids=['feishu:focus_1:sq2']
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=TqcHb1VXiamm4jso title='用户使用日志' doc_type=BITABLE score=0.451 rank=2 selected_child_count=2 structure_child_count=3 child_ratio=0.667 read_ms=3062.1 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_2'] sub_query_ids=['feishu:focus_2:sq3']
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=Mt54briZcaKQEFsO title='Track & Ship' doc_type=BITABLE score=0.450 rank=5 selected_child_count=2 structure_child_count=2 child_ratio=1.000 read_ms=2918.7 read_chunks=2 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_0'] sub_query_ids=['feishu:focus_0:sq1']
+2026-05-08 19:10:25,832 INFO agents.feishu.feishu_source_agent: [feishu] table roi token=YtxnbDNYiaurdDsO title='用户使用日志 2.0' doc_type=BITABLE score=0.426 rank=3 selected_child_count=1 structure_child_count=1 child_ratio=1.000 read_ms=2099.5 read_chunks=1 submit_selected=True submit_skipped=False final_selected=False focus_ids=['focus_2'] sub_query_ids=['feishu:focus_2:sq3']
+2026-05-08 19:10:25,833 INFO agents.source_agent_base: [feishu] done: loops=1/1 (min=1), top_chunks=5, elapsed=23.70s
+2026-05-08 19:10:25,833 INFO tools.core.focus_board: FocusBoard: focus_0 SATISFIED by feishu (critical=2 important=2 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:10:25,833 INFO tools.core.focus_board: FocusBoard: focus_2 SATISFIED by feishu (critical=2 important=1 quota={'critical_min': 2, 'important_min': 0})
+2026-05-08 19:10:25,838 INFO tools.core.final_assembler: assemble_final_chunks: rule path picked=10 / candidates=10 / cap=12
+2026-05-08 19:10:25,838 INFO p1p5_e2e: [done] preset=balanced Q50 elapsed=27.92s emitted=10 merged=10 C/I/N=6/4/0 err=-
+2026-05-08 19:10:25,841 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.json
+2026-05-08 19:10:25,841 INFO p1p5_e2e: wrote /Users/javendai/Documents/workplace/Multi-source_RAG_Agent/test_p1_p5_e2e_report.md
+
+# P1-P5 Multi-Source E2E Report
+
+## balanced
+
+| Q | Latency | Focuses | TopK cap | Emitted | Merged | C/I/Noise | Sources | Max Angle Redundancy | Schema OK | Error |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Q50 | 27.92s | 3 | 12 | 10 | 10 | 6/4/0 | feishu:5,google:5 | 1 | ✅ | - |
+
+### Q50 focus_board
+```json
+{
+  "focus_0": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 2,
+    "noise": 0,
+    "contributors": [
+      "feishu",
+      "google"
+    ],
+    "targets": [
+      "google",
+      "feishu"
+    ]
+  },
+  "focus_1": {
+    "status": "satisfied",
+    "critical": 3,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "feishu",
+      "google"
+    ],
+    "targets": [
+      "google",
+      "feishu"
+    ]
+  },
+  "focus_2": {
+    "status": "satisfied",
+    "critical": 2,
+    "important": 1,
+    "noise": 0,
+    "contributors": [
+      "feishu",
+      "google"
+    ],
+    "targets": [
+      "google",
+      "feishu"
+    ]
+  }
+}
+```
+angle_tag distribution: {'financial-report': 1, 'sales-performance': 1, 'operational-metrics': 1, 'order-metrics': 1, 'conversion-funnel': 1, 'conversion-rate': 1, 'regional-sales': 1, 'store-performance': 1, 'traffic-metrics': 1, 'financial-data': 1}
+

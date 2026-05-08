@@ -613,3 +613,51 @@ source_relevance_thresholds: Dict[str, float] = {
 | P4 | Wiki 知识空间全量检索 | 中 | 知识库场景 |
 | P5 | 文件夹作用域搜索 | 小-中 | 精准业务域 |
 | P6 | 架构重构（dispatcher + reader 拆分） | 大 | 可维护性，待 read 能力完善后 |
+
+---
+
+## 10. v5.0 飞书工具层升级（2026-05-08）
+
+> 配合 `spec_plan.md §23` 的 v4.0 架构跃迁，feishu 工具层做三处增强。
+> 验证日志 `docs/session_logs/2026-05-08_p1_p5_executor/`。
+
+### 10.1 FeishuDocPool 抗频控
+
+```python
+# tools/feishu/feishu_doc_pool.py
+MCP_CONCURRENCY = 6           # 飞书 MCP QPS 上限（防 NETWORK:5002 request trigger frequency limit）
+MCP_RETRY_BACKOFF_S = 0.8     # 失败重试 backoff
+MCP_MAX_ATTEMPTS = 2          # 初次 + 1 次 retry 共 2 次
+self._mcp_sem = asyncio.Semaphore(MCP_CONCURRENCY)
+```
+
+每条 MCP 请求过 `_mcp_sem`；`status != "success"` 或异常时按 backoff retry 一次。
+
+效果：5002 错误本身仍存在（飞书后端速率限制比 6 QPS 还紧），但**所有失败 doc 经 retry 救回，最终丢失数 = 0**。
+
+### 10.2 TablePool single-flight
+
+`get_sheet_structure` / `get_bitable_structure` 加 per-token `asyncio.Event` 防并发重复 API：
+
+```text
+1. cache hit         → 立即返回 (TIMING ... cache=hit)
+2. inflight 已存在   → await event.wait() → 取 cache (cache=inflight)
+3. 自己是首发       → 注册 event → API 调用 → 写 cache → set 事件 (cache=miss)
+```
+
+实测：deep_dive/Q51 wall-clock −6.3s（同 query 内 22 次重复 API 归零）。
+
+### 10.3 Executor 注入支持
+
+`FeishuDocPool` / `TablePool` 构造函数加 `executor: Optional[concurrent.futures.Executor] = None`。
+`FeishuSourceAgent.__init__` 自动把 `self._executor` 注入给两 pool（pool._executor=None 时）。
+
+`tools/feishu/feishu_retrieve.py` 的 `search_and_select_feishu_doc_candidates` /
+`search_and_select_feishu_table_candidates` 加 `executor=` kwarg；
+内部 `await asyncio.to_thread(...)` → `await _exec_to_thread(executor, ...)`。
+
+`_exec_to_thread` 含 `contextvars.copy_context()` 传播以匹配 `asyncio.to_thread` 语义。
+
+效果：feishu 与 google 不再争抢 Python 全局默认 ThreadPoolExecutor（~12 worker），feishu
+单源 Q50/balanced 从 20.20s → 17.19s（-15%）；多源协同开销从 +2.49s → +1.14s（-54%）。
+

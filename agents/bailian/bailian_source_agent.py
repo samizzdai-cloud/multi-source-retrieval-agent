@@ -75,11 +75,13 @@ class BailianSourceAgent(SourceAgent):
     """百炼 SourceAgent（v2：LLM plan_only 自主产 tags/indexes）。"""
 
     source = "bailian"
+    DEFAULT_EXECUTOR_WORKERS: int = 8       # 单调用为主，少量线程足够
 
     def __init__(
         self,
         cfg: Optional[SourceAgentConfig] = None,
         allowed_indexes: Optional[List[str]] = None,
+        executor_workers: Optional[int] = None,
     ):
         """构造 BailianSourceAgent。
 
@@ -94,6 +96,7 @@ class BailianSourceAgent(SourceAgent):
         super().__init__(
             profile=profile,
             cfg=cfg,
+            executor_workers=executor_workers,
         )
         self._allowed_indexes = list(allowed_indexes or [])
 
@@ -158,6 +161,7 @@ class BailianSourceAgent(SourceAgent):
             tags=tags or None,
             indexes=indexes if indexes else None,
             rerank_top_n_override=self.cfg.sub_query_top_n,
+            executor=self._executor,
         )
         if not uc_list:
             return []

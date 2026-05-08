@@ -69,13 +69,15 @@ class NotionSourceAgent(SourceAgent):
     """Notion SourceAgent（骨架，底层 tool 未实装）。"""
 
     source = "notion"
+    DEFAULT_EXECUTOR_WORKERS: int = 4
 
-    def __init__(self, cfg: Optional[SourceAgentConfig] = None):
+    def __init__(self, cfg: Optional[SourceAgentConfig] = None, executor_workers: Optional[int] = None):
         cfg = cfg or SourceAgentConfig()
         profile = get_profile("notion")
         super().__init__(
             profile=profile,
             cfg=cfg,
+            executor_workers=executor_workers,
         )
 
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:

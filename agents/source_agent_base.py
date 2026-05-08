@@ -17,6 +17,9 @@ LLM 调用走 ``google.adk.Runner`` 单例 + ``InMemorySessionService``（零持
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import json
 import logging
 import time
@@ -267,14 +270,26 @@ def _build_plan_eval_prompt(
     min_loops: int,
     max_loops: int,
     source_top_k: int,
+    focus_status: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    return (
-        f"focuses_block:\n{_focuses_block(focuses)}\n\n"
-        f"current_date: {date.today().isoformat()}\n\n"
-        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}\n\n"
-        f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}\n"
-        f"source_top_k: {source_top_k}"
-    )
+    """P4: focus_status 由 retrieve_agent 注入的 FocusBoard.snapshot() 提供。
+
+    格式: {focus_id: {status, critical, important, noise, contributors, targets}}
+    LLM 据此判断哪些 focus 已被别的源 SATISFIED → 不再为该 focus 生成 replan_queries。
+    """
+    parts = [
+        f"focuses_block:\n{_focuses_block(focuses)}",
+        f"current_date: {date.today().isoformat()}",
+        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}",
+        f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}",
+        f"source_top_k: {source_top_k}",
+    ]
+    if focus_status:
+        parts.append(
+            "focus_status (跨源已知状态；status=satisfied 的 focus 不要再 replan):\n"
+            + json.dumps(focus_status, ensure_ascii=False)
+        )
+    return "\n\n".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -288,17 +303,25 @@ class SourceAgent:
 
     source: str = ""                          # 子类覆盖："feishu" / "bailian" / ...
 
+    # 默认每源专属线程池大小；子类可覆盖（GoogleSourceAgent=20, FeishuSourceAgent=16, ...）
+    DEFAULT_EXECUTOR_WORKERS: int = 12
+
     def __init__(
         self,
         profile: SourceProfile,
         cfg: SourceAgentConfig,
         execute_fn: Optional[ExecuteFn] = None,
+        executor_workers: Optional[int] = None,
     ):
         """构造 SourceAgent 基类。
 
         子类需要覆写 _build_xxx_agent 钩子来提供源特定的 LLM Agents。
         若 _build_plan_only_agent 返回 None，此时子类必须覆写
         ``_plan_sub_queries(focuses)`` 用确定性逻辑直接把 focus 映射成 sub_queries。
+
+        executor_workers: 该源专属 ThreadPoolExecutor 的 worker 数。None 时用类默认。
+        所有 ``self._to_thread`` / 通过 ``self._executor`` 提交的 to_thread 调用都会走
+        本源池子，避免与其他源在 Python 默认全局池里争抢。
         """
         self.profile = profile
         self.cfg = cfg
@@ -312,6 +335,30 @@ class SourceAgent:
         # 子类（如 GoogleSourceAgent）可在 _execute_batch 中提前 fire eval_only LLM 调用，
         # 与 batch_total 末尾的 sub-query rerank 并行，节省 1-2s 串行开销。
         self._eval_preview_task: Optional["asyncio.Task[List[ChunkEntry]]"] = None
+        # 源专属线程池——所有 self._to_thread 调用都走这里，避免全局默认池竞争
+        workers = int(executor_workers if executor_workers is not None else self.DEFAULT_EXECUTOR_WORKERS)
+        self._executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix=f"src-{self.source or 'unknown'}",
+        )
+
+    async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """``asyncio.to_thread`` 的源专属版本：路由到 ``self._executor``。
+
+        签名与 ``asyncio.to_thread`` 一致（含 contextvars 传播）；多源场景下避免争抢
+        Python 默认全局线程池。
+        """
+        loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
+        func_call = functools.partial(ctx.run, fn, *args, **kwargs)
+        return await loop.run_in_executor(self._executor, func_call)
+
+    async def aclose(self) -> None:
+        """退出时调用，释放线程池资源。"""
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         """构造用于第一轮规划的 LLM Agent，子类覆写。"""
@@ -440,8 +487,9 @@ class SourceAgent:
 
         elapsed = asyncio.get_event_loop().time() - start
         logger.info(
-            "[%s] done: loops=%d, top_chunks=%d, elapsed=%.2fs",
-            self.source, result.loops_used, len(result.top_chunks), elapsed,
+            "[%s] done: loops=%d/%d (min=%d), top_chunks=%d, elapsed=%.2fs",
+            self.source, result.loops_used, self.cfg.max_loops, self.cfg.min_loops,
+            len(result.top_chunks), elapsed,
         )
         result.elapsed_s = elapsed
         return result
@@ -469,6 +517,21 @@ class SourceAgent:
                 self._eval_preview_task.cancel()
                 self._eval_preview_task = None
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
+
+        # P5 (吸收 P6): 所有 targeted focus 已被外部 SATISFIED + chunk_pool 也仅含被早停的残余
+        # → 跳过 eval_only LLM 兜底，直接返回（节省 ~1-2s LLM RTT）
+        board = getattr(self, "_focus_board", None)
+        if board is not None and focuses:
+            targeted_fids = {f.focus_id for f in focuses}
+            if targeted_fids and all(board.is_satisfied(fid) for fid in targeted_fids):
+                logger.info(
+                    "[%s] all targeted focuses externally satisfied + cancellation in effect → skip eval_only",
+                    self.source,
+                )
+                if self._eval_preview_task is not None:
+                    self._eval_preview_task.cancel()
+                    self._eval_preview_task = None
+                return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
 
         # C. eval_only 收尾（单 loop 场景下按 spec §2.4 必跑一次）
         if self._eval_preview_task is not None:
@@ -518,10 +581,25 @@ class SourceAgent:
                 logger.warning("[%s] loop=%d chunk_pool empty → stop early", self.source, loop_n)
                 break
 
+            # P4: 读 FocusBoard 快照（如有）—— focus-aware plan_eval
+            board = getattr(self, "_focus_board", None)
+            focus_status = board.snapshot() if board is not None else None
+
+            # P4: 若所有 targeted focus 都已被别的源 SATISFIED，提前 stop（跳过 plan_eval LLM）
+            if board is not None and focuses:
+                targeted_fids = {f.focus_id for f in focuses}
+                if targeted_fids and all(board.is_satisfied(fid) for fid in targeted_fids):
+                    logger.info(
+                        "[%s] loop=%d all %d targeted focuses externally satisfied → stop early",
+                        self.source, loop_n, len(targeted_fids),
+                    )
+                    break
+
             pe_prompt = _build_plan_eval_prompt(
                 focuses, list(chunk_pool.values()),
                 loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
                 source_top_k=self.cfg.source_top_k,
+                focus_status=focus_status,
             )
             pe_out = await _run_llm_agent(self.plan_eval, pe_prompt)
             pe_out = validate_plan_eval_output(pe_out)
@@ -548,6 +626,15 @@ class SourceAgent:
                     )
                     for q in (pe_out.get("replan_queries") or [])
                 ]
+                # P4: 过滤掉已 satisfied focus 的 replan（即便 LLM 漏读 focus_status）
+                if board is not None:
+                    before_n = len(replan)
+                    replan = [sq for sq in replan if not board.is_satisfied(sq.target_focus)]
+                    if len(replan) < before_n:
+                        logger.info(
+                            "[%s] loop=%d dropped %d replan_queries targeting satisfied focuses",
+                            self.source, loop_n, before_n - len(replan),
+                        )
                 replan = self._assign_sub_query_ids(replan)
                 if not replan:
                     logger.warning("[%s] loop=%d continue with empty replan → stop", self.source, loop_n)
@@ -637,6 +724,10 @@ class SourceAgent:
             new_meta = dict(entry.metadata or {})
             if valid_ans:
                 new_meta["answered_focuses"] = list(valid_ans)
+            # P2: angle_tag —— 同角度去重的唯一依据
+            angle_tag = (info.get("angle_tag") or "").strip().lower()
+            if angle_tag:
+                new_meta["angle_tag"] = angle_tag
             entry = ChunkEntry(
                 id=entry.id,
                 source=entry.source,
@@ -654,9 +745,60 @@ class SourceAgent:
     async def _execute_batch(
         self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry],
     ) -> None:
+        # P5: 提交前 gate —— focus_board 已 SATISFIED 的 target_focus 直接跳过 I/O
+        board = getattr(self, "_focus_board", None)
+        if board is not None:
+            before_n = len(sub_queries)
+            sub_queries = [sq for sq in sub_queries if not board.is_satisfied(sq.target_focus)]
+            if len(sub_queries) < before_n:
+                logger.info(
+                    "[%s] _execute_batch: skipped %d sub_queries (focus already satisfied externally)",
+                    self.source, before_n - len(sub_queries),
+                )
+        if not sub_queries:
+            return
+
         async def _one(sq: SubQuery) -> List[ChunkEntry]:
+            # P5 (event-driven): 在飞行 cancel —— 用 asyncio.wait FIRST_COMPLETED 同时
+            # 监听 fetch_task 与 focus 满足事件，触发哪个就响应哪个，无 polling 开销
             try:
-                return await self.execute_sub_query_full(sq)
+                if board is None:
+                    return await self.execute_sub_query_full(sq)
+                sat_event = board.satisfied_event(sq.target_focus)
+                if sat_event is None or sat_event.is_set():
+                    # 事件不可用或 focus 已经满足 —— 直接跳过
+                    if sat_event is not None and sat_event.is_set():
+                        logger.info(
+                            "[%s] sub_query gate: focus=%s already satisfied → skip",
+                            self.source, sq.target_focus,
+                        )
+                        return []
+                    return await self.execute_sub_query_full(sq)
+
+                fetch_task = asyncio.create_task(self.execute_sub_query_full(sq))
+                sat_task = asyncio.create_task(sat_event.wait())
+                done, pending = await asyncio.wait(
+                    {fetch_task, sat_task}, return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if fetch_task in done:
+                    # fetch 先完成 —— 取消 sat_task 并返回结果
+                    sat_task.cancel()
+                    return fetch_task.result()
+
+                # focus satisfied 信号先到 —— 取消 fetch
+                fetch_task.cancel()
+                try:
+                    await fetch_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                logger.info(
+                    "[%s] in-flight cancel sq=%r (focus=%s satisfied externally)",
+                    self.source, sq.query[:60], sq.target_focus,
+                )
+                return []
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.warning("[%s] sub_query %r failed: %s", self.source, sq.query, e)
                 return []

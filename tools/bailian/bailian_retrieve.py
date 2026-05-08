@@ -8,9 +8,27 @@
 """
 
 import asyncio
+import concurrent.futures
+import contextvars
+import functools
 import logging
 import os
-from typing import Dict, Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+
+async def _exec_to_thread(
+    executor: Optional[concurrent.futures.Executor],
+    fn: Callable[..., Any],
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """模块级 to_thread helper：executor=None 走默认池。保留 contextvars 传播。"""
+    if executor is None:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    loop = asyncio.get_event_loop()
+    ctx = contextvars.copy_context()
+    func_call = functools.partial(ctx.run, fn, *args, **kwargs)
+    return await loop.run_in_executor(executor, func_call)
 
 from dotenv import load_dotenv
 
@@ -216,6 +234,7 @@ async def bailian_retrieve_unified(
     indexes: Optional[List[str]] = None,
     rerank_top_n_override: Optional[int] = None,
     rerank_min_score_override: Optional[float] = None,
+    executor: Optional[concurrent.futures.Executor] = None,
 ) -> List[UnifiedChunk]:
     """百炼多知识库并行检索，返回 UnifiedChunk 列表。
 
@@ -266,8 +285,8 @@ async def bailian_retrieve_unified(
     _rerank_min = rerank_min_score_override if rerank_min_score_override is not None else 0.5
 
     async def _fetch_one(name: str, idx_id: str, call_tags: Optional[List[str]]) -> List[UnifiedChunk]:
-        r = await asyncio.to_thread(
-            _retrieve_single_index, query, idx_id, call_tags or None,
+        r = await _exec_to_thread(
+            executor, _retrieve_single_index, query, idx_id, call_tags or None,
             rerank_min_score=_rerank_min, rerank_top_n=_rerank_top,
         )
         if r.get("status") != "success":
