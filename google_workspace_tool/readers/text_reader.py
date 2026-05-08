@@ -7,6 +7,8 @@ from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import csv
+import io
 
 from google_workspace_tool.utils.download_utils import download_file
 
@@ -147,23 +149,77 @@ def read_chunks(
     max_chunk_tokens: int = 800,
     download_timeout: int = 15,
     known_title: Optional[str] = None,
+    known_mime_type: Optional[str] = None,
+    range_names: Optional[list[str]] = None,
+    query: Optional[str] = None,
+    enable_excel_filter: bool = False,
 ) -> list:
     """读取文本并切分为 chunks。"""
     from google_workspace_tool.chunkers import markdown_to_chunks, GoogleChunk
-    result = read_one(file_id=file_id, creds=creds, supports_all_drives=supports_all_drives, download_timeout=download_timeout, known_title=known_title)
+    result = read_one(
+        file_id=file_id,
+        creds=creds,
+        supports_all_drives=supports_all_drives,
+        download_timeout=download_timeout,
+        known_title=known_title,
+        known_mime_type=known_mime_type,
+    )
     if result.get("error") or not result.get("structured_md"):
         return []
     title = result.get("title", "")
     file_url = f"https://drive.google.com/file/d/{file_id}/view"
     
     md = result["structured_md"]
+
+    if result.get("mime_type") == _MIME_CSV:
+        from google_workspace_tool.chunkers import GoogleChunk
+        from google_workspace_tool.chunkers.md_chunker import estimate_tokens
+        from google_workspace_tool.utils.table_utils import split_sections, process_section_to_markdown
+
+        rows = list(csv.reader(io.StringIO(md)))
+        chunks = []
+        for sec_idx, (start_idx, end_idx) in enumerate(split_sections(rows)):
+            section_rows = rows[start_idx:end_idx + 1]
+            table_md, is_bm25_filtered, effective_row_count, cov_score = process_section_to_markdown(
+                section_rows=section_rows,
+                query=query,
+                merges=None,
+                section_start_global=start_idx,
+            )
+            if not table_md.strip():
+                continue
+            chunk = GoogleChunk(
+                file_id=file_id,
+                chunk_id=f"google:csv:{file_id}:s{sec_idx}",
+                file_title=title,
+                file_url=file_url,
+                content=table_md,
+                content_type="table_md",
+                heading_path=f"CSV: {title}",
+                token_count=estimate_tokens(table_md),
+                has_table=True,
+                metadata={
+                    "mime_type": result.get("mime_type"),
+                    "drive_size": result.get("drive_size"),
+                    "sheet_title": title,
+                    "section_idx": sec_idx,
+                    "row_start": start_idx,
+                    "row_end": end_idx,
+                    "table_rows": effective_row_count,
+                    "header_coverage": round(cov_score, 3),
+                    "is_bm25_filtered": is_bm25_filtered,
+                },
+            )
+            chunks.append(chunk)
+        return chunks
         
+    source_tag = "google:csv" if result.get("mime_type") == _MIME_CSV else "google:txt"
     chunks = markdown_to_chunks(
         markdown=md,
         file_id=file_id,
         file_title=title,
         file_url=file_url,
-        source_tag="google:txt",
+        source_tag=source_tag,
         max_chunk_tokens=max_chunk_tokens,
         metadata={"mime_type": result.get("mime_type"), "drive_size": result.get("drive_size")},
     )

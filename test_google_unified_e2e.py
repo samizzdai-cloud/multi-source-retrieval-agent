@@ -36,6 +36,8 @@ QUERIES = [
     {"id": 4, "query": "nubia 日本市场的KOL合作名单和已确认的博主合作进度"},
     {"id": 44, "query": "REDMAGIC 11 Pro 各站点首发销量和DTC渠道表现"},
     {"id": 48, "query": "REDMAGIC 品牌在游戏手机赛道的竞品格局和用户认知度"},
+    {"id": 50, "query": "redmagic 2025年度的净销售额(原货币）净销售额 (USD) 订单数 客单价(USD) 访客数 加购数 转化率"},
+    {"id": 51, "query": "nubia 的产品和销售业务和销售额等的背景信息（近6个月）"},
 ]
 
 

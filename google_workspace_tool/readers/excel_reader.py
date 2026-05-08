@@ -236,36 +236,11 @@ def read_chunks(
         sheet_names = wb.sheetnames
         
         # 1. 结构级筛选
+        # Excel/CSV are selected at the sheet-family level upstream. Once the
+        # file is downloaded, process all internal worksheets so subquery-level
+        # sheet rerank can decide using actual table chunks.
         selected_sheets = sheet_names
-        if enable_excel_filter and query:
-            try:
-                from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-                candidates = []
-                for s_name in sheet_names:
-                    sheet = wb[s_name]
-                    candidates.append({
-                        "id": s_name,
-                        "title": f"{title} / {s_name}",
-                        "summary": f"Rows: {sheet.max_row} | Cols: {sheet.max_column}",
-                        "_sheet_title": s_name
-                    })
-                
-                if len(candidates) > 2:
-                    question = build_focus_sub_query_question(query, query)
-                    rerank_result = select_search_candidates(
-                        query=question,
-                        candidates=candidates,
-                        top_n=2,
-                        score_threshold=0.18,
-                        min_keep=1,
-                        instruct_template="qa"
-                    )
-                    if rerank_result.get("status") == "success":
-                        selected_cands = list(rerank_result.get("selected_candidates") or [])
-                        selected_sheets = [c["_sheet_title"] for c in selected_cands]
-            except Exception as e:
-                pass
-        elif range_names:
+        if range_names:
             selected_sheets = [s for s in sheet_names if s in range_names]
             
         # 2. 读取选中 sheets 并执行行级过滤
@@ -292,7 +267,7 @@ def read_chunks(
                 
                 chunk = GoogleChunk(
                     file_id=file_id,
-                    chunk_id=f"{file_id}_{sheet_name}_s{sec_idx}",
+                    chunk_id=f"google:excel:{file_id}:{sheet_name}:s{sec_idx}",
                     file_title=title,
                     file_url=file_url,
                     content=md,

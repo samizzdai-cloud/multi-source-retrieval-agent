@@ -250,6 +250,19 @@ def _format_label(mime: Optional[str]) -> str:
     }.get(mime or "", "unknown")
 
 
+def _chunk_family(source_tool: Optional[str]) -> str:
+    tool = source_tool or ""
+    if tool in ("google:sheet", "google:excel", "google:csv"):
+        return "sheet"
+    if tool in ("google:slide", "google:pptx"):
+        return "slide"
+    if tool in ("google:doc", "google:word", "google:txt"):
+        return "doc"
+    if tool.startswith("google:gmail"):
+        return "gmail"
+    return "other"
+
+
 _TITLE_NORM_STRIP_RE = re.compile(r"[\s\W_]+", flags=re.UNICODE)
 _TITLE_NORM_TRAILING_YEAR_RE = re.compile(r"(?:[\-_\s/]?20\d{2}(?:年)?)+\s*$")
 
@@ -1402,6 +1415,8 @@ class GoogleSourceAgent(SourceAgent):
         doc_pool = self._ensure_doc_pool()
         slide_pool = self._ensure_slide_pool()
         gmail_pool = self._ensure_gmail_pool()
+        from google_workspace_tool.doc_pool import DocPool, DocMeta, DocSelection
+        sheet_nonnative_pool = DocPool()
 
         # 从 search results 提取 Doc/Slide 元数据存入 pool
         for res in search_results:
@@ -1410,16 +1425,18 @@ class GoogleSourceAgent(SourceAgent):
                 fid = f.get("id")
                 if not fid:
                     continue
-                # doc_pool 实质上是「binary 下载路径」的元数据池：
-                # - 原生 Google Doc 走 documents().get（在 read_drive_chunks 内部）
-                # - DOCX/TXT/XLSX/XLS/XLSM/CSV 走 Drive files().get_media 下载
-                #   并在 reader 层（excel_reader/text_reader/word_reader）解析
-                # 三者读取流均由 read_drive_chunks 按 mime 路由，所以共享同一池即可。
-                if mime == _MIME_DOCS or mime in (
-                    _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT,
-                    _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
-                ):
-                    from google_workspace_tool.doc_pool import DocMeta
+                if mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV):
+                    sheet_nonnative_pool.add_meta(DocMeta(
+                        file_id=fid,
+                        title=f.get("name", ""),
+                        url=f"https://drive.google.com/file/d/{fid}/view",
+                        mime_type=mime,
+                        description=f.get("description", ""),
+                        drive_size=_drive_file_size(f),
+                        modified_time=f.get("modifiedTime"),
+                        owner=", ".join([o.get("displayName", "") for o in f.get("owners", []) if o.get("displayName")]),
+                    ))
+                elif mime == _MIME_DOCS or mime in (_MIME_WORD, _MIME_WORD_OLD, _MIME_TXT):
                     doc_pool.add_meta(DocMeta(
                         file_id=fid,
                         title=f.get("name", ""),
@@ -1465,12 +1482,22 @@ class GoogleSourceAgent(SourceAgent):
 
         # C1. Sheet 筛选（收紧：精准搜索后只保留 top 5 sheets）
         sq_sheet_selections: Dict[str, List[SheetSelection]] = {}
+        sq_sheet_nonnative_selections: Dict[str, List[DocSelection]] = {}
         for res in search_results:
             sq = res["sq"]
             sq_sheet_selections[sq.sub_query_id] = []
+            sq_sheet_nonnative_selections[sq.sub_query_id] = []
             focus_text = focus_text_map[sq.sub_query_id]
             for f in res.get("files", []):
-                if f.get("mimeType") != _MIME_SHEETS:
+                mime = f.get("mimeType")
+                if mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV):
+                    fid = f.get("id")
+                    if fid:
+                        sq_sheet_nonnative_selections[sq.sub_query_id].append(
+                            DocSelection(file_id=fid, sub_query_id=sq.sub_query_id, focus_id=sq.target_focus)
+                        )
+                    continue
+                if mime != _MIME_SHEETS:
                     continue
                 fid = f.get("id")
                 if not fid:
@@ -1485,13 +1512,9 @@ class GoogleSourceAgent(SourceAgent):
                         SheetSelection(file_id=fid, selected_titles=selected_titles,
                                        sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
 
-        # C2. Doc 筛选（统一处理原生 Doc + word/docx/txt + excel/csv）
-        # 注：Excel/CSV 在 Phase A 由 sheet_mimes 搜索召回（搜索语义按表格），
-        # 但读取走 binary download 路径与 Word/Doc 同池，故并入 doc 候选选择层。
-        # native Sheet（_MIME_SHEETS）走 C1 单独的 tab 选择路径。
+        # C2. Doc 筛选（原生 Doc + word/docx/txt）。Excel/CSV 已归入 sheet family。
         _DOC_SIZE_THRESHOLD = int(self.cfg.google_native_doc_size_gate_bytes)
         _WORD_SIZE_THRESHOLD = int(self.cfg.google_word_size_gate_bytes)
-        # Excel/CSV 大小上限沿用 word_size_gate；CSV 通常 < 几 MB，实际走 download_timeout 兜底
         def _doc_filter(f: dict) -> bool:
             mime = f.get("mimeType")
             size = _drive_file_size(f)
@@ -1507,17 +1530,10 @@ class GoogleSourceAgent(SourceAgent):
                     f.get("id"), size, f.get("name"),
                 )
                 return False
-            if mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO) and size and size > _WORD_SIZE_THRESHOLD:
-                logger.warning(
-                    "[google] skip oversized excel id=%s size=%s name=%.40r",
-                    f.get("id"), size, f.get("name"),
-                )
-                return False
             return True
 
         _DOC_FAMILY_MIMES = (
             _MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT,
-            _MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV,
         )
         sq_doc_selections: Dict[str, List] = {}  # sq_id → [DocSelection]
         for res in search_results:
@@ -1554,7 +1570,6 @@ class GoogleSourceAgent(SourceAgent):
                 logger.info("[google] doc filter skipped %d oversized native docs for sq=%s, kept %d",
                             skipped_count, sq.sub_query_id, len(selected_docs))
             for fid in selected_docs:
-                from google_workspace_tool.doc_pool import DocSelection
                 sq_doc_selections[sq.sub_query_id].append(
                     DocSelection(file_id=fid, sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
 
@@ -1677,6 +1692,11 @@ class GoogleSourceAgent(SourceAgent):
             all_sheet_selections.extend(selections)
         merged_sheets = SheetPool.merge_selections(all_sheet_selections)
 
+        all_sheet_nonnative_selections = []
+        for selections in sq_sheet_nonnative_selections.values():
+            all_sheet_nonnative_selections.extend(selections)
+        merged_sheet_nonnative = sheet_nonnative_pool.merge_selections(all_sheet_nonnative_selections)
+
         all_doc_selections = []
         for selections in sq_doc_selections.values():
             all_doc_selections.extend(selections)
@@ -1692,12 +1712,12 @@ class GoogleSourceAgent(SourceAgent):
             all_gmail_selections.extend(selections)
         merged_gmail = gmail_pool.merge_selections(all_gmail_selections)  # thread_id → set(sq_ids)
 
-        logger.info("[google] Phase D summary: merged_sheets=%d merged_docs=%d merged_slides=%d merged_gmail=%d",
-                    len(merged_sheets), len(merged_docs), len(merged_slides), len(merged_gmail))
+        logger.info("[google] Phase D summary: merged_sheets=%d merged_sheet_nonnative=%d merged_docs=%d merged_slides=%d merged_gmail=%d",
+                    len(merged_sheets), len(merged_sheet_nonnative), len(merged_docs), len(merged_slides), len(merged_gmail))
         timeout_s = self.cfg.source_timeout_s
         logger.info(
-            "[google] Phase E queue summary sheets=%d docs=%d slides=%d gmail=%d executor_workers=%d per_file_timeout=%.1fs",
-            len(merged_sheets), len(merged_docs), len(merged_slides), len(merged_gmail), 12, min(20.0, timeout_s),
+            "[google] Phase E queue summary sheets=%d sheet_nonnative=%d docs=%d slides=%d gmail=%d executor_workers=%d per_file_timeout=%.1fs",
+            len(merged_sheets), len(merged_sheet_nonnative), len(merged_docs), len(merged_slides), len(merged_gmail), 12, min(20.0, timeout_s),
         )
 
         # ── Phase E: 并发读取（四类独立，互不等待）───────────────────────────
@@ -1794,6 +1814,70 @@ class GoogleSourceAgent(SourceAgent):
                 uc_list = []
             sheet_pool.mark_done(fid, uc_list)
 
+        def _read_sheet_nonnative_task(fid: str) -> None:
+            if not sheet_nonnative_pool.mark_reading(fid):
+                return
+            started = time.perf_counter()
+            meta = sheet_nonnative_pool.get_meta(fid)
+            mime = meta.mime_type if meta else _MIME_EXCEL
+            sq_ids = merged_sheet_nonnative.get(fid, set())
+            query = _resolve_query_for_sq_ids(sq_ids)
+            try:
+                from tools.google.google_retrieve import _google_chunk_to_unified
+                _ck = _cache_key(fid, mime)
+                _gc_cached = _cache_get(_ck, self.cfg.google_file_content_cache_ttl_s) if self.cfg.google_enable_file_content_cache else None
+                if _gc_cached is not None:
+                    gc_list = _gc_cached
+                    logger.info("[google] sheet_nonnative cache HIT %s", _short_id(fid))
+                else:
+                    _known_meta = None
+                    if meta:
+                        _known_meta = {
+                            "name": meta.title,
+                            "size": meta.drive_size,
+                            "modifiedTime": meta.modified_time,
+                            "mimeType": mime,
+                        }
+                    gc_list = read_drive_chunks(
+                        file_id=fid,
+                        mime_type=mime,
+                        creds=creds,
+                        max_chunk_tokens=800,
+                        download_timeout=int(self.cfg.google_download_timeout_s),
+                        native_api_timeout=int(self.cfg.google_api_timeout_s),
+                        supports_all_drives=True,
+                        query=query,
+                        known_title=meta.title if meta else None,
+                        known_metadata=_known_meta,
+                        enable_excel_filter=False,
+                    )
+                    if self.cfg.google_enable_file_content_cache and gc_list:
+                        _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
+                uc_list = [_google_chunk_to_unified(gc, query) for gc in gc_list]
+                if len(uc_list) > int(self.cfg.google_sheet_chunk_cap):
+                    orig_len = len(uc_list)
+                    cap = int(self.cfg.google_sheet_chunk_cap)
+                    uc_list = _fallback_select(uc_list, cap)
+                    logger.info("[google] sheet_nonnative truncate %s: %d -> %d", fid, orig_len, cap)
+                if meta:
+                    for uc in uc_list:
+                        uc.metadata.setdefault("modified_time", meta.modified_time)
+                        uc.metadata.setdefault("drive_size", meta.drive_size)
+                        uc.metadata.setdefault("owner", meta.owner)
+                size = meta.drive_size if meta else None
+                logger.info(
+                    "TIMING google.file_read type=sheet_nonnative file=%s mime=%s size=%s gc=%d uc=%d ms=%.1f",
+                    _short_id(fid), mime.rsplit(".", 1)[-1], size if size is not None else "N/A",
+                    len(gc_list), len(uc_list), _elapsed_ms(started),
+                )
+                status = "ok" if len(uc_list) > 0 else "zero_chunks"
+                _log_file_read(fid, "sheet_nonnative", sq_ids, status, len(uc_list))
+            except Exception as e:
+                logger.warning("[google] sheet_nonnative read failed %s: %s", fid, e)
+                _log_file_read(fid, "sheet_nonnative", sq_ids, "failed", 0, str(e))
+                uc_list = []
+            sheet_nonnative_pool.mark_done(fid, uc_list)
+
         def _read_doc_task(fid: str) -> None:
             if not doc_pool.mark_reading(fid):
                 return
@@ -1821,9 +1905,6 @@ class GoogleSourceAgent(SourceAgent):
                             "modifiedTime": meta.modified_time,
                             "mimeType": mime,
                         }
-                    # Excel/CSV 走与 Word/Doc 同一池路径，但需要把 enable_excel_filter
-                    # 透传给 excel_reader / text_reader 用于行级 Qwen 过滤。
-                    is_excel_or_csv = mime in (_MIME_EXCEL, _MIME_EXCEL_OLD, _MIME_EXCEL_MACRO, _MIME_CSV)
                     gc_list = read_drive_chunks(
                         file_id=fid, mime_type=mime, creds=creds,
                         max_chunk_tokens=800,
@@ -1833,7 +1914,6 @@ class GoogleSourceAgent(SourceAgent):
                         supports_all_drives=True, query=query,
                         known_title=meta.title if meta else None,
                         known_metadata=_known_meta,
-                        enable_excel_filter=bool(self.cfg.google_enable_excel_filter) if is_excel_or_csv else False,
                     )
                     if self.cfg.google_enable_file_content_cache and gc_list:
                         _cache_put(_ck, gc_list, int(self.cfg.google_file_content_cache_max_files))
@@ -2107,6 +2187,12 @@ class GoogleSourceAgent(SourceAgent):
                     sheet_pool.wait_for_done(sel.file_id, timeout=per_file_timeout),
                     sheet_pool.is_done,
                 ))
+            for sel in sq_sheet_nonnative_selections.get(sq_id, []):
+                tasks.append(_wait_one_file(
+                    sel.file_id, "sheet_nonnative",
+                    sheet_nonnative_pool.wait_for_done(sel.file_id, timeout=per_file_timeout),
+                    sheet_nonnative_pool.is_done,
+                ))
             for sel in sq_doc_selections.get(sq_id, []):
                 tasks.append(_wait_one_file(
                     sel.file_id, "doc",
@@ -2156,6 +2242,8 @@ class GoogleSourceAgent(SourceAgent):
             # 先注册所有 wait events，避免 wait 先于 worker mark_reading 发生时直接返回空。
             for fid in merged_sheets:
                 sheet_pool.ensure_waitable(fid)
+            for fid in merged_sheet_nonnative:
+                sheet_nonnative_pool.ensure_waitable(fid)
             for fid in merged_docs:
                 doc_pool.ensure_waitable(fid)
             for fid in merged_slides:
@@ -2172,8 +2260,9 @@ class GoogleSourceAgent(SourceAgent):
                 mime = getattr(meta, "mime_type", None) if meta else None
 
                 if channel == "sheet":
-                    # SheetPool only stores native Google Sheets metadata (Phase B batch). meta=None ⇒ Excel/CSV.
-                    if meta:
+                    # Native SheetPool metadata has no mime_type; sheet-nonnative
+                    # uses DocMeta with Excel/CSV mime and must go to download pool.
+                    if meta and mime in (None, "", _MIME_SHEETS):
                         return executors["sheet"], "sheet"
                     return executors["nonnative"], "nonnative"
                 elif channel == "doc":
@@ -2190,6 +2279,10 @@ class GoogleSourceAgent(SourceAgent):
             for fid, titles in merged_sheets.items():
                 executor, pkey = _get_executor(fid, "sheet", sheet_pool)
                 executor.submit(_read_sheet_task, fid, titles)
+                pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
+            for fid in merged_sheet_nonnative:
+                executor, pkey = _get_executor(fid, "sheet", sheet_nonnative_pool)
+                executor.submit(_read_sheet_nonnative_task, fid)
                 pool_submit_counts[pkey] = pool_submit_counts.get(pkey, 0) + 1
             for fid in merged_docs:
                 executor, pkey = _get_executor(fid, "doc", doc_pool)
@@ -2222,18 +2315,18 @@ class GoogleSourceAgent(SourceAgent):
                 logger.info("[google] Phase F sq=%s chunks_collected=%d", sq_id, len(chunks_by_sq.get(sq_id, [])))
 
                 final_uc = chunks_by_sq.get(sq_id, [])
-                final_sheet = sum(1 for uc in final_uc if uc.source_tool == "google:sheet")
-                final_doc = sum(1 for uc in final_uc if uc.source_tool in ("google:doc", "google:word", "google:txt"))
+                final_sheet = sum(1 for uc in final_uc if _chunk_family(uc.source_tool) == "sheet")
+                final_doc = sum(1 for uc in final_uc if _chunk_family(uc.source_tool) == "doc")
                 final_slide = sum(1 for uc in final_uc if uc.source_tool in ("google:slide", "google:pptx"))
                 final_gmail = sum(1 for uc in final_uc if "gmail" in (uc.source_tool or ""))
 
                 raw_res = [r for r in search_results if r["sq"].sub_query_id == sq_id]
-                raw_sheet = sum(1 for r in raw_res for f in r.get("files", []) if f.get("mimeType") == _MIME_SHEETS)
+                raw_sheet = sum(1 for r in raw_res for f in r.get("files", []) if f.get("mimeType") in _TABLE_MIMES)
                 raw_doc = sum(1 for r in raw_res for f in r.get("files", []) if f.get("mimeType") in (_MIME_DOCS, _MIME_WORD, _MIME_WORD_OLD, _MIME_TXT))
                 raw_slide = sum(1 for r in raw_res for f in r.get("files", []) if f.get("mimeType") in (_MIME_SLIDES, _MIME_PPTX))
                 raw_gmail = sum(len(r.get("gmail_threads", [])) for r in raw_res)
 
-                sel_sheet = len(sq_sheet_selections.get(sq_id, []))
+                sel_sheet = len(sq_sheet_selections.get(sq_id, [])) + len(sq_sheet_nonnative_selections.get(sq_id, []))
                 sel_doc = len(sq_doc_selections.get(sq_id, []))
                 sel_slide = len(sq_slide_selections.get(sq_id, []))
                 sel_gmail = len(sq_gmail_selections.get(sq_id, []))
@@ -2253,73 +2346,98 @@ class GoogleSourceAgent(SourceAgent):
                     logger.info("[google] FILE_READ_ISSUE %s type=%s status=%s chunks=%d error=%.100s sqs=%s",
                                 fid, info["type"], info["status"], info["chunks"], info.get("error", ""), info["sq_ids"])
 
-            # ── Phase F-G: Slide/Sheet 文件级 qwen rerank（并行，已读取好的继续处理）
-            async def _rerank_one_file(sq: SubQuery, fid: str, file_ucs: List[UnifiedChunk]):
+            # ── Phase F-G: Per-type pool budget（条件触发 Qwen，常规路径不 rerank）──
+            async def _rerank_uc_list(
+                sq: SubQuery,
+                family: str,
+                uc_list: List[UnifiedChunk],
+                top_n: int,
+                reason: str,
+            ) -> Tuple[List[UnifiedChunk], float]:
                 started = time.perf_counter()
-                if len(file_ucs) > 80:
-                    file_ucs = _query_aware_truncate(file_ucs, sq.query, 80)
+                rerank_input = uc_list
+                if len(rerank_input) > 120:
+                    rerank_input = _query_aware_truncate(rerank_input, sq.query, 120)
                 selected = await asyncio.to_thread(
                     _select_chunks_for_sub_query,
-                    query=sq.query, focus_text=sq.query, query_type="concept",
-                    uc_list=file_ucs, top_n=5,
+                    query=sq.query,
+                    focus_text=focus_text_map.get(sq.sub_query_id, sq.query),
+                    query_type=_normalize_google_query_type(sq.query_type),
+                    uc_list=rerank_input,
+                    top_n=top_n,
                 )
-                return sq.sub_query_id, fid, selected, len(file_ucs), _elapsed_ms(started)
+                logger.info(
+                    "TIMING google.type_pool_rerank sq=%s type=%s reason=%s input=%d rerank_input=%d output=%d ms=%.1f",
+                    sq.sub_query_id, family, reason, len(uc_list), len(rerank_input), len(selected), _elapsed_ms(started),
+                )
+                return selected, _elapsed_ms(started)
 
-            rerank_tasks = []
-            rerank_targets: List[tuple] = []
+            async def _apply_type_pool_budget(sq: SubQuery, family: str, uc_list: List[UnifiedChunk]) -> List[UnifiedChunk]:
+                if not uc_list:
+                    return []
+                file_threshold = int(self.cfg.google_file_emergency_rerank_threshold)
+                file_top_n = int(self.cfg.google_file_emergency_rerank_top_n)
+                bucket_threshold = int(self.cfg.google_type_bucket_rerank_threshold)
+                bucket_top_n = int(
+                    self.cfg.google_type_bucket_rerank_top_n_gmail
+                    if family == "gmail"
+                    else self.cfg.google_type_bucket_rerank_top_n
+                )
+
+                by_file: Dict[str, List[UnifiedChunk]] = {}
+                for uc in uc_list:
+                    fid = (uc.metadata or {}).get("file_id") or (uc.metadata or {}).get("thread_id") or uc.source_name
+                    by_file.setdefault(str(fid), []).append(uc)
+
+                file_tasks = []
+                file_keys = []
+                for fid, file_ucs in by_file.items():
+                    if len(file_ucs) > file_threshold:
+                        file_tasks.append(_rerank_uc_list(sq, family, file_ucs, file_top_n, "file_emergency"))
+                        file_keys.append(fid)
+                if file_tasks:
+                    file_results = await asyncio.gather(*file_tasks)
+                    for fid, (selected, _) in zip(file_keys, file_results):
+                        by_file[fid] = selected
+
+                bucket: List[UnifiedChunk] = []
+                for file_ucs in by_file.values():
+                    bucket.extend(file_ucs)
+
+                if len(bucket) > bucket_threshold:
+                    selected, _ = await _rerank_uc_list(sq, family, bucket, bucket_top_n, "type_bucket")
+                    return selected
+                return bucket
+
             for sq in sub_queries:
                 sq_id = sq.sub_query_id
                 uc_list = chunks_by_sq.get(sq_id, [])
                 if not uc_list:
                     continue
-                by_file: Dict[str, List[UnifiedChunk]] = {}
+                buckets: Dict[str, List[UnifiedChunk]] = {
+                    "sheet": [], "doc": [], "slide": [], "gmail": [], "other": [],
+                }
                 for uc in uc_list:
-                    fid = (uc.metadata or {}).get("file_id", "")
-                    by_file.setdefault(fid, []).append(uc)
-                for fid, file_ucs in by_file.items():
-                    is_slide = any(uc.source_tool in ("google:slide", "google:pptx") for uc in file_ucs)
-                    is_sheet = any(uc.source_tool == "google:sheet" for uc in file_ucs)
-                    rerank_threshold = 5
-                    if self.cfg.google_enable_conditional_file_rerank:
-                        rerank_threshold = (
-                            int(self.cfg.google_file_rerank_min_chunks_slide) if is_slide
-                            else int(self.cfg.google_file_rerank_min_chunks_sheet)
-                        )
-                    if (is_slide or is_sheet) and len(file_ucs) > rerank_threshold:
-                        rerank_tasks.append(_rerank_one_file(sq, fid, file_ucs))
-                        rerank_targets.append((sq_id, fid))
+                    buckets.setdefault(_chunk_family(uc.source_tool), []).append(uc)
 
-            if rerank_tasks:
-                results = await asyncio.gather(*rerank_tasks)
-                replace_map: Dict[tuple, List[UnifiedChunk]] = {}
-                for (sq_id, fid, selected, orig_len, rerank_ms), target in zip(results, rerank_targets):
-                    replace_map[target] = selected
-                    source_tool = file_ucs[0].source_tool if False else ""
-                    matched_ucs = []
-                    for uc in chunks_by_sq.get(sq_id, []):
-                        if (uc.metadata or {}).get("file_id", "") == fid:
-                            matched_ucs.append(uc)
-                    source_tool = matched_ucs[0].source_tool if matched_ucs else ""
-                    ftype = "sheet" if source_tool == "google:sheet" else "slide"
-                    logger.info(
-                        "[google] file-level rerank sq=%s type=%s file=%s size=%s %d->%d ms=%.1f",
-                        sq_id, ftype, _short_id(fid), _file_size_of(fid, ftype) or "N/A",
-                        orig_len, len(selected), rerank_ms,
-                    )
-
-                for sq in sub_queries:
-                    sq_id = sq.sub_query_id
-                    uc_list = chunks_by_sq.get(sq_id, [])
-                    if not uc_list:
-                        continue
-                    by_file = {}
-                    for uc in uc_list:
-                        fid = (uc.metadata or {}).get("file_id", "")
-                        by_file.setdefault(fid, []).append(uc)
-                    new_uc_list: List[UnifiedChunk] = []
-                    for fid, file_ucs in by_file.items():
-                        new_uc_list.extend(replace_map.get((sq_id, fid), file_ucs))
-                    chunks_by_sq[sq_id] = new_uc_list
+                budgeted_parts = await asyncio.gather(
+                    _apply_type_pool_budget(sq, "sheet", buckets.get("sheet", [])),
+                    _apply_type_pool_budget(sq, "doc", buckets.get("doc", [])),
+                    _apply_type_pool_budget(sq, "slide", buckets.get("slide", [])),
+                    _apply_type_pool_budget(sq, "gmail", buckets.get("gmail", [])),
+                )
+                new_uc_list = []
+                for part in budgeted_parts:
+                    new_uc_list.extend(part)
+                new_uc_list.extend(buckets.get("other", []))
+                logger.info(
+                    "[google] type_pool sq=%s before(S=%d,D=%d,SL=%d,G=%d,O=%d) after=%d",
+                    sq_id,
+                    len(buckets.get("sheet", [])), len(buckets.get("doc", [])),
+                    len(buckets.get("slide", [])), len(buckets.get("gmail", [])),
+                    len(buckets.get("other", [])), len(new_uc_list),
+                )
+                chunks_by_sq[sq_id] = new_uc_list
 
             # ── Phase G: Per-sub_query qwen rerank（chunk 级）──
             # 注：之前尝试过 eval_only preview 流水线（与本段并行），但 preview pool 是 pre-rerank

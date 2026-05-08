@@ -247,7 +247,6 @@ class SourceAgentConfig:
     google_enable_excel_filter: bool = True  # 是否开启 Excel/CSV qwen rerank 过滤
     google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
     google_enable_native_slide_size_gate: bool = False
-    google_enable_conditional_file_rerank: bool = False
     google_enable_type_pools: bool = False
     google_enable_gmail_isolation: bool = False
     google_order_by_mode: Optional[str] = "viewedByMeTime desc" # Drive API 排序，默认"我最近查看"优先
@@ -262,7 +261,7 @@ class SourceAgentConfig:
     google_enable_file_content_cache: bool = True           # 跨 query 文件级 LRU 缓存
     google_file_content_cache_ttl_s: float = 300.0          # 缓存 TTL（5 分钟）
     google_file_content_cache_max_files: int = 64           # 缓存最大条目数
-    google_enable_cross_sq_pre_filter: bool = True          # X1: chunk_pool 进 eval_only 前用 Qwen rerank 收口
+    google_enable_cross_sq_pre_filter: bool = False         # chunk_pool 后不再默认二次 Qwen；预算在 G-2 前完成
     google_cross_sq_pre_filter_threshold: int = 10          # chunk_pool > 此阈值才触发（默认 source_top_k * 2）
     # eval_only LLM 输入硬上限（独立于 source_top_k）。当 cross_sq_pre_filter 计算
     # target_n = max(source_top_k*2, source_top_k+2) 后，再与本字段 min 取小值。
@@ -288,8 +287,11 @@ class SourceAgentConfig:
     google_dedup_native_vs_nonnative: bool = True
     google_doc_chunk_cap: int = 60
     google_slide_chunk_cap: int = 40
-    google_file_rerank_min_chunks_sheet: int = 25
-    google_file_rerank_min_chunks_slide: int = 30
+    google_file_emergency_rerank_threshold: int = 200
+    google_file_emergency_rerank_top_n: int = 4
+    google_type_bucket_rerank_threshold: int = 25
+    google_type_bucket_rerank_top_n: int = 7       # doc / slide / sheet 统一上限
+    google_type_bucket_rerank_top_n_gmail: int = 4 # gmail 单独上限（信噪比低，收紧）
     google_type_pool_sheet_workers: int = 4
     google_type_pool_doc_workers: int = 3
     google_type_pool_slide_workers: int = 3
@@ -396,10 +398,9 @@ class RetrieveConfig:
                               "google_gmail_rerank_top_n": 2,
                               # 复用 balanced 的所有优化开关
                               "google_enable_native_slide_size_gate": True,
-                              "google_enable_conditional_file_rerank": True,
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
-                              "google_enable_cross_sq_pre_filter": True,
+                              "google_enable_cross_sq_pre_filter": False,
                               # lite：sheet + PPTX 全关；保留 doc nonnative（docx/txt 较快）。
                               # 配合 doc_candidates_per_sq +1（4→5）补足召回深度。
                               "google_nonnative_search_query_types": {
@@ -429,7 +430,6 @@ class RetrieveConfig:
                                      },
                                      "google_enable_gmail_attachments": True,
                                      "google_enable_native_slide_size_gate": True,
-                                     "google_enable_conditional_file_rerank": True,
                                      "google_enable_type_pools": True,
                                      "google_enable_gmail_isolation": True,
                                      "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
@@ -441,6 +441,10 @@ class RetrieveConfig:
                                      # Sheet worker 4 → 8：让 typical 6 sheets/query 全并行无排队。
                                      # Drive Sheets API 配额每分钟 60 reads/user，8 并发不触限。
                                      "google_type_pool_sheet_workers": 8,
+                                     # Budget is handled before chunk_pool:
+                                     # type-pool emergency rerank + per-sq mixed rerank.
+                                     "sub_query_top_n": 10,
+                                     "google_enable_cross_sq_pre_filter": False,
                                      # eval_only 输入限制（google_eval_input_max_chunks）实验：
                                      # 8 vs default 10 实测 critical 平均 -1.6，Q4 全 0C，
                                      # eval LLM 看不到第 9-10 名候选时漏掉关键 chunk。回滚到 None
@@ -482,11 +486,12 @@ class RetrieveConfig:
                               # 沿用现有积极召回（其他参数不变）
                               "google_enable_gmail_attachments": True,
                               "google_enable_native_slide_size_gate": True,
-                              "google_enable_conditional_file_rerank": True,
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
                               "google_doc_search_per_sq": 16, "google_slide_search_per_sq": 15,
                               "google_doc_candidates_per_sq": 9, "google_slide_candidates_per_sq": 9,
+                              "google_type_bucket_rerank_top_n": 9,
+                              "sub_query_top_n": 14,
                           },
                       }},
     }
@@ -552,7 +557,7 @@ class RetrieveConfig:
             "google_enable_sheet_search",
             "google_enable_sheet_filter", "google_enable_excel_filter",
             "google_enable_fulltext_search", "google_enable_native_slide_size_gate",
-            "google_enable_conditional_file_rerank", "google_enable_type_pools",
+            "google_enable_type_pools",
             "google_enable_gmail_isolation", "google_order_by_mode",
             "google_per_file_timeout_s", "google_native_doc_size_gate_bytes",
             "google_native_doc_outline_threshold_bytes", "google_native_slide_size_gate_bytes",
@@ -563,7 +568,9 @@ class RetrieveConfig:
             "google_sheet_prefilter_close_delta",
             "google_sheet_files_per_sq_structured", "google_sheet_files_per_sq_concept",
             "google_nonnative_search_query_types", "google_dedup_native_vs_nonnative",
-            "google_file_rerank_min_chunks_sheet", "google_file_rerank_min_chunks_slide",
+            "google_file_emergency_rerank_threshold", "google_file_emergency_rerank_top_n",
+            "google_type_bucket_rerank_threshold", "google_type_bucket_rerank_top_n",
+            "google_type_bucket_rerank_top_n_gmail",
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
             "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
             "google_type_pool_nonnative_workers",

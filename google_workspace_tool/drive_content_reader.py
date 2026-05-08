@@ -583,6 +583,8 @@ def read_drive_chunks(
             _kt = known_title or (title if title else None)
             if _kt:
                 kwargs["known_title"] = _kt
+            if mime_type in (_MIME_TXT, _MIME_CSV):
+                kwargs["known_mime_type"] = mime_type
             return reader.read_chunks(
                 file_id=resolved_id,
                 creds=creds,

@@ -216,8 +216,10 @@ def _google_chunk_to_unified(gc, query: str = "") -> UnifiedChunk:
         source_tool = "google:excel"
     elif chunk_id.startswith("google:pptx:"):
         source_tool = "google:pptx"
-    elif chunk_id.startswith("google:txt:") or chunk_id.startswith("google:csv:"):
+    elif chunk_id.startswith("google:txt:"):
         source_tool = "google:txt"
+    elif chunk_id.startswith("google:csv:"):
+        source_tool = "google:csv"
     elif chunk_id.startswith("google:gmail:body:"):
         source_tool = "google:gmail:body"
     elif chunk_id.startswith("google:gmail:att:"):
