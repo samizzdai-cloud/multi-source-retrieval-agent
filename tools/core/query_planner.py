@@ -16,6 +16,7 @@ focus_groups（FG 概念下线，直接 flat focuses）。
 
 import json
 import logging
+from datetime import date
 from typing import List, Optional
 
 from tools.core.llm_client import call_llm, parse_json_response
@@ -38,7 +39,7 @@ MAX_FOCUSES_TOTAL = 6
 _SOURCE_PROFILES_BASE = {
     "feishu": "飞书文档：团队内部沉淀的运营材料、会议纪要、项目文档、表格数据。",
     "bailian": "百炼知识库：公司级结构化知识（产品、渠道、合规、市场情报等）向量检索。",
-    "google": "Google Workspace：沉淀某电竞消费电子品牌的硬件产品与营销业务内容，涵盖培训、时间表、话术及视觉设计资产等协作文件。",
+    "google": "Google Workspace：产品上市规划&报告、上市复盘数据、营销媒体素材、产品系列详情。",
     "notion": "Notion：外部合作/公共知识文档（当前未启用检索）。",
 }
 
@@ -48,13 +49,19 @@ except Exception:
     _ENTITY_FIDELITY_BLOCK = ""
 
 
-_FOCUS_GUIDE = """每个 focus 必须满足：
+_FOCUS_GUIDE_TEMPLATE = """每个 focus 必须满足：
   1. **可评估**：给任一切片能直接判断是否命中（不能是 'nubia'/'销售数据' 这类泛词）
   2. **自包含**：实体 + 维度 + 可选限定，15-40 字
   3. **不重叠**：focuses 间语义边界清晰，禁止改写式重复
+  4. **时间词具体化**：query 中出现"今年/本年/this year"等相对时间词时，必须替换为实际年份（= {current_year}）；
+     "今年Q1" → "{current_year}Q1"，"今年" → "{current_year}年"。禁止在 focus 中保留"今年"等模糊词。
 
-正例：'nubia 英国 2026Q1 DTC 渠道销售额与 GMV'
+正例：'nubia 英国 {current_year}Q1 DTC 渠道销售额与 GMV'
 反例：'销售数据' + '销售表现'（语义重叠）"""
+
+
+def _build_focus_guide() -> str:
+    return _FOCUS_GUIDE_TEMPLATE.format(current_year=date.today().year)
 
 
 def _build_source_profiles_block(
@@ -97,17 +104,34 @@ def _dedupe_focuses_exact(focuses: List[PlanFocus]) -> List[PlanFocus]:
     return kept
 
 
+def _bailian_allowed_for_focus(
+    text: str,
+    bailian_allowed_indexes: Optional[List[str]],
+) -> bool:
+    """硬规则：focus 文本中包含 bailian 任一 allowed index 名称才允许路由到 bailian。
+
+    不依赖 LLM 遵守 prompt，在代码层强制执行。
+    bailian_allowed_indexes 为 None（未配置）时放行，交由 bailian 自己返回空结果。
+    """
+    if bailian_allowed_indexes is None:
+        return True
+    text_lower = text.lower()
+    return any(idx.lower() in text_lower for idx in bailian_allowed_indexes)
+
+
 def _validate_plan(
     raw_focuses: List[dict],
     available_sources: List[str],
+    bailian_allowed_indexes: Optional[List[str]] = None,
 ) -> List[PlanFocus]:
     """LLM 输出 → List[PlanFocus] 后置校验 & 兜底。
 
     约束（按优先级）：
     1. 字段完整性：text 非空，targets 非空
     2. targets ⊂ available_sources；取交集后为空则退回全量
-    3. 总数 ≤ MAX_FOCUSES_TOTAL，超则截断并 warning
-    4. 规范化文本精确去重（字面重复才丢）
+    3. bailian 硬过滤：focus 文本不含 allowed index 名称时强制移除 bailian
+    4. 总数 ≤ MAX_FOCUSES_TOTAL，超则截断并 warning
+    5. 规范化文本精确去重（字面重复才丢）
     """
     out: List[PlanFocus] = []
     for item in raw_focuses:
@@ -124,6 +148,14 @@ def _validate_plan(
                 text, available_sources,
             )
             targets = list(available_sources)
+
+        # 硬过滤：bailian 仅在 focus 文本命中 allowed index 名称时保留
+        if "bailian" in targets and not _bailian_allowed_for_focus(text, bailian_allowed_indexes):
+            targets = [t for t in targets if t != "bailian"]
+            logger.info("plan_query: stripped bailian from focus %r (entity not in allowed indexes)", text)
+            if not targets:
+                targets = [t for t in available_sources if t != "bailian"] or list(available_sources)
+
         out.append(PlanFocus(text=text, targets=targets))
 
     out = _dedupe_focuses_exact(out)
@@ -154,11 +186,13 @@ def plan_query(
         bailian_allowed_indexes=bailian_allowed_indexes,
     )
 
+    current_date_str = date.today().isoformat()
     prompt = f"""你是多源检索的「全局规划器」。职责只有两件事：
 1. **语义拆解**：把用户 query 拆成若干个 flat focuses（可独立评估的检索维度）。
 2. **源路由**：为每个 focus **独立**决定最合适的检索源（targets）。
 
 用户 query：「{query}」
+当前日期：{current_date_str}（"今年" = {date.today().year} 年，请在 focus 中用实际年份替换相对时间词）
 上下文：{session_context or "无"}
 
 可用检索源（包含了当前环境动态解析出的可访问清单）：
@@ -166,7 +200,7 @@ def plan_query(
 
 ## Focus 质量要求
 
-{_FOCUS_GUIDE}
+{_build_focus_guide()}
 
 {_ENTITY_FIDELITY_BLOCK}
 
@@ -180,10 +214,10 @@ def plan_query(
 
 - ``targets`` 从 {json.dumps(available_sources)} 中选，不能为空
 - 判断依据：
-  · 内部运营事实 / 结构化表格 / SOP / 会议纪要 / 通用协作材料 → `feishu`
-  · query 中实体/项目名命中 `bailian` 可用知识库列表，或需跨文档语义推理 / 深度市场情报 → `bailian`
-  · 外部协作资料 / 跨部门共享文档 / 培训/营销物料 → `google`
-  · 多个源能**独立**贡献非冗余信息时 → 同时路由（如 `["feishu", "bailian"]`）
+  · 内部运营事实 / 结构化表格 / SOP / 会议纪要 / 协作材料 → `feishu`
+  · query 中的**核心实体/品牌/项目名**必须在 `bailian` 可用知识库列表中有对应项目，才可路由到 `bailian`；
+  · 产品上市规划&报告、上市复盘数据、营销媒体素材 / 产品系列详情 → `google`
+  · 多个源能**独立**贡献非冗余信息时 → 同时路由（如 `["feishu", "bailian"，“google”]`）
 - 用户显式指定源（如 "在飞书里找"、"#bailian"、"搜一下Drive"）时，targets 仅保留指定源（最高优先级）。
 
 ## 输出（严格 JSON，不要额外说明）
@@ -211,7 +245,7 @@ def plan_query(
         if isinstance(result.get("focuses"), list):
             raw_focuses = list(result["focuses"])
 
-        focuses = _validate_plan(raw_focuses, available_sources)
+        focuses = _validate_plan(raw_focuses, available_sources, bailian_allowed_indexes)
 
         if not focuses:
             raise ValueError("No valid focuses in LLM response")

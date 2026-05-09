@@ -25,12 +25,17 @@ env/
 .eval_output/
 .test_output/
 .spec_organized/
+test_*/
+test_*
+docs/session_logs/
+google_workspace_tool/test_results/
 
 # ADK runtime
 .adk/
 
 # IDE
 .idea/
+.claude/
 *.swp
 *.swo
 

@@ -3,7 +3,29 @@
 session.state['retrieval_result'] : RetrievalResult JSON
 session.state['retrieval_meta']   : 性能统计 JSON
 """
+import time
+
 from google.adk.agents.llm_agent import Agent
+from google.genai import types as genai_types
+
+
+_ANSWER_STARTED_AT_KEY = "_answer_started_at"
+
+
+def _mark_answer_started(callback_context):
+    callback_context.state[_ANSWER_STARTED_AT_KEY] = time.monotonic()
+    return None
+
+
+def _emit_answer_timing(callback_context):
+    started_at = callback_context.state.get(_ANSWER_STARTED_AT_KEY)
+    if not started_at:
+        return None
+    elapsed_ms = int((time.monotonic() - float(started_at)) * 1000)
+    return genai_types.Content(
+        role="model",
+        parts=[genai_types.Part(text=f"[answer] done elapsed_ms={elapsed_ms}")],
+    )
 
 _INSTRUCTION = """你是一个企业咨询专家，根据已检索到的知识片段回答用户问题。
 
@@ -24,12 +46,14 @@ _INSTRUCTION = """你是一个企业咨询专家，根据已检索到的知识�
 8. 末尾固定输出以下区块：
 
 [来源]
-① 文档名 > 章节路径
-② 文档名 > 章节路径"""
+① 来源（Google/feishu/bailian）>文档名 > 章节路径
+"""
 
 answer_agent = Agent(
     model="gemini-3-flash-preview",
     name="answer",
     description="基于已检索 chunks 生成中文自然语言回答",
     instruction=_INSTRUCTION,
+    before_agent_callback=_mark_answer_started,
+    after_agent_callback=_emit_answer_timing,
 )

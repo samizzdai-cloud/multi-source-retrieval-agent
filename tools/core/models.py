@@ -18,6 +18,8 @@ class SourceConfig:
     feishu_open_id: str = ""              # 飞书用户 open_id（用于 author_filter="me" / personal_recent）
     bailian_allowed_indexes: str = ""     # "nubia,hypershell"，空时代表不限制，允许所有注册的知识库
     dashscope_api_key: str = ""           # text-embedding-v4
+    google_credentials_path: str = ""      # OAuth2 client credentials.json；空时走 GOOGLE_CREDENTIALS_PATH 或默认路径
+    google_token_path: str = ""            # OAuth2 token.json；空时走 GOOGLE_TOKEN_PATH 或默认路径
     load_from_env: bool = True            # 开关：True 时空字段 fallback 到 env var
 
     def get(self, field_name: str, env_var: str) -> str:
@@ -57,6 +59,8 @@ class AgentConfig:
 
     # ── 百炼凭证 ──────────────────────────────────────────────
     bailian_allowed_indexes: str = ""     # 允许查询的知识库白名单，如 "nubia,hypershell"，空时走全部
+    google_credentials_path: str = ""      # Google OAuth2 client credentials.json
+    google_token_path: str = ""            # Google OAuth2 token.json
 
     def to_retrieve_config(self) -> "RetrieveConfig":
         """转换为 RetrieveConfig（行为配置）。"""
@@ -71,6 +75,8 @@ class AgentConfig:
             feishu_uat=self.feishu_uat,
             feishu_open_id=self.feishu_open_id,
             bailian_allowed_indexes=self.bailian_allowed_indexes,
+            google_credentials_path=self.google_credentials_path,
+            google_token_path=self.google_token_path,
             load_from_env=True,           # 空字段始终 fallback 到环境变量
         )
 
@@ -296,7 +302,7 @@ class SourceAgentConfig:
     google_type_pool_doc_workers: int = 3
     google_type_pool_slide_workers: int = 3
     google_type_pool_gmail_workers: int = 2
-    google_type_pool_nonnative_workers: int = 2  # 合并 pptx/word/excel/csv/txt 下载并发
+    google_type_pool_nonnative_workers: int = 4  # 合并 pptx/word/excel/csv/txt 下载并发
     google_gmail_attachment_max_files: int = 3
     # per-type 搜索召回数量（按 preset 可定制）
     google_doc_search_per_sq: int = 12    # 每个 sub_query Doc 搜索召回数
@@ -452,7 +458,9 @@ class RetrieveConfig:
                                      # （沿用 source_top_k*2=10）。如未来发现 eval RTT 是主瓶颈
                                      # 可单独打开。
                                      "google_max_gmail_threads_per_subquery": 3,
-                                     "google_gmail_rerank_top_n": 3},
+                                     "google_gmail_rerank_top_n": 3,
+                                     "google_type_pool_nonnative_workers": 5, 
+                                     },
                       }},
         "deep_dive": {"source_base": {"source_top_k": 8, "max_loops": 2, "sub_query_top_n": 12, "source_timeout_s": 40.0},
                       "eval_layer_enabled": True,  "eval_layer_mode": "llm_tool",
@@ -479,7 +487,7 @@ class RetrieveConfig:
                               "google_type_pool_sheet_workers": 5,                  # 4 → 5
                               "google_type_pool_doc_workers": 4,                    # 3 → 4
                               "google_type_pool_slide_workers": 4,                  # 3 → 4
-                              "google_type_pool_nonnative_workers": 3,              # 2 → 3
+                              "google_type_pool_nonnative_workers": 5,              # 2 → 5（合并 pptx/word/excel/csv/txt）
                               "google_type_pool_gmail_workers": 3,                  # 2 → 3
                               # nonnative gate 全开（所有家族 × 所有 query_type）
                               "google_nonnative_search_query_types": {

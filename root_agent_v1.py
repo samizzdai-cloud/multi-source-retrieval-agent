@@ -19,28 +19,10 @@ logging.basicConfig(
 from google.adk.agents import SequentialAgent
 
 from answer_agent import answer_agent
-from retrieve_agent import build_retrieve_agent
-from tools.core.models import RetrieveConfig, SourceAgentConfig, SourceConfig
+from root_agent_config import build_root_retrieve_agent
 
 
-# Phase 4c：用 preset="lite" 走 STRICT 基底 + eval_layer 关（生产默认）
-# feishu 单源把 source_timeout_s 从 STRICT 的 25s 抬到 45s（文档读取慢），
-# 其他字段继承 STRICT preset。
-_FEISHU_OVERRIDE = SourceAgentConfig(
-    source_timeout_s=45.0,
-)
-
-_retrieve_agent = build_retrieve_agent(
-    config=RetrieveConfig(
-        preset="lite",
-        enabled_sources=["feishu", "bailian"],
-        source_configs={
-            "feishu": _FEISHU_OVERRIDE,
-        },
-    ),
-    source_config=SourceConfig(load_from_env=True),
-    name="retrieve_v1",
-)
+_retrieve_agent = build_root_retrieve_agent(name="retrieve_v1")
 
 root_agent = SequentialAgent(
     name="context_rag_agent_v1",

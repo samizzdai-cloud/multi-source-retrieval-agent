@@ -18,6 +18,7 @@ import asyncio
 import difflib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -300,6 +301,10 @@ class RetrieveAgent(BaseAgent):
 
         enabled = list(self.sources.keys())
         logger.info("RetrieveAgent: query=%r, sources=%s", query, enabled)
+        yield self._make_text_event(
+            ctx,
+            f"[retrieve] start preset={self.config.preset} sources={','.join(enabled)}",
+        )
 
         # 1. Global plan → focuses (v2.1 flat, FG retired)
         plan_started = time.perf_counter()
@@ -331,6 +336,10 @@ class RetrieveAgent(BaseAgent):
             len(focuses),
             (time.perf_counter() - plan_started) * 1000.0,
         )
+        yield self._make_text_event(
+            ctx,
+            f"[retrieve] plan focuses={len(focuses)} total_ms={(time.monotonic() - start) * 1000:.0f}",
+        )
         logger.info("RetrieveAgent: %d focuses produced", len(focuses))
 
         # 2. Dispatch（每源超时独立走 SourceAgent.cfg.source_timeout_s）
@@ -347,6 +356,11 @@ class RetrieveAgent(BaseAgent):
             len(self.sources),
             (time.perf_counter() - dispatch_started) * 1000.0,
         )
+        source_counts = ", ".join(f"{r.source}:{len(r.top_chunks)}" for r in per_source)
+        yield self._make_text_event(
+            ctx,
+            f"[retrieve] dispatch sources={len(self.sources)} chunks=({source_counts}) total_ms={(time.monotonic() - start) * 1000:.0f}",
+        )
 
         # 3. Merge
         merge_started = time.perf_counter()
@@ -355,6 +369,10 @@ class RetrieveAgent(BaseAgent):
             "TIMING retrieve.merge merged=%d ms=%.1f",
             len(merged),
             (time.perf_counter() - merge_started) * 1000.0,
+        )
+        yield self._make_text_event(
+            ctx,
+            f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
         )
 
         # 3b. 出口选择：
@@ -372,6 +390,7 @@ class RetrieveAgent(BaseAgent):
                 len(merged), len(selected), final_top_k, self.config.eval_layer_effective_mode,
                 (time.perf_counter() - assemble_started) * 1000.0,
             )
+            assemble_path = f"eval_layer:{self.config.eval_layer_effective_mode}"
         else:
             selected = await assemble_final_chunks(
                 chunks=merged,
@@ -388,6 +407,11 @@ class RetrieveAgent(BaseAgent):
                 len(merged), len(selected), final_top_k,
                 (time.perf_counter() - assemble_started) * 1000.0,
             )
+            assemble_path = "rule"
+        yield self._make_text_event(
+            ctx,
+            f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={final_top_k} total_ms={(time.monotonic() - start) * 1000:.0f}",
+        )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log_observation(merged, per_source, focuses, elapsed_ms)
@@ -397,17 +421,34 @@ class RetrieveAgent(BaseAgent):
             elapsed_ms, len(selected), len(merged), final_top_k,
         )
 
-        yield self._make_event(ctx, payload)
+        yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms)
 
-    def _make_event(self, ctx: InvocationContext, payload: Dict) -> Event:
-        result_json = json.dumps(payload, ensure_ascii=False, default=str)
+    def _make_text_event(self, ctx: InvocationContext, text: str) -> Event:
         return Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
             branch=ctx.branch,
             content=genai_types.Content(
                 role="model",
-                parts=[genai_types.Part(text="")],
+                parts=[genai_types.Part(text=text)],
+            ),
+        )
+
+    def _make_event(self, ctx: InvocationContext, payload: Dict, elapsed_ms: Optional[int] = None) -> Event:
+        result_json = json.dumps(payload, ensure_ascii=False, default=str)
+        chunks = payload.get("chunks") or []
+        summary = (
+            f"[retrieve] done chunks={len(chunks)} elapsed_ms={elapsed_ms}"
+            if elapsed_ms is not None
+            else f"[retrieve] done chunks={len(chunks)}"
+        )
+        return Event(
+            invocation_id=ctx.invocation_id,
+            author=self.name,
+            branch=ctx.branch,
+            content=genai_types.Content(
+                role="model",
+                parts=[genai_types.Part(text=summary)],
             ),
             actions=EventActions(state_delta={"retrieval_result": result_json}),
         )
@@ -453,7 +494,17 @@ def build_retrieve_agent(
             try:
                 from google_workspace_tool.auth_utils import get_credentials
                 from tools.google.google_retrieve import _SCOPES
-                get_credentials(scopes=_SCOPES)
+                google_credentials_path = sc.get("google_credentials_path", "GOOGLE_CREDENTIALS_PATH")
+                google_token_path = sc.get("google_token_path", "GOOGLE_TOKEN_PATH")
+                if google_credentials_path:
+                    os.environ["GOOGLE_CREDENTIALS_PATH"] = google_credentials_path
+                if google_token_path:
+                    os.environ["GOOGLE_TOKEN_PATH"] = google_token_path
+                get_credentials(
+                    scopes=_SCOPES,
+                    cred_path=google_credentials_path or None,
+                    token_path=google_token_path or None,
+                )
                 logger.info("Google credentials validated successfully.")
             except Exception as e:
                 logger.error("Failed to initialize Google credentials: %s", e)

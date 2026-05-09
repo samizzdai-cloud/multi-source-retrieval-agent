@@ -14,6 +14,10 @@ DEFAULT_CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), "credentials.
 DEFAULT_TOKEN_PATH = os.path.join(os.path.dirname(__file__), "token.json")
 
 
+def _env_path(name: str) -> str:
+    return (os.getenv(name, "") or "").strip()
+
+
 def get_credentials(
     scopes: list[str],
     token_path: str = None,
@@ -35,8 +39,8 @@ def get_credentials(
     Returns:
         google.oauth2.credentials.Credentials 对象
     """
-    token_path = token_path or DEFAULT_TOKEN_PATH
-    cred_path = cred_path or DEFAULT_CREDENTIALS_PATH
+    token_path = token_path or _env_path("GOOGLE_TOKEN_PATH") or DEFAULT_TOKEN_PATH
+    cred_path = cred_path or _env_path("GOOGLE_CREDENTIALS_PATH") or DEFAULT_CREDENTIALS_PATH
 
     creds = None
     if os.path.exists(token_path):
