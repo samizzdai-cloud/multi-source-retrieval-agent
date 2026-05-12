@@ -647,7 +647,18 @@ def run_rag_pipeline(
 
         # Pass 1b: IO-bound blocks (type-30 sheet, type-53 bitable, type-43 whiteboard) + comments — 并行
         # Pre-compute heading_path for each IO block at its document position
-        _IO_BLOCK_TYPES = {30, 53, 43}
+        #
+        # lite_block_only：不调用 IO 块的额外 API（sheet/bitable/whiteboard）
+        # 也不抓 comments —— 把 99991400 共享 5 qps 全留给 P_BLOCK_API 主路径。
+        if getattr(cfg, "lite_block_only", False):
+            logger.info(
+                "Stage 4: lite_block_only=True — skip IO blocks (type30/53/43) + comments for doc=%s",
+                doc_id[:12],
+            )
+            # 跳过 Pass 1b 与后续 _inject_comments；直接进 Pass 2 文本 chunking
+            _IO_BLOCK_TYPES: set = set()
+        else:
+            _IO_BLOCK_TYPES = {30, 53, 43}
         _io_hp_map = {}  # block_id → heading_path
         _tmp_hs = HeadingStack()
         for _b in blocks:
@@ -663,9 +674,10 @@ def run_rag_pipeline(
                      if (block.get("block_type") if isinstance(block, dict) else getattr(block, "block_type", None))
                      in _IO_BLOCK_TYPES]
         
-        # 将获取评论也作为一个 IO 任务加入并行池
-        io_tasks.append(("comments", None, None, None))
-        
+        # 将获取评论也作为一个 IO 任务加入并行池（lite_block_only 模式跳过）
+        if not getattr(cfg, "lite_block_only", False):
+            io_tasks.append(("comments", None, None, None))
+
         fetched_comments = []
 
         if io_tasks:
@@ -760,10 +772,12 @@ def run_rag_pipeline(
         # Pass 3: inject doc comments into matching chunks
         # [P2.3-F4] 传入 Stage 3 已获取的 blocks，避免重复 list_document_blocks API 调用
         # [并发优化] 传入前序 IO 池中获取到的 fetched_comments，消除 400ms 的串行耗时
-        try:
-            _inject_comments(doc_chunks + text_chunks, client, doc_id, blocks=blocks, pre_fetched_comments=fetched_comments)
-        except Exception as e:
-            logger.warning("Stage 4: comment injection failed for doc %s: %s", doc_id, e)
+        # lite_block_only：跳过整段评论注入（避免触发 client.get_doc_comments 兜底分支）
+        if not getattr(cfg, "lite_block_only", False):
+            try:
+                _inject_comments(doc_chunks + text_chunks, client, doc_id, blocks=blocks, pre_fetched_comments=fetched_comments)
+            except Exception as e:
+                logger.warning("Stage 4: comment injection failed for doc %s: %s", doc_id, e)
 
         all_chunks.extend(doc_chunks)
 

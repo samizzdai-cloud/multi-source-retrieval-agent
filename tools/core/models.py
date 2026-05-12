@@ -119,6 +119,83 @@ class QueryPlan:
     focuses: List[PlanFocus] = field(default_factory=list)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# v2.2 Global Planner 升级契约 — planner 直出 per-source sub_queries
+# 设计要点（与 retrieve_agent 重构计划对齐）：
+#   · planner 输出瘦身：不带 sub_query_id / target_focus / google_enable_fulltext /
+#     google_order_by（runner 翻译时按 query_type 自行注入）
+#   · runner / runtime 仍使用 agents.source_agent_base.SubQuery（字段全集，含
+#     sub_query_id / target_focus / google_*）
+#   · planner 永远只看 symbolic indexes（如 "nubia"），真实 KB id 翻译留给底层
+#     bailian_retrieve_unified
+# ════════════════════════════════════════════════════════════════════════════
+
+
+@dataclass(frozen=True)
+class PlannedSubQuery:
+    """Global planner 直出的瘦身版 sub_query。
+
+    设计原则：planner LLM 只产生「源专属计划字段」；运行时字段（sub_query_id /
+    target_focus）由 planner_runner 翻译时分配；google_enable_fulltext /
+    google_order_by 由 GoogleValidator 根据 query_type 推断，不让 planner 重复输出。
+    """
+    target_source: str                                   # "bailian" | "feishu" | "google" | "notion"
+    query: str
+    tags: List[str] = field(default_factory=list)               # bailian 用：L2 + 时效
+    indexes: List[str] = field(default_factory=list)            # bailian 用：symbolic id 列表
+    time_filter: Optional[str] = None                            # feishu / google 用
+    query_type: Optional[str] = None                             # feishu / google 用
+    author_filter: Optional[str] = None                          # feishu / google 用
+
+
+@dataclass(frozen=True)
+class PlannedFocus:
+    """Global planner 直出的 focus + 已定制到各源的 sub_queries。"""
+    focus_id: str                                                # planner 直接给出（runtime 不再重新分配）
+    focus_content: str
+    sub_queries: List[PlannedSubQuery] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class GlobalPlan:
+    """v2.2 planner 顶层输出。"""
+    original_query: str
+    focuses: List[PlannedFocus] = field(default_factory=list)
+
+
+@dataclass
+class GlobalPlannerConfig:
+    """Global planner（v2.2）行为配置。模型在此切换，不走 env。
+
+    - ``model``: A/B 评测后锁定为 ``gemini-3-flash-preview`` ——
+      实测在 3 源 / balanced+lite 下 focus 拆解更深（4 vs 2 focuses）、
+      Google 召回覆盖更全；planner 多 1s LLM RTT 由跳过各源 plan_only LLM 抵消。
+      回退 lite 模型仅作 A/B 评测保留。eval 层 / eval_only / plan_eval 仍走 lite。
+    - ``fallback_to_v1``: 整盘失败（LLM 异常 / JSON 错 / 0 focus / 所有 focus 都
+      被 validator reject）时是否回落到老 query_planner + 各源 plan_only_LLM 路径。
+    - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2，直接走老路径。
+    """
+    model: Literal["gemini-3.1-flash-lite", "gemini-3-flash-preview"] = "gemini-3-flash-preview"
+    timeout_s: float = 15.0
+    max_focuses: int = 6
+    fallback_to_v1: bool = True
+    force_v1: bool = False
+
+
+@dataclass
+class BailianIndexCatalog:
+    """Planner / runner 共享的 bailian symbolic index 集合。
+
+    Planner 永远只看 symbolic 名（如 ``"nubia"``），不暴露真实 KB id。
+    源层 ``bailian_retrieve_unified`` 内部走 ``get_all_configured_indexes()``
+    再翻译 symbolic → KB id。
+    """
+    allowed: List[str] = field(default_factory=list)
+    # 可选的 symbol→KB id 元数据：仅供 planner prompt 友好显示 / 日志诊断，
+    # 不参与功能逻辑（功能上源层只消费 allowed 这个 symbolic 列表）。
+    symbol_to_kb: Dict[str, str] = field(default_factory=dict)
+
+
 @dataclass
 class RetrievalResult:
     """RetrievalAgent 的最终输出。"""
@@ -304,6 +381,12 @@ class SourceAgentConfig:
     google_type_pool_gmail_workers: int = 2
     google_type_pool_nonnative_workers: int = 4  # 合并 pptx/word/excel/csv/txt 下载并发
     google_gmail_attachment_max_files: int = 3
+    # ── Feishu table chunk rerank（post-read，仿 Google type bucket）──
+    # 0 表示不启用 table chunk rerank（lite 默认不读 table 也走 0）。
+    # >0 时：read 完表格后，对 table chunks 做 _select_chunks_for_sub_query 内容 rerank，
+    # 与 doc chunks 分桶独立，避免 table 噪声压制 doc 信号；min_keep / threshold
+    # 复用 get_chunk_selection_config(query_type)。
+    feishu_table_chunk_rerank_top_n: int = 0
     # per-type 搜索召回数量（按 preset 可定制）
     google_doc_search_per_sq: int = 12    # 每个 sub_query Doc 搜索召回数
     google_slide_search_per_sq: int = 12  # 每个 sub_query Slide 搜索召回数
@@ -352,6 +435,14 @@ class RetrieveConfig:
 
     # ── 一体化档位（Phase 4c）──
     preset: RetrievePreset = "lite"
+
+    # ── v2.2 Global Planner（升级版）──
+    # 配置驱动：模型 / 兜底 / A/B 强制开关全在此，env 不再切换。
+    global_planner: GlobalPlannerConfig = field(default_factory=GlobalPlannerConfig)
+    # build_retrieve_agent 装配期从 get_all_configured_indexes() 派生 + env
+    # BAILIAN_ALLOWED_INDEXES 过滤；planner 注入此对象的 allowed 列表，runner
+    # 用同一对象做 indexes symbolic 校验。
+    bailian_catalog: Optional[BailianIndexCatalog] = None
 
     # ── 内部常量（不作为构造参数；调整请改源码或 preset 表）──
     EVAL_LAYER_TOP_K: ClassVar[int] = 12
@@ -417,6 +508,9 @@ class RetrieveConfig:
                       "final_top_k_per_focus": 4,
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
+                          # 给 table chunks 接上 post-read 内容 rerank（仿 Google type bucket）。
+                          # 与 doc chunks 分桶独立 rerank，避免 table 噪声压制 doc 信号。
+                          "feishu": {"feishu_table_chunk_rerank_top_n": 6},
                           "google": {"google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
                                      "google_per_file_timeout_s": 9.0,
                                      # PPTX 是 balanced 主要尾延迟（avg 3.8s, p95 8s, avg 27MB）。
@@ -467,7 +561,9 @@ class RetrieveConfig:
                       "focus_quota": {"critical_min": 2, "important_min": 0},
                       "final_top_k_per_focus": 5,
                       "source_overrides": {
-                          "feishu":  {"max_loops": 2, "source_timeout_s": 45.0},
+                          "feishu":  {"max_loops": 2, "source_timeout_s": 45.0,
+                                      # deep_dive 给 table chunk rerank 更宽松（8 vs balanced 6）。
+                                      "feishu_table_chunk_rerank_top_n": 8},
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
                           "google": {
                               # 单轮（覆盖 LOOSE 的 max_loops=2，eval_layer 仍兜底）
@@ -516,13 +612,13 @@ class RetrieveConfig:
         )
 
     @property
-    def final_top_k_per_focus(self) -> int:
-        """retrieve_agent 出口的每 focus 平均上限（× n_focuses 得到 final_top_k 硬上限）。"""
+    def final_top_k_base(self) -> int:
+        """每 preset 的 final_top_k base（n_focuses=0 时的出口底线）。"""
         return int(self._PRESET_DEFAULTS.get(self.preset, {}).get("final_top_k_per_focus", 4))
 
     def final_top_k(self, n_focuses: int) -> int:
-        """硬上限。候选不足时输出实际数量，可少不可多。"""
-        return self.final_top_k_per_focus * max(1, n_focuses)
+        """硬上限 = base + 1 × n_focuses。候选不足时输出实际数量，可少不可多。"""
+        return self.final_top_k_base + max(1, n_focuses)
 
     @property
     def eval_layer_active(self) -> bool:
@@ -595,6 +691,7 @@ class RetrieveConfig:
             "google_doc_search_per_sq", "google_slide_search_per_sq", "google_sheet_search_per_sq",
             "google_doc_candidates_per_sq", "google_slide_candidates_per_sq", "google_sheet_candidates_per_sq",
             "google_max_gmail_threads_per_subquery", "google_gmail_rerank_top_n",
+            "feishu_table_chunk_rerank_top_n",
         ):
             if getattr(override, f) != getattr(defaults, f):
                 diff[f] = getattr(override, f)

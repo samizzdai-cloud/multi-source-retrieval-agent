@@ -18,7 +18,7 @@ import os
 import re
 import time
 from collections import defaultdict
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from tools.feishu.feishu_retrieve import (
     search_and_read_feishu_tables,
@@ -764,37 +764,58 @@ class FeishuSourceAgent(SourceAgent):
             raise RuntimeError("FeishuSourceAgent requires doc_pool; ensure FEISHU_UAT is configured")
 
         doc_pool_timeout = max(8.0, self.cfg.source_timeout_s * 0.8)
+        # 单 doc 超时：慢 doc 不阻塞整批。lite 在 _execute_batch_lite 里硬编码 6.0s；
+        # balanced/deep_dive 在此统一派生，与 source_timeout_s 解耦（防止极端慢 doc 拖尾）。
+        _per_doc_timeout_map = {"lite": 6.0, "balanced": 8.0, "deep_dive": 12.0}
+        per_doc_timeout = _per_doc_timeout_map.get(self._preset, 8.0)
 
         # ── lite 模式：极简 MCP-only 路径（无 table）────────
         if self._preset == "lite":
             await self._execute_batch_lite(sub_queries, chunk_pool, doc_pool_timeout, batch_started)
             return
 
-        # ── Step 1: 并行搜索 doc + table candidates ──────────
-        async def _prepare_one(sq: SubQuery) -> dict:
-            started = time.perf_counter()
+        # ── Step 1: doc / table 解耦双 track 并行 ────────────
+        # 旧实现：_prepare_one 在 asyncio.gather(doc_task, table_task) 内等齐两者；
+        # 所有 sq 的 prepare_one 又被外层 gather 等齐；结果是 doc submit 必须等到最慢的
+        # table search + structure fetch + child rerank 全跑完（实测多压 1.5~3s）。
+        # 新实现：doc track 走快路径——doc 候选一就绪立即 submit 到 doc_pool 触发 read；
+        # table track 独立跑（仍需 cross-sq trim 所以 sq 之间需聚合），与 doc 不互等。
+
+        prepare_started = time.perf_counter()
+
+        # 公共上下文：sq → (query_type, focus_text, owner_ids)
+        def _resolve_sq_ctx(sq: SubQuery) -> Tuple[str, str, Optional[List[str]]]:
             qt = sq.query_type or self._default_query_type
             if qt not in ("personal_recent", "structured", "concept"):
                 qt = "concept"
-            # lite preset 不启动 table 流水线，structured 降级为 concept 以保持行为一致
             if self._preset == "lite" and qt == "structured":
                 qt = "concept"
             focus_obj = self._current_focus_lookup.get(sq.target_focus)
             focus_text = focus_obj.text if focus_obj else sq.target_focus
+            owner_ids = (
+                [getattr(self, "_current_open_id", None)]
+                if sq.author_filter == "me" and getattr(self, "_current_open_id", None)
+                else None
+            )
+            return qt, focus_text, owner_ids
 
-            owner_ids = [getattr(self, "_current_open_id", None)] if sq.author_filter == "me" and getattr(self, "_current_open_id", None) else None
+        sq_ctx: Dict[str, Tuple[str, str, Optional[List[str]]]] = {
+            sq.sub_query_id: _resolve_sq_ctx(sq) for sq in sub_queries
+        }
 
+        # ── Doc track：每个 sq 的 doc_candidates 一就绪即 submit ────
+        async def _prepare_doc_one(sq: SubQuery) -> dict:
+            t0 = time.perf_counter()
+            qt, focus_text, owner_ids = sq_ctx[sq.sub_query_id]
             if qt == "personal_recent":
-                # 个人极速通道：走专用的纯 MCP 搜索，并强制 route_hint="mcp"
                 try:
                     from feishu_read_tool.search import search_feishu_mcp_pure
                     raw_result = await self._to_thread(
                         search_feishu_mcp_pure,
-                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
-                        owner_ids=owner_ids, sort_rule="EDIT_TIME"
+                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter,
+                        owner_ids=owner_ids, sort_rule="EDIT_TIME",
                     )
                     doc_cands = raw_result.get("items", [])
-                    # 标记来源与强制 route_hint
                     for rank, cand in enumerate(doc_cands, start=1):
                         cand["selected_focus_ids"] = [sq.target_focus]
                         cand["selected_sub_query_ids"] = [sq.sub_query_id]
@@ -805,71 +826,84 @@ class FeishuSourceAgent(SourceAgent):
                 except Exception as e:
                     logger.warning("[feishu] personal_recent search failed for %r: %s", sq.query, e)
                     doc_cands = []
-                table_cands = []
             else:
-                # doc 和 table search 完全并行
-                doc_task = search_and_select_feishu_doc_candidates(
-                    sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
-                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
-                    sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
-                    executor=self._executor,
-                )
-                table_task: asyncio.Task = None
-                if qt == "structured":
-                    table_task = search_and_select_feishu_table_candidates(
-                        sq.query, token=self._uat, page_size=20,
+                try:
+                    doc_cands = await search_and_select_feishu_doc_candidates(
+                        sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
                         query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
-                        sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
-                        direct_limit=3 if self._preset in ("lite", "balanced") else 6,
-                        wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
+                        sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
                         executor=self._executor,
                     )
-
-                if table_task is not None:
-                    doc_cands, table_cands = await asyncio.gather(
-                        doc_task, table_task, return_exceptions=True,
-                    )
-                    if isinstance(doc_cands, Exception):
-                        logger.warning("[feishu] doc search failed for %r: %s", sq.query, doc_cands)
-                        doc_cands = []
-                    if isinstance(table_cands, Exception):
-                        logger.warning("[feishu] table search failed for %r: %s", sq.query, table_cands)
-                        table_cands = []
-                else:
-                    try:
-                        doc_cands = await doc_task
-                    except Exception as e:
-                        logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
-                        doc_cands = []
-                    table_cands = []
-
-            logger.info("TIMING feishu.prepare_one sub_query_id=%s doc=%d table=%d ms=%.1f",
-                         sq.sub_query_id or "unknown", len(doc_cands), len(table_cands),
-                         _elapsed_ms(started))
+                except Exception as e:
+                    logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
+                    doc_cands = []
+            logger.info("TIMING feishu.prepare_doc sub_query_id=%s doc=%d ms=%.1f",
+                         sq.sub_query_id or "unknown", len(doc_cands), _elapsed_ms(t0))
             return {"sq": sq, "query_type": qt, "focus_text": focus_text,
-                    "doc_candidates": doc_cands, "table_candidates": table_cands}
+                    "doc_candidates": doc_cands}
 
-        prepare_started = time.perf_counter()
-        prepared = await asyncio.gather(*[_prepare_one(sq) for sq in sub_queries])
+        # ── Table track：每 sq 独立跑 search + structure + rerank ──
+        async def _prepare_table_one(sq: SubQuery) -> dict:
+            t0 = time.perf_counter()
+            qt, focus_text, _ = sq_ctx[sq.sub_query_id]
+            if qt != "structured":
+                return {"sq": sq, "table_candidates": []}
+            try:
+                table_cands = await search_and_select_feishu_table_candidates(
+                    sq.query, token=self._uat, page_size=20,
+                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                    sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
+                    direct_limit=3 if self._preset in ("lite", "balanced") else 6,
+                    wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
+                    executor=self._executor,
+                )
+            except Exception as e:
+                logger.warning("[feishu] table search failed for %r: %s", sq.query, e)
+                table_cands = []
+            logger.info("TIMING feishu.prepare_table sub_query_id=%s table=%d ms=%.1f",
+                         sq.sub_query_id or "unknown", len(table_cands), _elapsed_ms(t0))
+            return {"sq": sq, "table_candidates": table_cands}
+
+        # ── Doc track 跑完即 submit；与 table track 并发 ────────
+        async def _doc_track() -> Tuple[List[dict], List[dict], Dict[str, List[str]]]:
+            doc_prepared = await asyncio.gather(*[_prepare_doc_one(sq) for sq in sub_queries])
+            early_doc_list, doc_ids_by_sq = _merge_doc_demands(doc_prepared)
+            if early_doc_list and self._doc_pool is not None:
+                _assign_doc_route_hints(early_doc_list, min_block=2)
+                try:
+                    await self._doc_pool.submit_and_read(
+                        early_doc_list, query="__global_feishu_route_plan__",
+                    )
+                    logger.info("TIMING feishu.submit_doc docs=%d preset=%s ms=%.1f",
+                                 len(early_doc_list), self._preset, _elapsed_ms(prepare_started))
+                except Exception as e:
+                    logger.warning("[feishu] doc submit failed: %s", e)
+            return doc_prepared, early_doc_list, doc_ids_by_sq
+
+        async def _table_track() -> Tuple[List[dict], List[dict], Dict[str, List[str]]]:
+            table_prepared = await asyncio.gather(*[_prepare_table_one(sq) for sq in sub_queries])
+            _trim_table_parents(table_prepared, target=6, min_per_sq=2)
+            table_list, table_ids_by_sq = _merge_table_demands(table_prepared)
+            return table_prepared, table_list, table_ids_by_sq
+
+        (doc_prepared, early_doc_list, doc_ids_by_sq), (table_prepared, table_list, table_ids_by_sq) = (
+            await asyncio.gather(_doc_track(), _table_track())
+        )
         logger.info("TIMING feishu.batch_prepare_search sub_queries=%d ms=%.1f",
                      len(sub_queries), _elapsed_ms(prepare_started))
 
-        # ── Step 2: doc submit + table trim + table fire-and-forget（同时进行）
-        # 2a. doc submit（fire-and-forget）
-        early_doc_list, doc_ids_by_sq = _merge_doc_demands(prepared)
-        if early_doc_list and self._doc_pool is not None:
-            # balanced/deep_dive：选择性 route_hint（block_api 只给高价值 doc）
-            _assign_doc_route_hints(early_doc_list, min_block=2)
-            try:
-                await self._doc_pool.submit_and_read(early_doc_list, query="__global_feishu_route_plan__")
-                logger.info("TIMING feishu.submit_doc docs=%d preset=%s ms=%.1f",
-                             len(early_doc_list), self._preset, _elapsed_ms(prepare_started))
-            except Exception as e:
-                logger.warning("[feishu] doc submit failed: %s", e)
-
-        # 2b. table trim + merge + fire-and-forget read
-        _trim_table_parents(prepared, target=6, min_per_sq=2)
-        table_list, table_ids_by_sq = _merge_table_demands(prepared)
+        # 合并 doc/table prepared 为下游 _execute_one 用的 batch 列表（保留 sq 顺序）
+        prepared: List[dict] = []
+        table_by_sq: Dict[str, List[dict]] = {
+            t["sq"].sub_query_id: t.get("table_candidates", []) for t in table_prepared
+        }
+        for d in doc_prepared:
+            sid = d["sq"].sub_query_id
+            prepared.append({
+                "sq": d["sq"], "query_type": d["query_type"], "focus_text": d["focus_text"],
+                "doc_candidates": d.get("doc_candidates", []),
+                "table_candidates": table_by_sq.get(sid, []),
+            })
 
         table_chunks_by_token: Dict[str, List[UnifiedChunk]] = {}
         table_events: Dict[str, asyncio.Event] = {}
@@ -892,6 +926,13 @@ class FeishuSourceAgent(SourceAgent):
                 if token:
                     table_events[token] = asyncio.Event()
 
+            # SHEET 读取总预算硬墙：sheet API（90235 暂态 + 多 tab 并发）尾部偶发
+            # 25-40s 卡顿。配合下层 sheet_reader 的 per_call_timeout_s=3.0 + retry，
+            # 总预算 8s 足够正常情况 + 1-2 次 90235 重试；超过即放弃这个 sheet（chunks=[]），
+            # consumer (sq) 不再被它阻塞。底层 to_thread 任务由于跨线程无法 cancel,
+            # 会继续在 worker 中跑完，但结果会被丢弃。
+            _SHEET_READ_WALL_S = 8.0
+
             async def _read_table_one(cand: dict) -> None:
                 token = _candidate_doc_key(cand)
                 doc_type = str(cand.get("doc_type", "")).upper()
@@ -899,7 +940,17 @@ class FeishuSourceAgent(SourceAgent):
                 rd_started = time.perf_counter()
                 try:
                     if doc_type == "SHEET":
-                        chunks = await self._to_thread(read_sheets, rq, [cand], self._uat)
+                        try:
+                            chunks = await asyncio.wait_for(
+                                self._to_thread(read_sheets, rq, [cand], self._uat),
+                                timeout=_SHEET_READ_WALL_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "[feishu] sheet read wall timeout %.1fs token=%s (abandoning)",
+                                _SHEET_READ_WALL_S, token[:16],
+                            )
+                            chunks = []
                     elif doc_type == "BITABLE":
                         chunks = await self._to_thread(read_bitables, rq, [cand], self._uat)
                     else:
@@ -942,7 +993,26 @@ class FeishuSourceAgent(SourceAgent):
                     if evt:
                         evt.set()
 
+            # FocusBoard 早停门：cand 服务的 focus 已被别源全部满足 → 跳过本次 table 读取，
+            # 直接 set event 让 _wait_table 立刻返回空。修补关键路径上的 10-17s 浪费。
+            board = getattr(self, "_focus_board", None)
             for cand in table_list:
+                token = _candidate_doc_key(cand)
+                focus_ids = list(cand.get("selected_focus_ids") or [])
+                if (
+                    board is not None
+                    and focus_ids
+                    and all(board.is_satisfied(fid) for fid in focus_ids)
+                ):
+                    logger.info(
+                        "[feishu] table skip (focus satisfied) token=%s focus_ids=%s",
+                        token[:16], focus_ids,
+                    )
+                    table_chunks_by_token[token] = []
+                    evt = table_events.get(token)
+                    if evt:
+                        evt.set()
+                    continue
                 asyncio.create_task(_read_table_one(cand))
 
         logger.info("TIMING feishu.batch_prepare docs=%d tables=%d ms=%.1f",
@@ -960,7 +1030,9 @@ class FeishuSourceAgent(SourceAgent):
                 if not d_ids:
                     return []
                 try:
-                    chunks = await self._doc_pool.wait_and_collect(d_ids, total_timeout=doc_pool_timeout)
+                    chunks = await self._doc_pool.wait_and_collect(
+                        d_ids, total_timeout=doc_pool_timeout, per_doc_timeout=per_doc_timeout
+                    )
                     logger.info("TIMING feishu.execute_one_doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
                                  sq.sub_query_id, len(d_ids), len(chunks), _elapsed_ms(started))
                     return chunks
@@ -971,37 +1043,98 @@ class FeishuSourceAgent(SourceAgent):
             async def _wait_table():
                 if qt != "structured" or not t_ids:
                     return []
+                # In-flight cancel: 抢答 evt vs focus.satisfied_event。当本 sq 的 focus
+                # 被别源 satisfied 时立刻放弃剩余 tid 的等待，sq 直接进入 eval 流程。
+                # 注意：**不** 取消底层 read task —— 多 sq 可能共享同一 token（cross-sq
+                # dedup），cancel 会让 evt.set() 前的赋值跳过，坑共享 sq；而且 to_thread
+                # 底层是阻塞线程，cancel 也救不回真正的 I/O。只断本 sq 的等待是最稳妥的。
+                board = getattr(self, "_focus_board", None)
+                sat_evt = board.satisfied_event(sq.target_focus) if board is not None else None
+
                 collected: List[UnifiedChunk] = []
+                abandoned = 0
                 for tid in t_ids:
                     evt = table_events.get(tid)
-                    if evt:
+                    if not evt:
+                        continue
+                    if sat_evt is not None and sat_evt.is_set():
+                        abandoned += 1
+                        continue
+                    if evt.is_set():
+                        collected.extend(table_chunks_by_token.get(tid, []))
+                        continue
+                    if sat_evt is not None:
+                        evt_task = asyncio.create_task(evt.wait())
+                        sat_task = asyncio.create_task(sat_evt.wait())
+                        try:
+                            done, _ = await asyncio.wait(
+                                {evt_task, sat_task},
+                                timeout=doc_pool_timeout,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                        finally:
+                            for t in (evt_task, sat_task):
+                                if not t.done():
+                                    t.cancel()
+                        if sat_task in done and evt_task not in done:
+                            abandoned += 1
+                            continue
+                        if not done:
+                            logger.warning("[feishu] table wait timeout token=%s", tid[:16])
+                    else:
                         try:
                             await asyncio.wait_for(evt.wait(), timeout=doc_pool_timeout)
                         except asyncio.TimeoutError:
                             logger.warning("[feishu] table wait timeout token=%s", tid[:16])
                     collected.extend(table_chunks_by_token.get(tid, []))
+                if abandoned:
+                    logger.info("[feishu] table wait abandoned sub_query_id=%s focus=%s abandoned=%d (focus satisfied externally)",
+                                 sq.sub_query_id, sq.target_focus, abandoned)
                 logger.info("TIMING feishu.execute_one_table_wait sub_query_id=%s parents=%d chunks=%d ms=%.1f",
                              sq.sub_query_id, len(t_ids), len(collected), _elapsed_ms(started))
                 return collected
 
             doc_chunks, table_chunks = await asyncio.gather(_wait_doc(), _wait_table())
 
-            # doc chunks 做 rerank top-n；table chunks 直接全量保留（已经是精选子表）
-            doc_selected: List[UnifiedChunk] = []
-            if doc_chunks:
-                doc_selected = _select_chunks_for_sub_query(
+            # doc / table 各自独立做 post-read content rerank（仿 Google type bucket）。
+            # 分桶 rerank 避免 table 噪声压制 doc 信号；两个 rerank 调用并发跑（to_thread）
+            # 而非串行，避免 +500ms 尾延迟。
+            table_top_n = int(getattr(self.cfg, "feishu_table_chunk_rerank_top_n", 0) or 0)
+
+            async def _rerank_doc() -> List[UnifiedChunk]:
+                if not doc_chunks:
+                    return []
+                selected = await self._to_thread(
+                    _select_chunks_for_sub_query,
                     query=sq.query, focus_text=batch["focus_text"],
                     query_type=qt, uc_list=doc_chunks, top_n=self.cfg.sub_query_top_n,
                 )
-                logger.info("TIMING feishu.chunk_select_doc sub_query_id=%s raw=%d selected=%d ms=0",
-                             sq.sub_query_id, len(doc_chunks), len(doc_selected))
+                logger.info("TIMING feishu.chunk_select_doc sub_query_id=%s raw=%d selected=%d",
+                             sq.sub_query_id, len(doc_chunks), len(selected))
+                return selected
 
-            # table chunks 直接全量（不做 rerank，避免额外 API 调用）
-            uc_list = doc_selected + table_chunks
+            async def _rerank_table() -> List[UnifiedChunk]:
+                if not table_chunks:
+                    return []
+                if table_top_n <= 0:
+                    # 兼容：未配置时沿用旧行为（全量保留，跳过 rerank）
+                    return list(table_chunks)
+                selected = await self._to_thread(
+                    _select_chunks_for_sub_query,
+                    query=sq.query, focus_text=batch["focus_text"],
+                    query_type=qt, uc_list=table_chunks, top_n=table_top_n,
+                )
+                logger.info("TIMING feishu.chunk_select_table sub_query_id=%s raw=%d selected=%d top_n=%d",
+                             sq.sub_query_id, len(table_chunks), len(selected), table_top_n)
+                return selected
+
+            doc_selected, table_selected = await asyncio.gather(_rerank_doc(), _rerank_table())
+
+            uc_list = doc_selected + table_selected
             if not uc_list:
                 return []
             logger.info("TIMING feishu.execute_one_total sub_query_id=%s doc=%d table=%d total=%d ms=%.1f",
-                         sq.sub_query_id, len(doc_selected), len(table_chunks), len(uc_list), _elapsed_ms(started))
+                         sq.sub_query_id, len(doc_selected), len(table_selected), len(uc_list), _elapsed_ms(started))
             return [_unified_to_chunk_entry(uc, sq.query, sq.target_focus, sq.sub_query_id) for uc in uc_list]
 
         batches_result = await asyncio.gather(*[_execute_one(b) for b in prepared])
@@ -1128,16 +1261,33 @@ class FeishuSourceAgent(SourceAgent):
         logger.info("TIMING feishu.lite.batch_prepare_search sub_queries=%d ms=%.1f",
                      len(sub_queries), _elapsed_ms(prepare_started))
 
-        # Step 2: 跨 sq 去重合并，取前 _LITE_DOC_CAP 篇，全部 MCP
+        # Step 2: 跨 sq 去重合并，取前 _LITE_DOC_CAP 篇；
+        # 分流策略：前 _LITE_MCP_TOP_N 篇走 MCP（综合评分高的优先用 MCP），
+        # 其余走 block_api（DocPool 已经按 lite_block_only=True 跳过 IO+comments，
+        # 只调 list_document_blocks 主路径）。
+        #
+        # 这样在保持并发的前提下把负载在两条 API 通道间分摊，避免单条 MCP 通道
+        # 集中触发服务端 5002 频控；block_api 由 99991400 共享 5 qps 桶兜底。
+        _LITE_MCP_TOP_N = 4
         doc_list, doc_ids_by_sq = _merge_doc_demands(prepared)
         doc_list = doc_list[:_LITE_DOC_CAP]
-        for cand in doc_list:
-            cand["route_hint"] = "mcp"
-        logger.info("[feishu][lite] doc route_hint mcp=%d total=%d", len(doc_list), len(doc_list))
+        mcp_count = 0
+        block_count = 0
+        for idx, cand in enumerate(doc_list):
+            if idx < _LITE_MCP_TOP_N:
+                cand["route_hint"] = "mcp"
+                mcp_count += 1
+            else:
+                cand["route_hint"] = "block_api"
+                block_count += 1
+        logger.info(
+            "[feishu][lite] doc route_hint mcp=%d block_api=%d total=%d (lite_block_only=True)",
+            mcp_count, block_count, len(doc_list),
+        )
 
         if doc_list and self._doc_pool is not None:
             try:
-                await self._doc_pool.submit_and_read(doc_list, query="__lite_mcp__")
+                await self._doc_pool.submit_and_read(doc_list, query="__lite_split__")
                 logger.info("TIMING feishu.lite.submit_doc docs=%d ms=%.1f",
                              len(doc_list), _elapsed_ms(prepare_started))
             except Exception as e:

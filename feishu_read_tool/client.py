@@ -353,6 +353,11 @@ class FeishuClient:
         if not tokens:
             return {}
 
+        # 过滤空 token —— 飞书 API 字段校验拒空（field validation failed: doc_token is required）
+        tokens = [t for t in tokens if t]
+        if not tokens:
+            return {}
+
         # 飞书 batch_query 接口每次最多查询 200 个，这里进行安全截断
         tokens = tokens[:200]
 
@@ -362,8 +367,11 @@ class FeishuClient:
             "Content-Type": "application/json; charset=utf-8"
         }
 
+        # API 字段名 = doc_token / doc_type（无 's'）。之前用 docs_token/docs_type 触发
+        # 99992402 "field validation failed: doc_token is required" 错误，response 解析
+        # 也对应失效（meta.get("docs_token") 永远 None），所有 batch 调用静默退化为 {}。
         body = {
-            "request_docs": [{"docs_token": token, "docs_type": "doc"} for token in tokens],
+            "request_docs": [{"doc_token": token, "doc_type": "doc"} for token in tokens],
             "with_url": False
         }
 
@@ -381,7 +389,7 @@ class FeishuClient:
             metas = data.get("data", {}).get("metas", [])
             result = {}
             for meta in metas:
-                t = meta.get("docs_token")
+                t = meta.get("doc_token") or meta.get("docs_token")  # 兜底兼容旧 API 响应
                 if t:
                     result[t] = meta
             return result
@@ -677,12 +685,17 @@ class FeishuClient:
             page_token = paged_data.get("page_token")
 
         return results
-    def read_sheet_range(self, spreadsheet_token: str, range_notation: str) -> List[List]:
+    def read_sheet_range(
+        self, spreadsheet_token: str, range_notation: str,
+        timeout: float = 25.0,
+    ) -> List[List]:
         """读取电子表格数据
 
         Args:
             spreadsheet_token: 表格 token
             range_notation:    范围表示法，如 "fgvTJC!A1:D10"
+            timeout:           HTTP 超时秒数（默认 25s；caller 可调短以配合上层
+                               retry/总预算，例如 sheet_reader 配合 8s 总预算可传 3.0）
 
         Returns:
             二维数组格式的单元格数据
@@ -698,7 +711,7 @@ class FeishuClient:
             f"?valueRenderOption=FormattedValue"
         )
         headers = {"Authorization": f"Bearer {self.user_access_token}"}
-        resp = requests.get(url, headers=headers, timeout=25)
+        resp = requests.get(url, headers=headers, timeout=timeout)
 
         if resp.status_code != 200:
             raise APIError(
@@ -717,8 +730,14 @@ class FeishuClient:
 
         value_range = raw_data.get("data", {}).get("valueRange", {})
         return value_range.get("values", [])
-    def query_all_sheets_metadata(self, spreadsheet_token: str) -> List[Dict]:
+    def query_all_sheets_metadata(
+        self, spreadsheet_token: str, timeout: float = 15.0,
+    ) -> List[Dict]:
         """获取电子表格所有工作表的元数据（含 merges）。
+
+        Args:
+            spreadsheet_token: 表格 token
+            timeout: HTTP 超时秒数（默认 15s；caller 可调短配合上层 retry 总预算）
 
         Returns:
             [{"sheet_id", "title", "index", "hidden", "row_count", "column_count",
@@ -728,7 +747,7 @@ class FeishuClient:
         url = (f"https://open.feishu.cn/open-apis/sheets/v3/spreadsheets"
                f"/{spreadsheet_token}/sheets/query")
         headers = {"Authorization": f"Bearer {self.user_access_token}"}
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=timeout)
         if resp.status_code != 200:
             raise APIError(code=resp.status_code, msg=f"HTTP error: {resp.text}", log_id="")
         data = resp.json()

@@ -143,100 +143,119 @@ ENTITY_FIDELITY_BLOCK = """【实体保真原则（强制 / 拒识）】
 - sub_query 是为了从源中**检索得更准**，不是为了**限定到某条产品线**。"""
 
 
-# ── 各源 Query 编写规则（供 SourceAgent 的 plan_only prompt 注入）──────────
+# ── 共享 sub_query 编写规则（从 feishu/google 抽出的重复段）────────────────
+# 在 Global Planner prompt 顶部注入一次；SourceAgent v1 plan_only 通过
+# get_source_query_rules(include_common=True) 拼接到 per-source 尾部，保持单源
+# prompt 自包含。
+
+COMMON_SUB_QUERY_HINTS = """【共享 sub_query 编写规则】（当前对 feishu / google 生效）
+
+【高级时间推断（time_filter）】当前系统时间 = {now_str}。
+  · "YYYY 年规划/计划"：规划往往在前一年 Q3/Q4 写 → time_filter 提前 1-3 个月
+    （例：问"2026 年规划" → '>2025-09-01'）
+  · "YYYY 年终总结/复盘"：设为该年 11 月起（例：问"2025 年终复盘" → '>2025-11-01'）
+  · 近期/最近 → 留空或 "last_30_days"（按各源支持决定）
+  · 不涉及时效 → 留空
+
+【身份归属（author_filter）】query 明确含"我写的/我创建的/我的/我最近的工作"等归属语
+→ author_filter='me'；否则 null。"""
+
+
+QUERY_TYPE_DESCRIPTION = """【query_type】（feishu / google 必填，决定下游路由）
+  · structured：问结构化、可核对、可追踪的事实——指标/数字/排名/销量/GMV/转化率/库存,
+                或流程/项目管理/进度/owner/里程碑/任务状态/排期/checklist
+                → feishu 开 Table API 深度解析；google 应配 time_filter 收紧范围
+  · concept   ：问策略/原因/背景/定位/市场分析/方法论等文本理解
+                → 不加 time_filter 扩大召回
+  · personal_recent：focus 极其空泛 + 高度个人化（"我最近做了啥"）
+                → 同时 author_filter='me'；feishu 走纯 MCP 极速通道；
+                  google 强制 google_order_by='viewedByMeTime desc'
+
+同一 focus 既要结构化事实又要背景解释 → 拆两条 sub_query，禁止混合 type。"""
+
+
+# ── 各源 Query 编写规则（仅源特有部分；共享段在外注入）────────────────────
 
 SOURCE_QUERY_RULES: Dict[str, str] = {
     "feishu": (
-        "【Feishu 专属规划指南】\n"
+        "【Feishu 专属规则】\n"
         "  · 格式：「品牌 + 国家(可选) + 核心动作词」，2-3 词，AND 精确匹配\n"
-        "  · 长度：严格控制 5-15 字，过长会导致零召回\n"
-        "  · 禁止：不包含具体月份（「12月」「Q1」），不包含过专业词（「邮件」「线下」「Google Ads」）\n"
-        "  · 国家：必须用中文（美国/英国/德国/日本/墨西哥），禁止 US/UK/DE/JP/MX\n"
-        "  · 动作词：从 [销售, 运营, 策略, KOL, 推广, 发布, 计划, 表现, 营销, 合作, 进度, 市场, 产品, 定价] 中选择\n"
-        "  · 优先策略：先「品牌 + 动作词」（2词），必要时加国家（3词）\n"
-        "  · tags 始终为 []、indexes 始终为 []\n"
-        "  · time_filter：支持 \">YYYY-MM-DD\" 的格式或者相对时间词（如 \"last_30_days\"）。\n"
-        "  · 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 time_filter 设置为提前的时间点，例如 '>2025-09-01'。如果是某年终总结，可设置 '>2025-11-01'。如果不涉及时效，留空即可。\n"
-        "  · 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 'me'。\n"
-        "  · query_type（必填，影响底层路由和极速查询）：\n"
-        "      - \"structured\"：focus 问的是结构化、可核对、可追踪的事实载体\n"
-        "                     包括：指标/数字/排名/销量/GMV/转化率/库存，以及流程/项目管理/进度/\n"
-        "                     owner/里程碑/任务状态/执行记录/排期/checklist\n"
-        "                   → 将开启 Table API 深度解析表单和多标签页结构\n"
-        "      - \"concept\" ：focus 问的是策略/原因/背景/定位/市场分析/方法论等文本理解\n"
-        "                   → concept-only 文档按预算走常规文档解析\n"
-        "      - \"personal_recent\"：focus 问的是极其空泛、与个人动作高度相关的近期查询\n"
-        "                     例如：「我最近做了啥」「我最近写的文档」「我的近期规划」\n"
-        "                     一旦判定为这类意图，必须使用此类型，并同时将 `author_filter` 设为 \"me\"。\n"
-        "                     系统将启动专属极速纯 MCP 检索通道，实现秒级回复。\n"
-        "  · 如果同一 focus 既需要结构化事实又需要背景解释，必须拆成两条 sub_query；禁止输出混合类型\n"
-        "  · 正确示例：「nubia 销售」「hypershell 策略」「nubia 日本 运营」"
+        "  · 长度严格 5-15 字，过长零召回\n"
+        "  · 禁止具体月份（「12月」「Q1」）、过专业词（「邮件」「线下」「Google Ads」）\n"
+        "  · 国家必须用中文（美国/英国/德国/日本/墨西哥），禁止 US/UK/DE/JP/MX\n"
+        "  · 动作词从 [销售, 运营, 策略, KOL, 推广, 发布, 计划, 表现, 营销, 合作,\n"
+        "    进度, 市场, 产品, 定价] 中选\n"
+        "  · 优先「品牌 + 动作词」(2词)，必要时加国家(3词)\n"
+        "  · tags=[] / indexes=[] 恒成立\n"
+        "  · time_filter 支持 \">YYYY-MM-DD\" 或相对词 \"last_30_days\"\n"
+        "  · 示例：「nubia 销售」「hypershell 策略」「nubia 日本 运营」"
     ),
     "bailian": (
-        "bailian query 规则：\n"
+        "【Bailian 专属规则】\n"
         "  · 格式：完整语义化句子/问句，含充分上下文\n"
-        "  · 国家缩写必须展开三元组：UK → \"UK/英国/United Kingdom\"（缩写+中文+英文同时出现）\n"
-        "  · tags 规则（⚠️ 百炼 tag 过滤约束「同 dimension 不能冲突」）：\n"
-        "    - L2 业务 tag 最多 1 个（精准优先，从 BAILIAN_L2_TAGS 枚举中挑最贴切的那个）\n"
-        "    - 时效 tag 最多 1 个（格式 YYYY_QN，或背景/规范类用 \"last_long\"）\n"
-        "    - 一条 sub_query 的 tags 总数 ≤ 2 且两类各 ≤ 1\n"
-        "    - 没把握的 L2 宁可不加 tag（召回优先），避免 AND 过滤零返回\n"
-        "  · indexes：从 planner 给的 allowed_indexes 中按 focus 业务实体选择\n"
-        "  · time_filter 始终为 null（时效走 tags）\n"
-        "  · 示例：\"nubia UK/英国/United Kingdom 2026年3月份 DTC 销售额和GMV表现\" tags=[\"DTC\",\"2026_Q1\"]"
+        "  · 国家缩写必须展开三元组：UK → \"UK/英国/United Kingdom\"\n"
+        "  · tags（⚠️ 百炼 tag 过滤「同 dimension 不能冲突」）：\n"
+        "    - L2 业务 tag 最多 1 个，从 BAILIAN_L2_TAGS 枚举挑最贴切\n"
+        "    - 时效 tag 最多 1 个（YYYY_QN 或背景类 \"last_long\"）\n"
+        "    - 总数 ≤ 2 且两类各 ≤ 1；没把握宁可不加（召回优先）\n"
+        "  · indexes：从 allowed_indexes 中按 focus 业务实体选\n"
+        "  · time_filter 恒为 null（时效走 tags）\n"
+        "  · 示例：\"nubia UK/英国/United Kingdom 2026年3月份 DTC 销售额和GMV表现\""
+        " tags=[\"DTC\",\"2026_Q1\"]"
     ),
     "notion": (
-        "notion query 规则：\n"
+        "【Notion 专属规则】\n"
         "  · 自然语言检索，关键词或短句均可\n"
-        "  · tags 始终为 []、indexes 始终为 []、time_filter 始终为 null"
+        "  · tags=[] / indexes=[] / time_filter=null 恒成立"
     ),
     "google": (
-        "【Google Workspace 专属规划指南】\n"
-        "Google 源支持强大的全文与标题检索切换以及高级过滤，你需要根据诉求做出精准调度：\n"
-        "0. 【Sub_query 数量预算】（少而精原则，硬纪律）：\n"
-        "   - focuses 数 = 1：默认输出 1 条；仅当该 focus 包含两个明显异质切面（如 data + concept、\n"
-        "     或 结构化指标 + 时间趋势）时才输出 2 条。\n"
-        "   - focuses 数 ≥ 2：所有 focus 累计 ≤ 2 条。每个 focus 至少 0-1 条；优先覆盖信息密度更高的\n"
-        "     focus；其余 focus 让飞书/百炼承担。**不得为了凑齐每个 focus 而强行扩到 3 条。**\n"
-        "   - 禁止为凑数拆出语义近似的 sub_query；少而精优于多而散。\n"
-        "   - **关键词宽度**：单条 sub_query 关键词 2-4 个为宜；超过 4 个会导致 Drive 全文 AND 命中崩塌；\n"
-        "     不要把多个竞品/多个产品型号/多个地区同时塞入一条。\n"
-        "1. 默认情况，保持 `google_enable_fulltext = true` 且 `google_order_by = null`，以获取最深度的全文匹配。\n"
-        "2. 如果用户寻找近期修改或阅读的文件，设置 `google_enable_fulltext = false`（退化为纯标题检索），"
-        "并开启强制排序 `google_order_by = 'viewedByMeTime desc'` 或 `'modifiedTime desc'`。\n"
-        "3. 【极其重要】你的 `query` 必须提取为 2 到 4 个最核心的名词或专有名词，必须用空格隔开（例如：'REDMAGIC 营销 上市'）。系统会在底层自动为你做同义词泛化，绝对不能输出长句。\n"
-        "4. 【Query 类型适配】根据 focus 的 query_type 调整 subquery 策略：\n"
-        "   - data 类型（问销量/GMV/订单/库存/转化率等结构化数据）：\n"
-        "     * subquery 必须包含「品牌 + 渠道/国家 + 指标词」，如 'nubia UK DTC GMV'\n"
-        "     * 强烈建议使用 `time_filter` 过滤时间范围（如 `'>2025-03-01'`）\n"
-        "     * 月份/季度的中英文同义词由系统底层自动扩展，**只需输出一种写法即可**（如 'March' 或 '3月' 任选其一，系统会自动 OR 'March'/'3月'/'Mar'）\n"
-        "     * 如果涉及多个国家，subquery 里只保留最核心的 1-2 个国家\n"
-        "   - concept 类型（问策略/原因/背景/定位/市场分析等）：\n"
-        "     * subquery 保持 2-3 个关键词，如 'REDMAGIC 竞品 分析'\n"
-        "     * 不使用 time_filter，扩大召回范围\n"
-        "   - personal_recent 类型：设置 `author_filter = 'me'` 并启用 `google_order_by = 'viewedByMeTime desc'`。\n"
-        "     由源内部按需懒加载用户 Drive 空间画像，LLM 端无需在 query 里枚举空间名。\n"
-        "   - 【社媒/营销/广告类 query 提示】当 focus 涉及社交媒体、营销、投放、广告、传播效果时：\n"
-        "     * 系统底层关键词扩展层会自动 OR '营销/marketing/campaign/推广/投放/广告' 等同义词，**LLM 只需输出一种主关键词**\n"
-        "     * 如果用户明确询问'各平台'分布或'按平台对比'，subquery 才需要显式枚举平台名（如 'YouTube Instagram TikTok'）\n"
-        "     * 否则保持简洁，例如 'nubia 社媒 营销 预算' 即可（系统会自动扩展到 KOL/Affiliate/Paid media）\n"
-        "5. 【高级时间推断】当前系统时间是：{now_str}。如果用户寻求特定年份的文件（如'2026年的规划'），因为规划往往在上一年 Q3/Q4 开始写，你需要聪明地将 `time_filter` 设置为提前的时间点，例如 `'>2025-09-01'`。如果是某年终总结，可设置 `'>2025-11-01'`。如果不涉及时效，留空即可。\n"
-        "6. 【身份归属推断】如果用户的 Query 中明确带有“我写的”、“我创建的”、“我的”、“我最近的工作”等归属要求，请将 `author_filter` 设置为 `'me'`。"
+        "【Google Workspace 专属规则】\n"
+        "0. 【数量预算（少而精硬纪律）】\n"
+        "   · focuses=1：默认 1 条；只有 focus 含两个明显异质切面（如 数据+概念）才 2 条\n"
+        "   · focuses≥2：累计 ≤ 2 条；优先覆盖信息密度更高的 focus，其余 focus\n"
+        "     让飞书/百炼承担\n"
+        "   · 单条 keywords 2-4 个；>4 个会导致 Drive 全文 AND 崩塌\n"
+        "   · 禁止把多个竞品/多个产品型号/多个地区塞入一条\n"
+        "1. 默认：google_enable_fulltext=true、google_order_by=null（最深全文匹配）\n"
+        "2. 用户找近期修改/阅读的文件：google_enable_fulltext=false（标题检索）\n"
+        "   并 google_order_by='viewedByMeTime desc' 或 'modifiedTime desc'\n"
+        "3. `query` 必须是 2-4 个核心名词，空格分隔（例：'REDMAGIC 营销 上市'），\n"
+        "   底层自动做同义词泛化，绝对不输出长句\n"
+        "4. 【按 query_type 适配 query 写法】\n"
+        "   · structured（数据类）：query 含「品牌+渠道/国家+指标词」（例 'nubia UK DTC GMV'）；\n"
+        "     强烈建议加 time_filter；月份中英文系统自动 OR，只写一种写法\n"
+        "   · concept：2-3 个关键词（例 'REDMAGIC 竞品 分析'），不加 time_filter 扩召回\n"
+        "5. 【社媒/营销 query】底层自动 OR '营销/marketing/campaign/推广/投放/广告'\n"
+        "   LLM 只需输出一种主关键词；显式枚举平台名只在用户问'各平台对比'时\n"
+        "   常规简洁写 'nubia 社媒 营销 预算'（系统会扩到 KOL/Affiliate/Paid media）"
     ),
 }
 
-def get_source_query_rules(source_name: str) -> str:
-    """动态获取格式化后的 source query rules。
-    
-    自动注入当前的时间等动态上下文变量供 LLM 高级推断使用。
+
+# 哪些源需要在 plan_only/global_planner 拼共享 COMMON + QUERY_TYPE 段
+_SOURCES_USING_COMMON_HINTS = {"feishu", "google"}
+
+
+def get_source_query_rules(source_name: str, include_common: bool = True) -> str:
+    """获取格式化后的 source query rules（按需追加共享段）。
+
+    Args:
+        source_name: 源名（feishu / bailian / google / notion）
+        include_common: True（默认）追加 COMMON_SUB_QUERY_HINTS + QUERY_TYPE_DESCRIPTION
+            到 per-source 规则尾部——给 SourceAgent v1 plan_only LLM 用，让单源 prompt
+            自包含。global_planner 在 prompt 顶部统一注入这两段后传 False 取纯特有部分。
     """
     import datetime
     now_str = datetime.datetime.now().strftime("%Y-%m-%d")
     template = SOURCE_QUERY_RULES.get(source_name, "")
-    # 如果模板中存在 {now_str} 占位符，则进行格式化，否则原样返回
-    if "{now_str}" in template:
-        return template.format(now_str=now_str)
-    return template
+    body = template.format(now_str=now_str) if "{now_str}" in template else template
+    if include_common and source_name in _SOURCES_USING_COMMON_HINTS:
+        body = (
+            body + "\n\n" + COMMON_SUB_QUERY_HINTS.format(now_str=now_str)
+            + "\n\n" + QUERY_TYPE_DESCRIPTION
+        )
+    return body
+
 
 # 国家/地区缩写展开规则（bailian 专用）
 COUNTRY_ABBREV_RULE = (
@@ -249,4 +268,3 @@ COUNTRY_ABBREV_RULE = (
     "    GL/全球/Global、CA/加拿大/Canada、AU/澳大利亚/Australia、\n"
     "    JP/日本/Japan、DE/德国/Germany、FR/法国/France、IT/意大利/Italy"
 )
-

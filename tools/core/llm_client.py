@@ -49,7 +49,9 @@ def call_llm(prompt: str, max_tokens: int = LLM_MAX_TOKENS, timeout: float = 30.
              _caller_tag: str = "unknown",
              max_retries: int = 3, retry_delay: float = 1.5,
              model: str | None = None,
-             thinking_budget: int | None = None) -> str:
+             thinking_budget: int | None = None,
+             response_mime_type: str | None = None,
+             response_schema: dict | None = None) -> str:
     """Generic LLM call via Gemini API. Returns response text.
 
     自动重试（指数退避）：503 / 429 / UNAVAILABLE / quota exceeded → 最多 max_retries 次。
@@ -76,17 +78,34 @@ def call_llm(prompt: str, max_tokens: int = LLM_MAX_TOKENS, timeout: float = 30.
 
     for attempt in range(max_retries):
         try:
+            _cfg_kwargs: dict = dict(
+                max_output_tokens=max_tokens,
+                temperature=LLM_TEMPERATURE,
+                thinking_config=genai_types.ThinkingConfig(thinking_budget=_tb),
+                http_options=genai_types.HttpOptions(timeout=int(timeout * 1000)),
+            )
+            if response_mime_type:
+                _cfg_kwargs["response_mime_type"] = response_mime_type
+            if response_schema:
+                _cfg_kwargs["response_schema"] = response_schema
+                # response_schema 隐含 JSON 输出，但显式设置更保险
+                _cfg_kwargs.setdefault("response_mime_type", "application/json")
             response = _client.models.generate_content(
                 model=use_model,
                 contents=prompt,
-                config=genai_types.GenerateContentConfig(
-                    max_output_tokens=max_tokens,
-                    temperature=LLM_TEMPERATURE,
-                    thinking_config=genai_types.ThinkingConfig(thinking_budget=_tb),
-                    http_options=genai_types.HttpOptions(timeout=int(timeout * 1000)),
-                ),
+                config=genai_types.GenerateContentConfig(**_cfg_kwargs),
             )
             response_text = response.text or ""
+            if not response_text:
+                # Safety-blocked or empty response — raise so retry/fallback logic fires
+                try:
+                    candidate = response.candidates[0] if response.candidates else None
+                    reason = candidate.finish_reason if candidate else "unknown"
+                except Exception:
+                    reason = "unknown"
+                raise RuntimeError(
+                    f"empty response from model (finish_reason={reason})"
+                )
             if _llm_trace_hook is not None:
                 try:
                     _llm_trace_hook(prompt, response_text, _caller_tag)
@@ -116,7 +135,9 @@ def call_llm(prompt: str, max_tokens: int = LLM_MAX_TOKENS, timeout: float = 30.
         try:
             return call_llm(prompt, max_tokens=max_tokens, timeout=timeout,
                             _caller_tag=_caller_tag, max_retries=2,
-                            model=LLM_FALLBACK, thinking_budget=thinking_budget)
+                            model=LLM_FALLBACK, thinking_budget=thinking_budget,
+                            response_mime_type=response_mime_type,
+                            response_schema=response_schema)
         except Exception as fallback_exc:
             logger.warning("call_llm [%s]: fallback also failed: %s", _caller_tag, fallback_exc)
 

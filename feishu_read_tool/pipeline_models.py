@@ -120,3 +120,10 @@ class PipelineConfig:
     # DocPool 模式：跳过 Stage 2 (BM25 candidate filter) + Stage 5 (BM25+embedding scoring)
     # Stage 3 (fetch blocks) + Stage 4 (chunking) 保留；评分由 DocPool.wait_and_score 完成
     skip_scoring: bool = False
+
+    # lite 模式专用：只用一次 `list_document_blocks` 主路径，**不**再额外调用
+    # IO 类块的扩展 API（type30 sheet / type53 bitable / type43 whiteboard）以及
+    # comments 接口——把所有 99991400 共享桶预算让给 P_BLOCK_API。
+    # 影响：lite 模式下 block_api 分流文档**只**得到正文文本 chunks，嵌入表/画板
+    # 部分内容会缺失；对极速场景可接受。
+    lite_block_only: bool = False

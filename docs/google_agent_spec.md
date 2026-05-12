@@ -1,493 +1,362 @@
-# Google Workspace Source Agent Architecture Specification
+# Google Workspace Source — 架构规格（v3.0）
 
-> **v2.8（2026-05-07）家族化重构 + 重复 API 消除**——基于 v2.7 之上：
-> - 抽象 sheet/slide/doc 三家族统一处理（native ↔ nonnative dedup + Format tag rerank）
-> - 消除 Phase E 重复 metadata API（`_estimate_sheet_read_time` × N，binary reader `files().get` × N）
-> - Phase B sheet metadata 移除 `merges` 字段，3.3s → 1.5s（-55%）
-> - Doc fetcher 默认字段移除 `childTabs`，省去每个 doc 的 400→retry 往返
-> - 合并 nonnative worker pool；修复 Gmail dead pool bug
-> - lite preset 永久 sheet-off；balanced sheet candidates 4 → 3
-> - Sheet Phase B prefilter：per-sq 打分取 max + min_keep_per_sq floor，防止单 sq 召回归零
-> - 删除 RM 系列 hardcoded product-gen penalty，改用 stale-year + title overlap 通用兜底
-> - plan_only 已有的 `time_filter` 接入 `_drive_file_local_score`，替代 regex 推断
->
-> 详见 §6 / §7 / §8 / §9 / §10 / §11 / §12。
-
-## 1. 架构总览与组件映射
-Google Workspace Source Agent 作为连接全局 Retrieve Agent 和 Google 庞大生态（Drive、Gmail 等）的桥梁，负责将高维的检索意图转化为具体的 API 请求，并将复杂的异构数据格式清洗、分块、重排序后输出标准 Chunk。
-
-核心映射组件如下（基于 Vertical DDD 架构）：
-- **Agent 层**：由垂直目录 `agents/google/` 提供强内聚的认知层支持。
-  - `google_source_agent.py`：其中的 `GoogleSourceAgent` 继承自 `SourceAgent` 基类，作为纯粹的工作流引擎，提供标准的 Plan-Eval-Loop 并发控制骨架。
-  - `google_retrieve_llm_build.py`：将 Google 源的特有 Pydantic Schema（如 `google_enable_fulltext`）与 Prompt 彻底隔离，通过 Factory Hook 组装供 Agent 调用的 LLM 大脑。
-- **Tool 检索与分发层**：`tools/google/google_retrieve.py`。统一的调度入口，封装了对 Drive SDK 和 Gmail SDK 的并发请求，同时处理了搜索参数设定与文件候选项粗排（Candidate Reranking）。
-- **解析与分块层 (Reader & Chunker)**：以 `google_workspace_tool/drive_content_reader.py` 为路由，按 MIME Type 路由给下游的 Reader（如 `doc_reader.py`, `sheet_reader.py`, `gmail_rag_pipeline.py` 等），这些 Reader 会完成底层数据的读取和最初始的文本切分，返回特定类型的块结构。
-- **精排与过滤层**：利用 `tools/core/rerank.py`，结合传入的 Target Focus 在分块级别做语义重排，确保提取出的片段与真实意图高度匹配。
-
-## 2. 全链路核心流程图与架构对比
-从系统派发带有 `target_focus` 意图的 `SubQuery` 到最终输出统一结构的高优 `ChunkEntry` 序列，底层存在复杂的 IO 交互和参数流转。
-
-下面是涵盖 Google Workspace 和 Feishu 的底层流转对比模型（基于真实代码调用链构建）：
-
-```text
-[Global] RetrieveAgent 
-      │
-      ▼  (1) Dispatch SubQuery(query, target_focus)
-[Agent] SourceAgent (agents/google/google_source_agent.py)
-      │
-      ├──▶ [Stage 0: LLM Plan] (via google_retrieve_llm_build.py)
-      │     │-- Generate SubQuery with google_enable_fulltext / google_order_by
-      │
-      ├──▶ [Stage 1: Search & Pre-Filter]
-      │     │-- Invoke Platform API (google_retrieve / feishu_retrieve)
-      │     │-- API Returns Raw Candidates (Doc ID, Title, Snippet)
-      │     └── Core Reranker Trims Top-K Candidates (by File Title vs Query)
-      │
-      ├──▶ [Stage 2: Concurrent Read & Chunking (IO Bound)]
-      │     │-- ThreadPool / Async Dispatch to Type-Specific Readers
-      │     │    * Google: drive_content_reader.py routes by mimeType
-      │     │    * Feishu: docx_pipeline / table_pool routes by obj_type
-      │     └── Returns List[UnifiedChunk] (Text & Markdown Tables)
-      │
-      ├──▶ [Stage 3: Semantic Chunk Reranking]
-      │     │-- select_reranked_chunks(chunks_text vs focus_text)
-      │     └── Returns Filtered & Scored Top-N Chunks
-      │
-      ▼  (10) Yield List[ChunkEntry] with standardized metadata
-[Global] RetrieveAgent
-```
-
-## 3. 详细流程分解：参数流转与双系统对照
-
-### 环节 1：Focus 接收与任务入口
-- **入口函数**：`execute_sub_query_full(sq: SubQuery) -> List[ChunkEntry]`。
-- **参数流转**：
-  - `sq.query`：用于向外部 API 提交字面匹配检索词。
-  - `sq.target_focus`：作为后续 Reranker 精排对比时的“靶向基准（Baseline）”。Agent 会尝试提取 `focus_text` 的详尽描述。
-- **对齐关系**：
-  - **Google**：在 `agents/google/google_source_agent.py` 内部接收后直接传递给 `google_retrieve`。
-  - **Feishu**：在 `agents/feishu/feishu_source_agent.py` 中有相同的接收签名，传递给 `tools/feishu/feishu_retrieve.py`。
-
-### 环节 2：平台并发检索与候选粗排 (Candidate Select)
-- **机制与数据流**：
-  将传入的 `query` 下发给平台提供的全文搜索 API。由于云端系统庞大，不能将所有匹配的文档全部下载解析。因此在拿到初步列表（常为 `List[Dict]`，含有 ID、标题、摘要）后，执行内存级的 `select_search_candidates`（即 Reranker 的标题级预筛选）。
-- **对齐关系**：
-  - **Google (`tools/google/google_retrieve.py`)**：
-    1. 前置授权检查：`retrieve_agent` 启动时若启用 Google 源，会立即通过 `auth_utils.get_credentials` 验证 Token，确保终端弹出授权流。
-    2. 调用 Drive SDK：根据 `enable_fulltext_search` 决定使用全文检索 (`fullText contains`) 还是标题检索 (`name contains`)，且支持按最近阅读时间 (`viewedByMeTime desc`) 等强时效性字段排序。只请求最核心的属性 `fields="id, name, mimeType, description, modifiedTime, createdTime, viewedByMeTime, owners"`。
-    3. 调用 Gmail SDK：通过 `users().threads().list` 搭配 `messages().get`。如果不需解析附件，会请求极简的 `format='metadata'` 仅获取 Headers 与 `snippet`。
-    4. 调用 `_select_drive_candidates`，结合时间与作者等元数据丰富 Candidate Text 后，送入 LLM Reranker 进行智能筛选。
-    5. 对 Sheets 类文件，额外使用 `_select_sheet_ranges` 对内部 sheet_name 进行一次预筛。
-  - **Feishu (`tools/feishu/feishu_retrieve.py`)**：
-    1. 调用 飞书 Search API 或 MCP 工具，根据传入的 `file_type` 过滤知识库、文档或表格。
-    2. 直接将飞书返回的 title、summary 封装，同样交给 `select_search_candidates` 做粗排淘汰，极大减小 `docx_pipeline` 获取完整 Block 树的压力。
-
-### 环节 3：IO 密集型的自适应并发读取 (Read & Chunking)
-- **机制与并发**：
-  这部分是系统的性能瓶颈区，需要将之前选中的 Top-K 文档 ID 全部拉回正文，并在拉取过程中完成拆分（Chunking），以适配大模型的 Context 窗口。主要采用 `ThreadPoolExecutor` 或者 asyncio 协程池以 `doc_id` 粒度进行并发。
-- **对齐关系**：
-  - **Google (`google_workspace_tool/drive_content_reader.py`)**：
-    利用 `read_drive_chunks` 按 `mimeType` 动态路由。
-    - **API 调用**：Word/Excel/PPTX 采用 `requests` 字节流直接下载，Google Docs/Slides 调用原生 SDK 解析结构（去除删除线等）。
-    - **Chunk 切分**：依赖 `chunkers/md_chunker.py` 里的 `_bin_pack_segments`。
-    - **格式统一**：嵌套表格会被压扁为 `[cell:A1{text}]` 的格式，超大表格会在 `md_chunker` 中沿用行分割+首行带入策略。
-  - **Feishu (`feishu_read_tool/docx_pipeline.py`)**：
-    - **API 调用**：依赖 `ListDocumentBlockRequest` 递归提取 block 树，以及利用 IO 池并行获取 Bitable / Sheet 附件和评论 (`get_doc_comments`)。对于表格走 `read_sheet_range`。
-    - **Chunk 切分**：依赖 `feishu_read_tool/chunker.py` 的 `build_text_chunks`。同样使用 `_bin_pack_segments` 进行 Heading 切分。
-    - **格式统一**：嵌套表格原本强制 `\n` 拉平。大表格切分由 `table_handler.py` 的 `_split_rows_into_chunks` 处理。目前两者的渲染表现与逻辑已强行对齐。
-
-### 环节 4：语义精排与质量拦截 (Rerank Selection)
-- **机制与数据流**：
-  从各大 Reader 取回的数据已经是标准化的 `List[UnifiedChunk]` 列表（通常可能有几十上百块）。此时我们将这些 chunk 的纯文本内容（`chunk.text`）送往 `select_reranked_chunks` 核心模型 API。
-  比较参数是：`query=focus_text` vs `chunks=[payload.text, ...]`。
-- **对齐关系**：
-  - **Google**：`agents/google/google_source_agent.py` 中的 `_select_chunks_for_sub_query` 调用。通过设置 `score_threshold`（比如 0.18 或更高）动态抛弃灌水无用的块。若 Rerank 调用失败或结果为空，则具有 `fallback_select` 保底策略（按自带权重截取）。
-  - **Feishu**：`agents/feishu/feishu_source_agent.py` 使用与 Google 完全相同的重排核心逻辑和配置基准。两边的 Token 开销预估、算分方式保证了最终选出的结果具有同等公信力。
-
-### 环节 5：输出映射与跨代理流转
-- 选中的 `UnifiedChunk` 会通过 `_unified_to_chunk_entry` 打包为 `ChunkEntry` 暴露给主控 RAG 循环。
-- ID 溯源策略统一为 `[source_tag]:[doc_id_or_url]:[chunk_offset_hash]`，其中 Google 的 `source_tool` 会带上如 `google`, `gmail`，飞书则带上 `feishu` 以便追踪。
-
-## 4. Agentic 设计：Plan, Eval 与 Loop 机制
-Google Agent 在保持高度流式并发的同时，凭借 `SourceAgent` 基类提供的架构设计，支持智能修正机制。这一切由 `SourceAgentConfig` (如 `max_loops` 控制) 调度执行。
-
-- **Plan-Only Agent (检索前置规划)**：
-  在主链路发起前，如果系统识别出这是一个复杂的模糊需求，`plan_only_agent` 会基于用户原始 Context 分析 Google Workspace 域内最适合的实体词，自行推导最佳查询策略。
-- **Eval-Only Agent (基于 Focus 的评判)**：
-  在 `ChunkEntry` 组装完成之后返回全局 Agent 之前，`eval_only_agent` 可介入进行自我评估：这些片段究竟有没有命中 `focus_text` 指示的内容？还是只是触发了泛滥的关键词？根据严格打分生成 `EvalResult`。
-- **Plan-Eval 迭代微调 Loop**：
-  若 Eval 判定当前检索结果未达及格线，且 `max_loops > 1`，引擎将启动反馈环。`plan_eval_agent` 依靠上一轮的失败分析（如“命中邮件，但缺乏附件数据”），动态调整检索策略并重新构造更精确的 `query` 下发给底层重试。这种带记忆的试错环显著拉高了针对 Google 源海量碎片数据的召回质量天花板。
+> 文档版本：**v3.0**  
+> 同步日期：2026-05-11  
+> 适用代码：`agents/google/` + `tools/google/` + `google_workspace_tool/`
 
 ---
 
-## 5. v2.7 性能优化实测基线（2026-05-07）
+## 1. 定位
 
-balanced preset 4-query 实测（详见根目录 `balanced_4q_final.log`）：
+`GoogleSourceAgent` 是 retrieve_agent 多源链路下的 Google Workspace 适配器，覆盖：
+- **Drive 原生** (native)：Google Docs / Sheets / Slides
+- **Drive 非原生** (nonnative)：xlsx/csv（Excel family）、pptx（Slide family）、docx/doc/txt（Doc family）
+- **Gmail**：thread + 邮件正文（可选附件）
 
-| Query | elapsed | tier 分布 |
-|---|---|---|
-| Q1（DTC GMV）| 22.0s | important:1, noise:1 |
-| Q4（KOL 合作）| 25.8s | **critical:2, important:3** ⭐ |
-| Q44（11 Pro 销量）| 22.5s | **critical:3, important:2** ⭐ |
-| Q48（竞品格局）| 23.9s | **critical:3, important:2** ⭐ |
-| **avg** | **23.6s** | **c=8 / i=8 / n=1** |
+数据流：5 路并发 search → qwen rerank candidate → 跨 sq merge → 4 type pool 并发 read → BM25 / qwen rerank chunk → eval → top_k。
 
-理论 floor ≈ 19s（plan_only 1.4s + Phase E+F 9s + eval_only 4s + 其他 4.6s）。当前 23.6s 已逼近物理下界。
+> **Google 与 Feishu 的根本差异**：Google Sheets v4 提供 `spreadsheets.values.batchGet`，**一次 API 拿全部选中 ranges**——没有 feishu 那种 `find_cells × N keyword` 串行 API 问题。
 
-## 6. 双 preset 对照
+---
 
-balanced 与 lite 的核心差异（`tools/core/models.py`）：
+## 2. 调用链概览
 
-| 配置项 | balanced | lite | 说明 |
+```
+sub_query (from global_planner v2.2，含 query_type / time_filter / google_enable_fulltext / google_order_by / author_filter)
+  │
+  ▼ GoogleSourceAgent.run(focuses, pre_planned_sub_queries=...)
+  │   ↓ _plan 直通 (pre_planned 短路，无 plan_only_LLM)
+  │   ↓ _execute_batch
+  │
+  ▼ Phase A: 5 路并发 search (per sub_query)
+  ▼ Phase B: 收集 spreadsheet → batch metadata prefetch (1 RPC)
+  ▼ Phase B2: 初始化 DocPool / SlidePool / GmailPool / sheet_nonnative_pool
+  ▼ Phase C: per-sq qwen rerank 选 candidate (sheet/doc/slide/gmail 各自)
+  ▼ Phase D: 跨 sq 合并 selections（file_id 去重）
+  ▼ Phase E: 4 type pool 并发 read (sheet / sheet_nonnative / doc / slide / gmail)
+  ▼ Phase F: 收 chunks per sub_query
+  ▼ Phase G: per-sq chunk 级 qwen rerank → top_n
+  ▼ chunk_pool
+  ▼ eval_only LLM → top_k tier 评分
+  ▼ SourceAgentResult(top_chunks)
+```
+
+---
+
+## 3. Phase A: 5 路并发 search
+
+`_search_one(sq)` 并发发起 5 个 Drive search 任务（`asyncio.gather`，单路异常不阻塞其他）：
+
+| 通道 | mime types | 数量配置 | 备注 |
 |---|---|---|---|
-| `google_download_timeout_s` | 7.0 | 6.0 | 二进制下载 socket 上限 |
-| `google_api_timeout_s` | 7.0 | 6.0 | 原生 API socket 上限 |
-| `google_per_file_timeout_s` | 9.0 | 7.0 | 单文件 wait_for_done 兜底 |
-| `google_pptx_download_timeout_s` | 7.0 | 6.0 | pptx 独立 timeout |
-| `google_word_download_timeout_s` | 7.0 | 6.0 | word/docx 独立 timeout |
-| `google_native_only` | False | **True** | lite 跳过 pptx/docx/excel/txt/csv |
-| `google_enable_gmail_attachments` | True | **False** | lite 仅 gmail 正文 |
-| `google_doc_search_per_sq` | 10 | 8 | Drive list page_size |
-| `google_slide_search_per_sq` | 10 | 8 | 同上 |
-| `google_doc_candidates_per_sq` | 5 | 4 | rerank 后保留数 |
-| `google_slide_candidates_per_sq` | 4 | 3 | 同上 |
-| `google_sheet_candidates_per_sq` | 4 | 3 | sheet tab 数 |
-| `google_max_gmail_threads_per_subquery` | 3 | 2 | gmail 召回上限 |
-| `google_gmail_rerank_top_n` | 3 | 2 | gmail rerank 后保留 |
+| **doc** | `Docs` + (option) `Word`/`Word_old`/`Txt` | `google_doc_search_per_sq`（lite=8 / balanced=10 / deep=16） | nonnative 受 query_type gate |
+| **slide** | `Slides` + (option) `Pptx` | `google_slide_search_per_sq`（8/10/15） | nonnative 受 query_type gate |
+| **sheet** | `Sheets` + (option) `Excel`/`CSV` | `google_sheet_search_per_sq`（5） | nonnative 受 query_type gate |
+| **sheet_sidecar** | sheet mimes 但 `enable_fulltext=False` | 固定 3 | 抓 title-only 命中 |
+| **gmail** | — | `google_max_gmail_threads_per_subquery`（lite=2 / balanced=3 / deep=10） | `fetch_snippets=True` 直接拉 snippet |
 
-- balanced：质量优先，留 docx/excel/pptx 通道兜底
-- lite：速度优先，原生文件路径 + gmail body only，平均省 −2~3s
+### 3.1 关键词扩展层
 
-## 7. v2.7 关键流程改造（与 §3 对照）
+`generate_grouped_keywords(sq.query)`（`tools/core/kw_generalization.py`）+ `_expand_bilingual`（中英月份/季度同义词扩展）。
 
-### 7.1 Phase A：5 路并发搜索
+### 3.2 query 构造
 
-`agents/google/google_source_agent.py:_search_one`：
+`_build_search_q(query, keyword_groups, enable_fulltext, time_filter, author_filter, mime_types, max_groups)`：
+- `enable_fulltext=True` → Drive `fullText contains ...`
+- `enable_fulltext=False` → Drive `name contains ...`（title-only fallback / sidecar）
+- `time_filter` 形如 `'>2025-09-01'` → 转 `modifiedTime > '...'`
+- `author_filter='me'` → `'me' in owners`
+
+### 3.3 Fallback 链
+
+- **fb1**：某通道 0 结果 → 用 `max_groups=2` 重发（更松的 AND）
+- **fb2**：fb1 仍 0 → `keyword_groups=None`（仅 mime + 基础 query）
+
+`query_type=="personal_recent"` 时 Validator 已注入：
+- `google_enable_fulltext=False`
+- `google_order_by="viewedByMeTime desc"`
+
+实际值：
+```python
+enable_fulltext = sq.google_enable_fulltext if sq.google_enable_fulltext is not None else cfg.google_enable_fulltext_search  # default True
+order_by        = sq.google_order_by      if sq.google_order_by      is not None else cfg.google_order_by_mode
+order_by_param  = order_by if not enable_fulltext else None       # 全文模式不传 order_by
+```
+
+---
+
+## 4. Phase B: Sheet Metadata Batch Prefetch
 
 ```python
-results = await asyncio.gather(
-    asyncio.to_thread(_drive_call, q_doc, doc_search_per_sq, order_by_param),
-    asyncio.to_thread(_drive_call, q_slide, slide_search_per_sq, order_by_param),
-    asyncio.to_thread(_drive_call, q_sheet, sheet_search_per_sq, order_by_param),
-    asyncio.to_thread(_drive_call, q_sheet_sidecar, 3, order_by) if q_sheet_sidecar else asyncio.sleep(0, result=[]),
-    asyncio.to_thread(_gmail_call),
-    return_exceptions=True,
+sheet_pool.batch_fetch_metadata(
+    all_spreadsheet_ids, creds,
+    native_api_timeout=int(cfg.google_api_timeout_s),
+    max_workers=8,
+    batch_timeout_s=max(5.0, min(source_timeout_s * 0.25, api_timeout_s + 5.0)),
 )
 ```
 
-- 5 路并发：search_one 单 sq 从 4-7s（串行）压到 1.5-3s
-- `return_exceptions=True`：单路失败不阻塞其他通道
-- fallback1（max_groups=2）/ fallback2（raw_query）改为按需 gather（仅对 0 召回通道触发）
-- broad fallback：total < 3 时跨 mime 一次广义搜索（page_size=20）
-
-### 7.2 Phase A 关键词扩展层
-
-`tools/core/kw_generalization.py` + `_expand_bilingual()`：
-
-```
-plan_only LLM 输出：'nubia UK DTC March GMV'
-       │
-       ▼
-generate_grouped_keywords：
-  [['nubia'], ['UK'], ['DTC'], ['March'], ['GMV']]
-       │
-       ▼
-kw_generalization 同义词扩展（含 marketing umbrella、社媒 platform umbrella）：
-  [['nubia'],
-   ['UK', 'britain', 'england', 'united kingdom', '英国'],
-   ['DTC', 'direct', 'direct-to-consumer', '官网', '独立站', ...],
-   ['March'],
-   ['GMV', 'revenue', '销售额', '营收', ...]]
-       │
-       ▼
-_expand_bilingual（月份/季度自动 OR 中英）：
-  [..., ['March', '3月', 'Mar'], ...]
-       │
-       ▼
-Drive search query：
-  (nubia) AND (UK OR britain OR ...) AND (DTC OR direct OR ...) 
-  AND (March OR 3月 OR Mar) AND (GMV OR revenue OR ...)
-```
-
-新增 umbrella：
-- 营销 ↔ marketing/campaign/推广/promotion/投放
-- 营销活动 → kol/affiliate/paid media
-- 社媒/social media → facebook/instagram/tiktok/youtube
-
-### 7.3 自适应 candidate cap
-
-`_adaptive_cap(n_candidates, abundant_cap, moderate_cap)`：
-- ≤3 候选不砍（保护边缘 query）
-- 4-7 用 cap+1
-- ≥8 用 preset cap（aggressive）
-
-应用于 doc/slide/gmail 三路。Q1/Q55 这种候选稀疏的 query 自动跳过 cap，避免召回崩溃。
-
-### 7.4 文件读取 timeout 与 size gate 分层
-
-| 文件类型 | timeout | size gate | 备注 |
-|---|---|---|---|
-| native Docs | api_timeout=7s | 45MB（auto outline >10MB）| 50MB+ skip + fallback |
-| native Sheets | api_timeout=7s | — | tab 级 cap=4 |
-| native Slides | api_timeout=7s | 55MB（可配）| 仅在 `enable_native_slide_size_gate` 时启用 |
-| pptx | **pptx_download=7s** | **35MB（v2.8 收紧自 48MB）** | 实测 43MB 文件 9s 仍 0 chunks，回收预算 |
-| word/docx | **word_download=7s** | **30MB（新增）** | filter fallback 保留 size_gate |
-| excel/csv | download_timeout=7s | — | sheet_pool 路径 |
-| gmail | dedicated `gmail` pool（v2.8 修复 dead code，原本始终走 shared）| — | thread fetch + 可选附件 |
-
-`_query_aware_truncate()`（slide chunk 后筛）：关键词命中 + reader_score 融合，省 file-level rerank 成本。
-
-### 7.5 X1 cross-sq pre-filter（新 Phase G-3）
-
-```
-Phase G per-sub-query Qwen rerank（top sub_query_top_n=8/sq）
-       │
-       ▼ chunk_pool 8-16
-Phase G-3：if chunk_pool > source_top_k * 2:
-  - 用 focus 全文集合作为 query（跨 sq 评估）
-  - Qwen rerank 跨 sq 收口到 source_top_k * 2 = 10
-       │
-       ▼ chunk_pool ≤ 10
-Phase H eval_only LLM
-```
-
-开关：`google_enable_cross_sq_pre_filter=True`；阈值：`google_cross_sq_pre_filter_threshold=10`。
-
-### 7.6 Wait/Event 线程安全（保留 Codex 早期修复）
-
-每个 file pool（doc/sheet/slide/gmail）的修复点：
-- `ensure_waitable()`：任务提交前预注册 asyncio.Event
-- `mark_done()`：worker 用 `loop.call_soon_threadsafe(evt.set)` 跨线程唤醒主协程
-- per_file_timeout 9s 作为最终安全网
-
-修复前症状：所有 wait_for_done 精准卡 20s 兜底。修复后：wait_done 反映真实文件完成时刻。
-
-### 7.7 跨 query LRU cache
-
-`_FILE_CONTENT_CACHE`（同进程 module-level dict）：
-- key = `f"{file_id}|{mime}"` 或 sheet 含 tab：`f"{file_id}|{mime}|{','.join(titles)}"`
-- TTL 300s，LRU 64 file（满后驱逐最旧 1/4）
-- 命中时跳过整次 `read_drive_chunks`，直接返回 cached gc_list
-- 仅在同进程多 query 场景生效（eval batch / 长跑服务）
-
-## 8. 完整流水延迟分布
-
-| # | 环节 | 平均耗时 | 范围 | 并发模型 | 卡点 |
-|---|---|---|---|---|---|
-| ① plan_only LLM (Gemini) | 1.4s | 1.0-2.0s | 串行 1 LLM call | — |
-| ② Phase A search_one | 2.6s | 1.5-5.4s | gather × N sq, 内部 5 路 | — |
-| ③ Phase B metadata_prefetch | 1.5s | 0.5-3.5s | 8-worker batchGet | — |
-| ④ Phase C+D 候选 + 合并 | 0.7s | 0.3-1.0s | Qwen rerank × 4 通道 | — |
-| ⑤ **Phase E+F read+wait** | **9.0s** | **5-15s** | type_pools 4+3+3+14 | 🔴 主卡点 |
-| ⑥ Phase G file/sq rerank | 1.6s | 0.6-2.5s | gather + Qwen | — |
-| ⑦ Phase G-3 X1 pre-filter | 0.4s | 0.3-0.5s | 单次 Qwen rerank | — |
-| ⑧ **Phase H eval_only LLM** | **4.0s** | **3-5s** | 串行 1 LLM call | 🟠 第二卡点 |
-
-**理论 floor**：1.4 + 2.6 + 1.5 + 0.7 + 9.0 + 1.6 + 0.4 + 4.0 ≈ 21.2s。当前 23.6s 接近上限。
-
-## 9. plan_only Prompt 设计
-
-`tools/core/source_query_config.py:get_source_query_rules("google")` 关键规则：
-
-1. data 类型：「品牌 + 渠道/国家 + 指标词」，月份中英由关键词层透明处理
-2. concept 类型：2-3 个关键词，不加 time_filter
-3. personal_recent 类型：`author_filter='me'` + `viewedByMeTime desc`
-4. **社媒/营销/广告类**：仅在 query 显式问"按平台分布"时枚举平台名（FB/IG/TT/YT），其它情况由关键词扩展层自动 OR
-
-设计原则：**LLM 输出语义关键词，不重复，不枚举同义词**。同义词、月份双语、marketing tactics、platform umbrella 全部下沉到 `kw_generalization.py`。
-
-## 10. 已知限制（v2.7 后）
-
-1. **数据缺失 query**：Drive 里没有相关主题文件时检索无能为力。需要 plan 层引导或"无相关数据"返回。
-2. **plan_only LLM 输出非确定性**：相同 query 多轮跑可能产出不同 sub_query → Drive 召回差异。建议 plan 结果 hash 缓存 / few-shot 锚定。
-3. **eval_only LLM RTT 物理下界 3-4s**：除非换更小 LLM 或 batch 化，无法压缩。
-4. **Phase E+F 9s 物理下界**：受 Google API 网络延迟与配额限制。
-5. **Notion 仍为 stub**：本次未涉及。
+**一次 RPC**（concurrent.futures × 8 worker）拿所有 spreadsheet 的 `tabs/sheetId/title/rowCount/columnCount`。后续 Phase E 读 sheet 时**复用此缓存**，无需重发 metadata API。
 
 ---
 
-## 11. v2.8 家族化（family）重构
+## 5. Phase B2: Pool 初始化
 
-### 11.1 文件家族分类
-
-按 mime 把 Drive 文件归到三家族，每家族都有 native + nonnative 两类：
-
-| family | native | nonnative |
+| Pool | 文件 | 装的什么 |
 |---|---|---|
-| **sheet** | Google Sheets | XLSX / XLS / XLSM / CSV |
-| **slide** | Google Slides | PPTX |
-| **doc** | Google Docs | DOCX / DOC / TXT |
+| `SheetPool` | `google_workspace_tool/sheet_pool.py` | native sheet 元数据 + tab 列表 + 读后 chunks |
+| `DocPool` | `google_workspace_tool/doc_pool.py` | native Docs + word/docx/txt 元数据 |
+| `SlidePool` | `google_workspace_tool/slide_pool.py` | native Slides + pptx 元数据 |
+| `sheet_nonnative_pool` | DocPool 实例 | xlsx/csv 元数据（与 sheet family 分离） |
+| `GmailPool` | `google_workspace_tool/gmail_pool.py` | thread 元数据（subject/snippet/sender/date） |
 
-`_family_of(mime)` 与 `_is_native(mime)` 集中分类（[google_source_agent.py:218-228]）。
+所有 Pool 进程级单例（per Source Agent），跨 sub_query 缓存。
 
-读取层路径差异：native 走 API（`presentations/spreadsheets/documents.get`），nonnative 走 Drive `files().get_media` 下载 + 本地 parser。Phase E 把 nonnative 隔离到独立 `nonnative` worker pool 避免抢占 native API 线程。
+---
 
-### 11.2 Phase A nonnative search gate
+## 6. Phase C: Per-sub_query qwen rerank（candidate 级）
 
-新配置：
+每个 sub_query 对各类型独立筛选：
+
+| 类型 | 函数 | 选 top |
+|---|---|---|
+| Sheet（native） | `sheet_pool.select_sheets_for_sub_query(top_n=google_sheet_candidates_per_sq)` | balanced 3 / deep 9 |
+| Sheet（nonnative） | passthrough（保留全部 file，无 rerank） | — |
+| Doc / Word / Txt | `select_reranked_chunks(top_n=google_doc_candidates_per_sq)` | lite 5 / bal 6 / deep 9 |
+| Slide / Pptx | `select_reranked_chunks(top_n=google_slide_candidates_per_sq)` | lite 3 / bal 4 / deep 9 |
+| Gmail | `select_reranked_chunks(top_n=google_gmail_rerank_top_n)` | 2-3 |
+
+> 候选 rerank input 是 (title + heading + snippet + Format tag) 的 cheap doc，单次 LLM 调用 ≤500ms。
+
+---
+
+## 7. Phase D: 跨 sub_query 合并
+
 ```python
-google_nonnative_search_query_types: Dict[str, Set[str]] = {
-    "sheet": {"structured", "personal_recent"},               # concept 不召回 Excel/CSV
-    "slide": {"structured", "concept", "personal_recent"},    # 全开
-    "doc":   {"structured", "concept", "personal_recent"},    # 全开
+merged_sheets         = SheetPool.merge_selections(all_sheet_selections)         # file_id → set(sq_ids)
+merged_sheet_nonnative= sheet_nonnative_pool.merge_selections(...)
+merged_docs           = doc_pool.merge_selections(...)
+merged_slides         = slide_pool.merge_selections(...)
+merged_gmail          = gmail_pool.merge_selections(...)
+```
+
+同一 file_id 若被多个 sub_query 选中，**只读一次**，结果广播给所有 sq。
+
+---
+
+## 8. Phase E: 4 type pool 并发读
+
+文件：`agents/google/google_source_agent.py::_execute_batch` (lines ~1822-2400)
+
+### 8.1 Type pool workers（balanced）
+
+| Pool | workers | per_file_timeout |
+|---|---|---|
+| `sheet` | 8 | min(20s, source_timeout_s) |
+| `doc` | 3 | 同上 |
+| `slide` | 5 | 同上 |
+| `nonnative` (pptx/word/excel/csv/txt 合并) | 5 | 同上 |
+| `gmail` | 2 | 同上 |
+
+### 8.2 Size gate（balanced）
+
+| 文件类型 | 上限（bytes） | 超限处理 |
+|---|---|---|
+| native Doc | 45_000_000 | 跳过 |
+| native Slide | 55_000_000 | 跳过（`google_enable_native_slide_size_gate=True`） |
+| pptx | 35_000_000 | 跳过 |
+| word/docx | 30_000_000 | 跳过 |
+| pptx download | timeout 5s | 流式打断 |
+| word download | timeout 7s | 流式打断 |
+
+### 8.3 各类型读 API（**全部是单 API call，无 per-keyword loop**）
+
+| Type | API | 行为 |
+|---|---|---|
+| **native Sheet** | `spreadsheets().values().batchGet(ranges=[selected_tabs])` | **1 次 API 拿全部 selected tabs** |
+| **native Doc** | `documents().get(documentId=...)` | 1 次拿整文档 |
+| **native Slide** | `presentations().get(presentationId=...)` | 1 次拿整 deck |
+| **xlsx/csv** | `files().get_media(fileId=...)` | 二进制下载 → pandas 本地解析 |
+| **pptx** | 同上 → python-pptx 解析 | |
+| **word/docx** | 同上 → python-docx 解析 | |
+| **txt** | 同上 → 纯文本 | |
+| **Gmail thread** | `users().threads().get(id=...)` | 1 次拿 thread + 所有 message |
+
+> **没有 find_cells 等价物**。Google Sheets v4 设计上批量查询是一等公民。
+
+### 8.4 File cache（LRU，跨 query）
+
+```python
+_FILE_CONTENT_CACHE: Dict[str, (timestamp, gc_list)]
+_FILE_CONTENT_CACHE_LOCK = threading.Lock()
+TTL = cfg.google_file_content_cache_ttl_s    # 300s
+MAX = cfg.google_file_content_cache_max_files  # 64
+```
+
+Cache key = `(file_id, mime, sheet_titles_sorted_tuple)`。命中时**跳过 read_drive_chunks**，直接复用 raw GoogleChunk 列表（再走一次 query-aware scoring）。
+
+---
+
+## 9. Phase F + G: Chunk 收集与 rerank
+
+### 9.1 收集
+
+```python
+chunks_by_sq[sq.sub_query_id].extend(uc_list)
+```
+
+按 sub_query 分桶。同一 file 被多 sq 选中时，chunks 广播给每个 sq。
+
+### 9.2 Phase F-G: type-pool budget rerank
+
+当某 sub_query 内某 type 的 chunks 数超过 `google_type_bucket_rerank_threshold=25`，触发**emergency rerank**：
+- 输入：该 type pool 全部 chunks
+- 输出：top `google_type_bucket_rerank_top_n=7`（gmail=4）
+- 通过 qwen rerank 收紧（按 type 单独限）
+
+### 9.3 Phase G: per-sq chunk rerank
+
+```python
+selected = _select_reranked_chunks(
+    query=sq.query,
+    chunks=chunks_by_sq[sq.sub_query_id],
+    top_n=cfg.sub_query_top_n,   # lite=8 / bal=10 / deep=14
+)
+```
+
+最终每个 sub_query 出 top_n chunks 入 source 级 chunk_pool。
+
+---
+
+## 10. nonnative 家族 gate（family-level）
+
+文件：`tools/core/models.py::SourceAgentConfig.google_nonnative_search_query_types`
+
+```python
+{
+    "sheet": {"structured", "personal_recent"},
+    "slide": {"structured", "concept", "personal_recent"},
+    "doc":   {"structured", "concept", "personal_recent"},
 }
 ```
 
-仅当 `sq.query_type ∈` 白名单时才在 search query 把 nonnative mime 加入 `OR` 子句。Lite preset 把 sheet 的 value 改为 `set()` 实现「sheet 全关 + slide/doc 仍搜原生 + nonnative」。
-
-### 11.3 Native ↔ nonnative 标题去重
-
-Phase A 召回后 / Phase C 之前，每家族跑一次 `_dedup_native_vs_nonnative(files)`：
-
-- 标题归一化：lowercase、去标点空格、剥末尾年份后缀
-- 同 family 内 normalized title 相同 / 子串包含 / 长度差 ≤5 → **保留 native，丢非原生**
-- "native preference" 的全部表达——**rerank 后不做任何 tie-break / bonus**
-
-### 11.4 Qwen rerank candidate 加 Format tag
-
-`_select_file_candidates` 给每个候选的 `summary` 字段加 `Format: native_slide | pptx | excel | ...`，让 Qwen rerank 看到格式信号自行判断。配合 dedup 后无需额外的 native 偏好后处理。
-
-### 11.5 Sheet Phase B per-sq 打分 + min_keep floor
-
-`_prefilter_sheet_files_before_metadata` 升级：
-
-- **Per-sq 打分取 max**：每份 sheet 对每个命中的 sub_query 单独算 `_drive_file_local_score`，取 max 作为最终分。避免合并 query_text 的稀释。
-- **`top_sq_by_fid` 归属**：score 最高的 sub_query 视为这份 sheet 的"最强归属"。
-- **`min_keep_per_sq` floor**（默认 1）：全局 cap 截断后，确保每个 sq 至少保留 floor 个候选。不足时从该 sq 的候选里按分数补齐，替换 selected 中已多于 floor 的 sq 成员里分数最低的。
-- **`effective_cap = max(metadata_max_files, n_sqs × min_keep_per_sq)`**：min_keep 优先于 cap，软上限。
-- Qwen close-rerank 输出后再次应用 floor，保证 LLM 分支也满足 per-sq 保留。
-
-### 11.6 plan_only 时间信号 → 评分
-
-`SubQuery.time_filter`（plan_only LLM 已有产出，如 `">2026-01-01"` / `"last_30_days"`）传入 `_drive_file_local_score(time_filter=...)`：
-
-- 有 time_filter：从中提取 target_year（regex `20\d{2}` 或 `last_N_days` → 当年）
-- 无 time_filter：fallback 到 `_drive_has_time_or_fresh_intent(query_text)` regex 推断
-- 规则不变：旧年份 stale penalty `min(0.35, 0.12 * (target - max(years)))`
-
-替代了 v2.7 的纯 regex 路径，结构化信号更稳定。
-
-### 11.7 删除项
-
-- `_sheet_has_new_product_intent` + RM 系列硬编码 penalty：case-specific，靠通用 stale-year + title overlap 兜底
-- `executors["shared"]` 在 `type_pools=True` 模式：被 nonnative pool 完全替代
-- Gmail 走 `shared` pool 的 dead code：现在按预期路由到 dedicated `executors["gmail"]`
+某 family 的 nonnative 文件**只在** `query_type ∈ 白名单`时被检索。例：
+- `query_type=concept` → sheet family 不召回 xlsx/csv（concept 类不需要表格）
+- `lite` preset 覆盖：slide family 直接 `set()` 即 PPTX 全关；sheet family 也关
+- `balanced` 覆盖：slide family 关 PPTX（实测 PPTX 占 51% 文件读时长，关掉省 3-5s）
+- `deep_dive` 覆盖：全 family × 全 query_type 全开
 
 ---
 
-## 12. v2.8 重复 API 调用消除
+## 11. Family 分类 (`_family_by_mime`)
 
-### 12.1 `read_drive_chunks` 新参数
+| Family | Native mime | Nonnative mimes |
+|---|---|---|
+| `sheet` | `Sheets` | `Excel`, `Excel_old`, `Excel_macro`, `CSV` |
+| `slide` | `Slides` | `Pptx` |
+| `doc` | `Docs` | `Word`, `Word_old`, `Txt` |
 
-```python
-def read_drive_chunks(
-    *, mime_type, file_id, creds, ...,
-    known_title: Optional[str] = None,
-    known_metadata: Optional[dict] = None,   # {"name", "size", "modifiedTime", "mimeType", ...}
-    known_sheet_count: Optional[int] = None,
-):
-```
+**Native ↔ nonnative dedup**：同一 family 内 native 与 nonnative 候选若 title 一致，去重保 native。
 
-- **`known_metadata`** 跳过入口处的 Drive `files().get`：Phase A 搜索结果已经携带 `name/size/modifiedTime`，pool 缓存后 Phase E 透传即可。省 ~150-300ms × N files。
-- **`known_sheet_count`** 跳过 `_estimate_sheet_read_time` 的 `spreadsheets().get(fields="sheets.properties.sheetId")`：Phase B 已经缓存了 `sheet_pool.get_meta(fid).sheets`，直接用 `len()`。省 ~500-1000ms × N sheets。
-- **`known_title`** 透传到 binary readers（pptx / word / excel / text），跳过 reader 内重复的 `files().get(fields="name")`。省 ~100-200ms × N nonnative files。
-
-### 12.2 Phase B metadata fields 精简
-
-`sheet_pool.batch_fetch_metadata` 移除 `merges` 字段：
-
-```diff
-- fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties,merges)"
-+ fields = "properties.title,sheets(properties.sheetId,properties.title,properties.index,properties.gridProperties)"
-```
-
-Drive 对每个 spreadsheet 会返回**全部** merge 区间，多 sheet × 多 merge 单次响应可达 MB。实测 6 sheets prefetch **3327ms → 1490ms（-55%）**。
-
-`process_section_to_markdown` 在 `merges == []` 时仍稳定输出（merge-aware 渲染轻度退化，cell 拆为 sparse 行）。如未来需 merge-aware，可在 `sheet_reader.read_one` 内补一次轻量 `spreadsheets().get(fields="sheets(properties.sheetId,merges)")` 按需调用。
-
-### 12.3 Doc fetcher 默认字段
-
-```diff
-DEFAULT_FIELDS = (
-    "documentId,title,"
--   "tabs(tabProperties,childTabs,"
-+   "tabs(tabProperties,"
-    "documentTab(body(content),lists)"
-    ")"
-)
-```
-
-`childTabs` 字段在大量文档上触发 400 `comment-specific fields when include_comments is false`，强制 fetcher 重试一次完整 fetch（~+1-2s/doc）。嵌套 tabs 极少见，扁平 tabs 覆盖 99% 文档；现有 400 fallback 兼容路径保留。
-
-### 12.4 综合收益
-
-| 指标 | v2.7 baseline | v2.8 | 变化 |
-|---|---|---|---|
-| balanced 4-query avg | 23.6s | ~22-24s（含 plan 噪声）| 持平/略好 |
-| **lite 4-query avg** | **20.3s** | **~12-14s** | **-30~40%** |
-| Phase B sheet metadata | 3.3s/6 files | 1.5s/6 files | **-55%** |
-| Doc 单文件 read | 1.8-2.4s（含 retry）| 1.0-1.5s | -30~50% |
-| Sheet `_estimate_*` 重复调用 | 0.5-1s × N | 0 | 全消 |
-| Drive `files().get` × N | 0.15-0.3s × N | 0 | 全消（pool 透传） |
-| binary `files().get` × N | 0.1-0.2s × N | 0 | 全消（known_title） |
-
-### 12.5 Preset 矩阵（v2.8 最终态）
-
-| 字段 | default | balanced | lite |
-|---|---|---|---|
-| `enable_sheet_search` | True | True | **False** |
-| `nonnative_search_query_types["sheet"]` | structured+personal_recent | 同 | (moot) |
-| `nonnative_search_query_types["slide"]` | 全 3 类 | 全 3 类 | 全 3 类 |
-| `nonnative_search_query_types["doc"]` | 全 3 类 | 全 3 类 | 全 3 类 |
-| `dedup_native_vs_nonnative` | True | True | True |
-| `sheet_min_keep_per_sq` | 1 | 1 | 1 |
-| `sheet_metadata_max_files_structured` | 6 | 6 | 6 |
-| `sheet_metadata_max_files_concept` | 2 | 2 | 2 |
-| `slide_candidates_per_sq` | 12 | 4 | 3 |
-| `doc_candidates_per_sq` | 12 | 4 | 3 |
-| `pptx_size_gate_bytes` | 35MB | 35MB | 35MB |
-| `type_pool_nonnative_workers` | 2 | 2 | 2 |
-
-### 12.6 已知尾延迟 / 仍未压平的项
-
-1. **PPTX `per_file_timeout_s=9.0`**：balanced 几乎每次有 1 个 PPTX 卡满 9s。降到 8s 节省 1s 但风险丢 9.x s 才完成的 chunks。当前**保留**作为安全网。
-2. **Phase E sheet `Ou0jy0DY` 持续 0 chunks**：tab 选择器（`select_sheets_for_sub_query`）选了不存在的 tab title，batchGet 空响应。**遗留质量问题**，与 prefilter / dedup 无关。
-3. **Q4 critical 抖动 0-3**：plan_only LLM 在 sub_query 文本上有非确定性，下游召回 + Qwen rerank 串联放大。需在 plan 层做 cache 或锚定。
 ---
 
-## 13. v2.9 每源独立线程池接入（2026-05-08）
+## 12. Preset 矩阵
 
-> 配合 `spec_plan.md §23` 的 v4.0 架构跃迁，Google Agent 同步迁移到源专属
-> ThreadPoolExecutor。验证日志 `docs/session_logs/2026-05-08_p1_p5_executor/`。
+文件：`tools/core/models.py::_PRESET_DEFAULTS`
 
-### 13.1 改动要点
+| 维度 | lite | balanced | deep_dive |
+|---|---|---|---|
+| `max_loops` | 1 | 1 | 1（覆盖 LOOSE=2，eval_layer 兜底）|
+| `source_top_k` (base) | 5 | 5 | 8 |
+| `sub_query_top_n` (chunk rerank top) | 5 默认 | 10 | 14 |
+| `google_download_timeout_s` | 6 | 7 | 8 |
+| `google_api_timeout_s` | 6 | 7 | 8 |
+| `google_per_file_timeout_s` | 7 | 9 | 10 |
+| `google_native_only` | True | False | False |
+| `google_enable_sheet_search` | False | True | True |
+| `google_enable_gmail_attachments` | False | True | True |
+| `google_doc_search_per_sq` | 8 | 10 | 16 |
+| `google_slide_search_per_sq` | 8 | 10 | 15 |
+| `google_doc_candidates_per_sq` | 5 | 6 | 9 |
+| `google_slide_candidates_per_sq` | 3 | 4 | 9 |
+| `google_sheet_candidates_per_sq` | 3 | 3 | 3 |
+| `nonnative_gate.slide` | set() | set() (off PPTX) | 全开 |
+| `nonnative_gate.sheet` | set() | structured + personal_recent | 全开 |
+| `nonnative_gate.doc` | structured + concept + personal_recent | 全开 | 全开 |
+| `type_pool_sheet_workers` | 4 | 8 | 5 |
+| `type_pool_slide_workers` | 5 | 5 | 4 |
+| `type_pool_doc_workers` | 3 | 3 | 4 |
+| `type_pool_nonnative_workers` | 4 | 5 | 5 |
+| `type_pool_gmail_workers` | 2 | 2 | 3 |
+| Size gate (native Doc) | 45MB | 45MB | 50MB |
+| Size gate (native Slide) | 55MB | 55MB | 60MB |
+| Size gate (pptx) | 35MB | 35MB | 38.5MB |
+| Size gate (word) | 30MB | 30MB | 33MB |
 
-`agents/google/google_source_agent.py`：
+---
+
+## 13. plan_only / eval_only LLM（仅 fallback / replan 调用）
+
+v2.2 主路径 **不调** plan_only（pre_planned 直通）。仅在 v1 fallback / planner_runner reject 某 focus 时调用。
+
+`eval_only` 每次 run 末必调，prompt 共享 `EVAL_RUBRIC_BLOCK`（含 multi-focus guard）：
 
 ```python
-class GoogleSourceAgent(SourceAgent):
-    DEFAULT_EXECUTOR_WORKERS: int = 20      # google 5 路并发 × N sub_query，最重
-
-    def __init__(self, cfg=None, executor_workers=None):
-        super().__init__(profile=..., cfg=cfg, executor_workers=executor_workers)
+output_schema=build_eval_only_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA(=10))
 ```
 
-11 处 `await asyncio.to_thread(...)` → `await self._to_thread(...)`，覆盖 Phase A 5 路
-Drive search、fallback search、Phase E 文件下载等所有 IO 提交点。
+schema cap 膨胀，运行时按 `effective_source_top_k=base+(n_focuses-1)*2` 截断。
 
-### 13.2 收益
+### Google 特有 eval prompt 段
 
-- Phase A `search_one`：`asyncio.gather(...)` 内部 5 路 to_thread 不再受全局 12-worker
-  默认池压制，多源场景下 search_one 不再"同毫秒批量释放"
-- Phase E read+wait：跨 sub_query 的文件下载共享 google 专属 20 worker，避免与 feishu
-  doc_pool block_api / mcp 混在同一全局池
-- 多源（bailian+feishu+google）协同 Q50/balanced 从 28.93s → 27.92s + emit 5→10
+```
+## Google 源额外提示
+当 focus 只写月份但没有年份时，按 current_date 推断业务年度；
+明显历史年份的数据行（例如 2023-3）不能评为 critical，除非 focus 明确要求该年份。
+```
 
-### 13.3 后续候选
+post_process_top_chunks 还在 source agent 内对 stale year 行 demote critical → important。
 
-- Phase E type_pool（doc/slide/sheet/gmail/nonnative）当前用独立 ThreadPoolExecutor
-  做 worker 隔离；与源专属池并存。后续可考虑把 type_pool 也下沉到 source._executor
-  下作为子池，进一步统一资源管理。
-- `google_workspace_tool/drive_profile_generator.py` 当前在生产路径无活跃调用，故未
-  接入 executor 注入。若未来加入热路径，应同步改造。
+---
 
+## 14. 凭证
+
+```python
+# tools/core/models.py::SourceConfig
+google_credentials_path: str = ""   # OAuth2 client credentials.json
+google_token_path: str = ""         # OAuth2 token.json
+```
+
+构建期 `retrieve_agent` 调 `get_credentials(_SCOPES)` 预先刷新 token，确保 OAuth2 有效后才注入 `GoogleSourceAgent`。
+
+---
+
+## 15. 限速观察
+
+- Drive v3 search: 1000 req/100s/user —— 远大于 feishu，5 路 × N sub_query 并发不触限
+- Sheets v4 batchGet: 60 req/100s/user/读写 —— payload 大时是瓶颈，不是次数
+- Slides v1 get: 60 req/100s/user —— 单文件大时主要瓶颈
+- Gmail threads.get: 250 quota units/user/s —— 极少触限
+
+**整源 timeout** `source_timeout_s` (lite=25 / balanced=30 / deep_dive=45) 是兜底。Phase E read 是主消耗，期内的 worker pool 各自限并发。
+
+---
+
+## 16. 改动 Changelog
+
+| 版本 | 关键改动 |
+|---|---|
+| v2.7 (2026-05-07) | 5 路并发 search + X1 cross-sq pre-filter + 跨 query LRU cache |
+| v2.8 (2026-05-07) | family 化（native ↔ nonnative dedup + Format tag rerank）+ Phase E 消除重复 metadata API + Phase B metadata 字段精简 |
+| v2.9 (2026-05-08) | 每源独立 ThreadPoolExecutor (`DEFAULT_EXECUTOR_WORKERS=20`)，避免与 feishu / bailian 共抢全局池 |
+| **v3.0 (2026-05-11)** | **planner v2.2 接入**：`run(pre_planned_sub_queries=...)` 直通，跳过自己 plan_only_LLM；删冗余字段 `google_enable_fulltext` / `google_order_by` 从 `PlannedSubQuery`，改由 `GoogleValidator` 按 `query_type=='personal_recent'` 推断；schema cap 膨胀 +10 给 multi-focus 留预算 |
+
+---
+
+## 17. 已知限制
+
+- `LC1BsAqWph5DxstT` 这类特定 sheet 在 feishu 端慢，**Google 端没有等价问题**（batchGet 单 API call）
+- PPTX 大文件下载是常见尾延迟来源；balanced preset 默认 PPTX off，deep_dive 全开
+- nonnative excel/csv 解析靠 pandas (`engine='xlrd'`)，超大文件 (>30MB) 易 OOM/慢，受 size gate 兜底
+- LRU cache 跨 query 命中率取决于 query 主题相似度；冷启动无加速
+- Drive search `q=` 字符串长度有上限（约 2000 char），过多关键词会被截

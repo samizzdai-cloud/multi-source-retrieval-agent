@@ -33,6 +33,7 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from tools.core.llm_contracts import (
+    effective_source_top_k,
     enforce_loop_bounds,
     needs_eval,
     tiers_list_to_map,
@@ -137,8 +138,57 @@ async def _run_llm_agent(
     try:
         return json.loads(final_text)
     except json.JSONDecodeError as e:
+        # max_output_tokens 触顶时 LLM 输出常截断在数组中段，触发
+        # "Unterminated string" / "Expecting value"。先尝试修复——尽量恢复已完整的
+        # top_k_chunk_ids 部分（其它字段缺失会被下游 _assemble_top_chunks 当 None 处理）。
+        repaired = _repair_truncated_json(final_text)
+        if repaired is not None:
+            logger.warning(
+                "LlmAgent %s JSON truncated, recovered %d top_k_chunk_ids (loss=%s)",
+                agent.name, len(repaired.get("top_k_chunk_ids") or []), str(e)[:80],
+            )
+            return repaired
         logger.error("LlmAgent %s JSON 解析失败: %s\nraw=%s", agent.name, e, final_text[:500])
         raise
+
+
+def _repair_truncated_json(raw: str) -> Optional[Dict[str, Any]]:
+    """LLM 输出在 max_output_tokens 触顶时常被截断；本函数尽力恢复一个最小可用 dict。
+
+    针对的截断形态（实测最常见）：
+      {"top_k_chunk_ids": ["id_a", "id_b", "id_c", "id_d_unfinis...   ← 截断
+
+    策略：
+    1. 找到 ``"top_k_chunk_ids"`` 数组开头位置；
+    2. 用正则提取该位置之后所有 "完整闭合" 的字符串字面量（含转义处理）；
+    3. 闭合数组并以 ``{"top_k_chunk_ids": [...], "tiers": []}`` 返回，让下游正常走。
+
+    若 raw 不含 top_k_chunk_ids 或一个完整 id 都没截到 → 返回 None，让上游报原错。
+    """
+    import re
+    key_match = re.search(r'"top_k_chunk_ids"\s*:\s*\[', raw)
+    if key_match is None:
+        return None
+    arr_start = key_match.end()
+    # 提取该位置之后所有完整的双引号字符串（含转义）。最后一段若开了引号没闭合，正则
+    # 自动跳过——这正是我们想要的（丢弃截断的尾段）。
+    str_pattern = re.compile(r'"((?:[^"\\]|\\.)*)"')
+    recovered_ids: List[str] = []
+    pos = arr_start
+    # 用 finditer 从 pos 开始扫，遇到非完整字符串自动停止
+    while True:
+        m = str_pattern.search(raw, pos)
+        if m is None:
+            break
+        # 边界保护：若两个完整字符串之间出现 ``]``（数组结束），停止扫描
+        between = raw[pos:m.start()]
+        if "]" in between:
+            break
+        recovered_ids.append(m.group(1))
+        pos = m.end()
+    if not recovered_ids:
+        return None
+    return {"top_k_chunk_ids": recovered_ids, "tiers": [], "decision": "stop"}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -222,12 +272,14 @@ def _chunks_block(
 
 
 def _sub_query_budget(n_focuses: int, source_top_k: int) -> int:
-    """v2.1: sub_queries 总数上限 = min(n_focuses*2, source_top_k*2)，保底 2。
+    """**[v1 fallback / replan path only]** sub_queries 总数上限。
 
-    取代旧的 ``max(3, source_top_k)``：
-    - 旧公式 n_focuses=1 时允许 5 条 sub_q（过度分配）
-    - 旧公式 n_focuses=6 时仍只有 5 条（过度收紧）
-    新公式随 focus 数线性增长，天花板由 source_top_k 决定。
+    v2.2 主路径由 global_planner 自行控制 sub_query 数量，此函数仅在
+    ``_plan_via_plan_only_llm`` (v1 fallback + replan 兜底) 里通过 prompt
+    告知老 plan_only_LLM 该源的预算上限。
+
+    公式：``max(2, min(n_focuses*2, source_top_k*2))`` —— 随 focus 数线性增长，
+    天花板由 source_top_k 决定。
     """
     return max(2, min(n_focuses * 2, source_top_k * 2))
 
@@ -268,6 +320,30 @@ def _build_eval_only_prompt(
     )
 
 
+def _slim_focus_status_for_prompt(
+    focus_status: Optional[Dict[str, Dict[str, Any]]],
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """裁剪 FocusBoard.snapshot() 给 LLM 看的字段。
+
+    只保留 plan_eval 的 **replan 决策** 真正需要的信号：
+      - ``status``: satisfied / pending / noise_only —— LLM 判断要不要再 replan
+      - ``contributors``: 哪些源已经贡献过 —— 让 LLM 知道是否已有外援覆盖
+
+    主动剥离的字段：``critical`` / ``important`` / ``noise`` / ``targets``
+    这些是 quota 计数（早停调度内部状态），不应作为 tier 评分的暗示信号。
+    eval 必须基于 chunks_block 客观打分，与跨源 quota 进度无关。
+    """
+    if not focus_status:
+        return focus_status
+    return {
+        fid: {
+            "status": s.get("status"),
+            "contributors": list(s.get("contributors") or []),
+        }
+        for fid, s in focus_status.items()
+    }
+
+
 def _build_plan_eval_prompt(
     focuses: List[Focus],
     chunks: List[ChunkEntry],
@@ -277,10 +353,10 @@ def _build_plan_eval_prompt(
     source_top_k: int,
     focus_status: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> str:
-    """P4: focus_status 由 retrieve_agent 注入的 FocusBoard.snapshot() 提供。
+    """构建 plan_eval 用户消息。
 
-    格式: {focus_id: {status, critical, important, noise, contributors, targets}}
-    LLM 据此判断哪些 focus 已被别的源 SATISFIED → 不再为该 focus 生成 replan_queries。
+    focus_status 经 ``_slim_focus_status_for_prompt`` 裁剪后注入——只让 LLM
+    看到"是否已被别源覆盖"与"哪些源贡献过"，**不**暴露 quota 计数。
     """
     parts = [
         f"focuses_block:\n{_focuses_block(focuses)}",
@@ -289,10 +365,11 @@ def _build_plan_eval_prompt(
         f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}",
         f"source_top_k: {source_top_k}",
     ]
-    if focus_status:
+    slim_status = _slim_focus_status_for_prompt(focus_status)
+    if slim_status:
         parts.append(
-            "focus_status (跨源已知状态；status=satisfied 的 focus 不要再 replan):\n"
-            + json.dumps(focus_status, ensure_ascii=False)
+            "focus_status (跨源覆盖状态；status=satisfied 的 focus 不要再 replan):\n"
+            + json.dumps(slim_status, ensure_ascii=False)
         )
     return "\n\n".join(parts)
 
@@ -337,9 +414,10 @@ class SourceAgent:
         # 运行时注入：execute_sub_query 通过 target_focus 回查对应 Focus 对象
         self._current_focus_lookup: Dict[str, Focus] = {}
         self._sub_query_seq: int = 0
-        # 子类（如 GoogleSourceAgent）可在 _execute_batch 中提前 fire eval_only LLM 调用，
-        # 与 batch_total 末尾的 sub-query rerank 并行，节省 1-2s 串行开销。
-        self._eval_preview_task: Optional["asyncio.Task[List[ChunkEntry]]"] = None
+        # Multi-focus 动态 top_k：run() 入口算 base + (n_focuses-1)*2 → 注入 eval prompts 与
+        # _assemble_top_chunks 截断；schema cap 已在 __init__ 时膨胀，永远 ≥ effective。
+        # run() 中按本次 focuses 重算并赋值，子方法通过 self 读取（多 loop 共享）。
+        self._effective_source_top_k: int = self.cfg.source_top_k
         # 源专属线程池——所有 self._to_thread 调用都走这里，避免全局默认池竞争
         workers = int(executor_workers if executor_workers is not None else self.DEFAULT_EXECUTOR_WORKERS)
         self._executor: concurrent.futures.ThreadPoolExecutor = concurrent.futures.ThreadPoolExecutor(
@@ -398,30 +476,24 @@ class SourceAgent:
         """
         return await self.execute_sub_query(sq.query, sq.target_focus)
 
-    # ── 子类覆写点：focus → sub_queries 的确定性映射（可选） ────────
-    def _plan_sub_queries(self, focuses: List[Focus]) -> List[SubQuery]:
-        """默认返空——走 plan_only LLM 路径。
-
-        子类若想跳过 LLM（极少情况）可覆写返回非空列表。大多数场景保持默认，
-        让 plan_only LLM 基于 focus.text + 源专业规则自主产出 sub_queries。
-        """
-        return []
-
     # ── 子类覆写点：sub_query 总数预算（注入到 plan_only prompt） ─
     def _compute_sub_query_total_cap(self, n_focuses: int) -> int:
-        """返回 plan_only prompt 中的 sub_query_total_cap 值。
+        """**[v1 fallback / replan path only]** 返回 plan_only prompt 中的
+        sub_query_total_cap 值。
 
-        默认走通用公式 ``_sub_query_budget``。源若需特殊收束（如 Google
-        的"少而精：单 focus ≤2 / 多 focus ≤3"），覆写返回更紧的预算。
+        v2.2 主路径（pre_planned_sub_queries）**不**调用此方法——sub_query 数量
+        由 global_planner 直接决定。仅在 ``_plan_via_plan_only_llm``（v1 fallback
+        与 per-focus replan 兜底）链路使用。
         """
         return _sub_query_budget(n_focuses, self.cfg.source_top_k)
 
     # ── 子类覆写点：注入源专业规则到 plan_only prompt ────────────
     def _source_query_rules_block(self) -> str:
-        """返回该源的 query 编写规则文本（供 plan_only prompt 拼接）。
+        """**[v1 fallback / replan path only]** 返回该源的 query 编写规则文本，
+        供 ``_plan_via_plan_only_llm`` 拼接进 plan_only prompt。
 
-        子类覆写以注入：业务 tag 枚举、国家缩写规则、时效解析规则、indexes 白名单等。
-        默认空——基类路径只依赖 SourceProfile。
+        v2.2 主路径（pre_planned_sub_queries）由 global_planner 装载 enabled
+        源规则，**不**走此分支。仅 v1 fallback / replan 兜底时启用。
         """
         return ""
 
@@ -449,14 +521,16 @@ class SourceAgent:
             sq.sub_query_id = f"{self.source}:{sq.target_focus}:sq{self._sub_query_seq}"
         return sub_queries
 
-    async def _plan(self, focuses: List[Focus]) -> List[SubQuery]:
-        """统一规划入口：优先子类确定性 _plan_sub_queries；空则回退 plan_only LLM。"""
-        subs = self._plan_sub_queries(focuses)
-        if subs:
-            return self._post_process_sub_queries(
-                focuses,
-                self._assign_sub_query_ids(subs),
-            )
+    async def _plan_via_plan_only_llm(self, focuses: List[Focus]) -> List[SubQuery]:
+        """**[v1 fallback / replan path only]** 调用老 plan_only_LLM 现场产 sub_queries。
+
+        触发：
+        1. v2 ``global_planner`` 整盘失败且 ``fallback_to_v1=True`` —— 整盘走这里；
+        2. ``planner_runner`` 把某 focus 在该源全部 sub_query reject → 进 replan，
+           只对该 focus 走这里做兜底（局部 replan）。
+
+        v2.2 主路径（pre_planned_sub_queries 非空）**不**调用此方法。
+        """
         if self.plan_only is None:
             return []
         prompt = _build_plan_only_prompt(
@@ -465,7 +539,7 @@ class SourceAgent:
             sq_budget_override=self._compute_sub_query_total_cap(len(focuses)),
         )
         out = await _run_llm_agent(self.plan_only, prompt)
-        planned = self._assign_sub_query_ids([
+        return [
             SubQuery(
                 query=q["query"],
                 target_focus=q["target_focus"],
@@ -478,27 +552,97 @@ class SourceAgent:
                 author_filter=q.get("author_filter"),
             )
             for q in out.get("sub_queries", [])
-        ])
-        return self._post_process_sub_queries(focuses, planned)
+        ]
+
+    async def _plan(
+        self,
+        focuses: List[Focus],
+        pre_planned_sub_queries: Optional[List[SubQuery]] = None,
+        replan_focuses: Optional[List[Focus]] = None,
+    ) -> List[SubQuery]:
+        """统一规划入口。v2.2 双路径：
+
+        - 优先使用 ``pre_planned_sub_queries``（来自 global_planner + planner_runner，
+          已经过该源 Validator 校验）；
+        - 同时若 ``replan_focuses`` 非空，则用老 plan_only_LLM 对这部分 focus 局部修复，
+          结果合并进总 sub_queries；
+        - 两者都为空时 → 走纯老路径（v1 fallback / 老调用方未传 kwargs）。
+
+        子类的 ``_post_process_sub_queries`` 仍会作为兜底跑一遍，保留与 v1 一致的行为。
+        """
+        sub_queries: List[SubQuery] = []
+        if pre_planned_sub_queries:
+            sub_queries.extend(pre_planned_sub_queries)
+
+        # 局部 replan：仅给被 validator 整 focus 整源 reject 掉的 focus 走老 LLM
+        if replan_focuses:
+            try:
+                recovered = await self._plan_via_plan_only_llm(replan_focuses)
+            except Exception as e:
+                logger.warning(
+                    "[%s] _plan replan_via_plan_only_llm failed (%d focuses): %s",
+                    self.source, len(replan_focuses), e,
+                )
+                recovered = []
+            sub_queries.extend(recovered)
+
+        # 老路径兜底：双 kwarg 都为空时，与 v1 行为完全一致
+        if not sub_queries and pre_planned_sub_queries is None and replan_focuses is None:
+            sub_queries = await self._plan_via_plan_only_llm(focuses)
+
+        if not sub_queries:
+            return []
+
+        sub_queries = self._assign_sub_query_ids(sub_queries)
+        return self._post_process_sub_queries(focuses, sub_queries)
 
     # ── 公开入口 ──────────────────────────────────────────────
-    async def run(self, focuses: List[Focus]) -> SourceAgentResult:
-        """跑完整个 SourceAgent loop，返回 top_chunks。"""
+    async def run(
+        self,
+        focuses: List[Focus],
+        pre_planned_sub_queries: Optional[List[SubQuery]] = None,
+        replan_focuses: Optional[List[Focus]] = None,
+    ) -> SourceAgentResult:
+        """跑完整个 SourceAgent loop，返回 top_chunks。
+
+        v2.2 新增 kwargs：
+        - ``pre_planned_sub_queries``: planner_runner 已校验的本源 SubQuery 列表
+        - ``replan_focuses``: 该源该 focus 全部 sub_query 被 reject 的 focus，
+          走老 plan_only_LLM 局部修复
+        两个 kwarg 均不传时，行为与 v1 完全一致（_plan 内部走老 plan_only_LLM）。
+        """
         start = asyncio.get_event_loop().time()
         chunk_pool: Dict[str, ChunkEntry] = {}
         # 注入 focus 回查表，供 execute_sub_query 读 focus 的完整字段（time_hint/entity_hint 等）
         self._current_focus_lookup = {f.focus_id: f for f in focuses}
         self._sub_query_seq = 0
+        # Multi-focus 动态 effective top_k：本源被路由到 N 个 focus 时，扩容到 base+(N-1)*2，
+        # 保证 eval_only / plan_eval 有足够预算给每个 focus 留至少 1 个名额。
+        self._effective_source_top_k = effective_source_top_k(self.cfg.source_top_k, len(focuses))
+        if self._effective_source_top_k != self.cfg.source_top_k:
+            logger.info(
+                "[%s] effective_source_top_k: base=%d n_focuses=%d → effective=%d",
+                self.source, self.cfg.source_top_k, len(focuses), self._effective_source_top_k,
+            )
 
-        # 单 loop（min=max=1）走简化路径；其余走多 loop
+        # 单 loop（min=max=1）走简化路径；其余走多 loop。v2.2 入参 (pre_planned /
+        # replan_focuses) 作为显式 kwargs 透传，避免借 self 中转隐式 state。
         if self.cfg.min_loops == 1 and self.cfg.max_loops == 1:
-            result = await self._run_single_loop(focuses, chunk_pool)
+            result = await self._run_single_loop(
+                focuses, chunk_pool,
+                pre_planned_sub_queries=pre_planned_sub_queries,
+                replan_focuses=replan_focuses,
+            )
         else:
             if self.plan_eval is None:
                 raise RuntimeError(
                     f"[{self.source}] max_loops={self.cfg.max_loops} > 1 but plan_eval agent is None"
                 )
-            result = await self._run_multi_loop(focuses, chunk_pool)
+            result = await self._run_multi_loop(
+                focuses, chunk_pool,
+                pre_planned_sub_queries=pre_planned_sub_queries,
+                replan_focuses=replan_focuses,
+            )
 
         elapsed = asyncio.get_event_loop().time() - start
         logger.info(
@@ -509,12 +653,22 @@ class SourceAgent:
         result.elapsed_s = elapsed
         return result
 
-    # ── 单 loop 路径：(_plan_sub_queries or plan_only) → execute → eval_only ─
+    # ── 单 loop 路径：plan(pre_planned + replan / 老 LLM) → execute → eval_only ─
     async def _run_single_loop(
-        self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
+        self,
+        focuses: List[Focus],
+        chunk_pool: Dict[str, ChunkEntry],
+        pre_planned_sub_queries: Optional[List[SubQuery]] = None,
+        replan_focuses: Optional[List[Focus]] = None,
     ) -> SourceAgentResult:
-        # A. 规划 sub_queries：优先子类确定性映射，其次 plan_only LLM 兜底
-        sub_queries = await self._plan(focuses)
+        # A. 规划 sub_queries：
+        #    - v2.2 链路：使用 pre_planned_sub_queries（+ replan 局部修复）
+        #    - v1 兼容链路：两 kwarg 均 None 时回老 plan_only_LLM
+        sub_queries = await self._plan(
+            focuses,
+            pre_planned_sub_queries=pre_planned_sub_queries,
+            replan_focuses=replan_focuses,
+        )
         if not sub_queries:
             logger.warning("[%s] produced 0 sub_queries", self.source)
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
@@ -522,49 +676,26 @@ class SourceAgent:
         logger.info("[%s] plan produced %d sub_queries", self.source, len(sub_queries))
 
         # B. execute（并发跑所有 sub_query）
-        # 子类可能在 _execute_batch 内部 fire 一个 eval_only preview task（与末尾 sub-query rerank 并行）
-        self._eval_preview_task = None
         await self._execute_batch(sub_queries, chunk_pool)
 
         if not chunk_pool:
             logger.warning("[%s] execute produced 0 chunks, skip eval_only", self.source)
-            if self._eval_preview_task is not None:
-                self._eval_preview_task.cancel()
-                self._eval_preview_task = None
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
 
-        # P5 (吸收 P6): 所有 targeted focus 已被外部 SATISFIED + chunk_pool 也仅含被早停的残余
-        # → 跳过 eval_only LLM 兜底，直接返回（节省 ~1-2s LLM RTT）
-        board = getattr(self, "_focus_board", None)
-        if board is not None and focuses:
-            targeted_fids = {f.focus_id for f in focuses}
-            if targeted_fids and all(board.is_satisfied(fid) for fid in targeted_fids):
-                logger.info(
-                    "[%s] all targeted focuses externally satisfied + cancellation in effect → skip eval_only",
-                    self.source,
-                )
-                if self._eval_preview_task is not None:
-                    self._eval_preview_task.cancel()
-                    self._eval_preview_task = None
-                return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
-
         # C. eval_only 收尾（单 loop 场景下按 spec §2.4 必跑一次）
-        if self._eval_preview_task is not None:
-            try:
-                top_chunks = await self._eval_preview_task
-                logger.info("[%s] eval_only via preview pipeline (saved sub-query rerank tail)", self.source)
-            except Exception as e:
-                logger.warning("[%s] eval_preview failed (%s) → fallback eval_only_finalize", self.source, e)
-                top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
-            finally:
-                self._eval_preview_task = None
-        else:
-            top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
+        # FocusBoard 的职责是取消尚未开始 / 正在飞行的 I/O sub-query；
+        # 一旦 API 读取完成、chunks 已进 chunk_pool，无论 focus 是否被外部 satisfied，
+        # eval_only 都必须执行，否则已完成读取的结果会被丢弃。
+        top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
         return SourceAgentResult(self.source, top_chunks, loops_used=1, elapsed_s=0.0)
 
     # ── 多 loop 路径：plan_only → execute → (plan_eval → execute)* → eval_only ──
     async def _run_multi_loop(
-        self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
+        self,
+        focuses: List[Focus],
+        chunk_pool: Dict[str, ChunkEntry],
+        pre_planned_sub_queries: Optional[List[SubQuery]] = None,
+        replan_focuses: Optional[List[Focus]] = None,
     ) -> SourceAgentResult:
         """多 loop 检索路径（spec §2.4）。
 
@@ -578,8 +709,12 @@ class SourceAgent:
         min_loops, max_loops = self.cfg.min_loops, self.cfg.max_loops
         assert self.plan_eval is not None  # run() 已校验
 
-        # loop 1: plan → execute
-        sub_queries = await self._plan(focuses)
+        # loop 1: plan → execute（v2.2：使用 pre_planned + 局部 replan；老路径回退）
+        sub_queries = await self._plan(
+            focuses,
+            pre_planned_sub_queries=pre_planned_sub_queries,
+            replan_focuses=replan_focuses,
+        )
         if not sub_queries:
             logger.warning("[%s] loop=1 produced 0 sub_queries", self.source)
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
@@ -613,7 +748,7 @@ class SourceAgent:
             pe_prompt = _build_plan_eval_prompt(
                 focuses, list(chunk_pool.values()),
                 loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
-                source_top_k=self.cfg.source_top_k,
+                source_top_k=self._effective_source_top_k,
                 focus_status=focus_status,
             )
             pe_out = await _run_llm_agent(self.plan_eval, pe_prompt)
@@ -663,6 +798,7 @@ class SourceAgent:
             tiers_map: Dict[str, Dict] = tiers_list_to_map(pe_out.get("tiers"))
             if top_ids:
                 top_chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+                self._log_per_focus_tier_distribution(focuses, top_chunks)
                 return SourceAgentResult(self.source, top_chunks, loops_used=loop_n, elapsed_s=0.0)
             # plan_eval stop 但没给 top_k → 走 eval_only 兜底
             logger.info("[%s] loop=%d plan_eval stop without top_k → fallback eval_only", self.source, loop_n)
@@ -680,13 +816,18 @@ class SourceAgent:
     ) -> List[ChunkEntry]:
         started = time.perf_counter()
         eval_prompt = _build_eval_only_prompt(
-            focuses, list(chunk_pool.values()), self.cfg.source_top_k,
+            focuses, list(chunk_pool.values()), self._effective_source_top_k,
         )
         eval_out = await _run_llm_agent(self.eval_only, eval_prompt)
         top_ids: List[str] = eval_out.get("top_k_chunk_ids", [])
         tiers_map: Dict[str, Dict] = tiers_list_to_map(eval_out.get("tiers"))
         chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+        # 不在 source 层做"per-focus 保底升级"——EVAL_RUBRIC_BLOCK 的多 focus
+        # 全面评估守卫已让 LLM 客观地覆盖每个 focus；最终 tier 维持 LLM 判断，
+        # 早停 / quota 仅在 FocusBoard 调度层使用，不修改输出。
         chunks = self._post_process_top_chunks(focuses, chunks)
+        # 观察日志：每 focus 实际拿到的 tier 分布，便于事后分析（不修改 chunks）
+        self._log_per_focus_tier_distribution(focuses, chunks)
         logger.info(
             "TIMING source.eval_only source=%s input_chunks=%d selected=%d ms=%.1f",
             self.source,
@@ -704,16 +845,73 @@ class SourceAgent:
         _ = focuses
         return chunks
 
+    def _log_per_focus_tier_distribution(
+        self,
+        focuses: List[Focus],
+        chunks: List[ChunkEntry],
+    ) -> None:
+        """诊断日志：记录每 focus 的 tier 分布与 0-chunk 警告。
+
+        **只读、不改 chunks**——eval 的 tier 是客观结果，我们不在 source 层
+        做"保底升级"。本日志用于事后分析 eval 是否漏评 / 是否需要在 router
+        层多分配源。
+
+        对于本源被路由但 ``top_k_chunk_ids`` 完全没出现的 focus，会单独打
+        ``coverage_gap`` warning，方便排查 eval 是否客观地把候选都判为 noise，
+        还是直接没纳入评估（后者可能要看 instruction 或 chunks_block 渲染）。
+        """
+        if not focuses:
+            return
+
+        per_focus: Dict[str, Dict[str, int]] = {
+            f.focus_id: {"critical": 0, "important": 0, "noise": 0, "untiered": 0, "total": 0}
+            for f in focuses
+        }
+        for c in chunks:
+            related = set(c.target_focuses or set()) | set(
+                (c.metadata or {}).get("answered_focuses") or []
+            )
+            for fid in related:
+                if fid not in per_focus:
+                    continue
+                per_focus[fid]["total"] += 1
+                if c.tier == "critical":
+                    per_focus[fid]["critical"] += 1
+                elif c.tier == "important":
+                    per_focus[fid]["important"] += 1
+                elif c.tier == "noise":
+                    per_focus[fid]["noise"] += 1
+                else:
+                    per_focus[fid]["untiered"] += 1
+
+        for fid, stats in per_focus.items():
+            if stats["total"] == 0:
+                logger.warning(
+                    "[%s] eval coverage_gap: focus=%s got 0 chunks in selection "
+                    "(check if eval excluded the focus's candidates or if retrieval returned nothing for it)",
+                    self.source, fid,
+                )
+            else:
+                logger.info(
+                    "[%s] eval_tier_dist focus=%s critical=%d important=%d noise=%d untiered=%d total=%d",
+                    self.source, fid,
+                    stats["critical"], stats["important"], stats["noise"], stats["untiered"], stats["total"],
+                )
+
     def _assemble_top_chunks(
         self,
         top_ids: List[str],
         tiers_map: Dict[str, Dict],
         chunk_pool: Dict[str, ChunkEntry],
     ) -> List[ChunkEntry]:
-        """组装 LLM 选出的 top_k，带两层 call-back 校验（防 LLM 幻觉）。"""
+        """组装 LLM 选出的 top_k，带两层 call-back 校验（防 LLM 幻觉）。
+
+        截断上限：``self._effective_source_top_k`` —— multi-focus 场景下 base 之上
+        每多 1 个 focus 加 2 名额。schema cap 已在 __init__ 时膨胀到 base+EXTRA。
+        """
         allowed_focus_ids = set(self._current_focus_lookup.keys())
         out: List[ChunkEntry] = []
-        for cid in top_ids[: self.cfg.source_top_k]:
+        for cid in top_ids[: self._effective_source_top_k]:
             entry = chunk_pool.get(cid)
             if entry is None:
                 # 幻觉 chunk_id：LLM 编了个不存在的 id

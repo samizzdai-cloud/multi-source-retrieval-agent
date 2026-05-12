@@ -1,37 +1,30 @@
-"""eval_layer——跨源合并后的全局重排与截断（Phase 4b Step C）。
+"""eval_layer——跨源合并后的全局重排与截断（Phase 4b Step C/E）。
 
 职责：
   - 输入：merge 后的 ``List[ChunkEntry]``（已经由各 SourceAgent 内部的 eval_only
     或 plan_eval 打过 tier / relevance / answered_focuses）
   - 输出：按全局公式重排 + min-keep 截断 + focus 补齐的 ``List[ChunkEntry]``
 
-设计原则（spec §4b / 用户拍板）：
-  - **放弃** retrieve 原生 score（已在 _assemble_top_chunks 被 LLM relevance 覆盖）
-  - **复用** LLM 判断：tier（粗分类）+ relevance（[0,1] 连续分）+ answered_focuses
-  - **不再** 在 eval_layer 调 LLM（RuleEvalLayer 零成本；LlmEvalLayer 留 Step E）
+两种实现：
+  RuleEvalLayer（lite/balanced，mode="rule"）：
+    公式：final = 0.45*tier + 0.40*relevance + 0.15*coverage_bonus
+    零 LLM 成本，亚毫秒级完成。
 
-公式：
-  final = 0.55 * TIER_W[tier] + 0.30 * relevance + 0.15 * coverage_bonus
-  TIER_W = {critical: 1.0, important: 0.6, noise: 0.1, None: 0.3}
-  coverage_bonus = min(1.0, max(0, len(answered_focuses) - 1) * 0.25)
-
-截断（min-keep）：
-  target_k = min(eval_layer_top_k, n_focus * 3)
-  cap_lo = ceil(n_total * 0.25)
-  cap_hi = floor(n_total * 0.80)
-  effective_k = max(cap_lo, min(cap_hi, target_k))
-
-focus 补齐：
-  取完 top_effective_k 后检查每个 focus 是否至少有 1 条命中（tier ∈ {critical, important}）。
-  未命中的 focus → 从剩余池按 final 降序补 1 条（优先 answered_focuses 含该 focus 的）。
-  补齐产物仍受 cap_hi 限制。
+  LlmEvalLayer（deep_dive，mode="llm_tool"，Phase 4b Step E）：
+    跨源全局二次 LLM 排序——各源 eval_only 打 tier 时只看单源上下文，
+    LlmEvalLayer 站在所有源之上，比较同 focus 下多源 chunk 的相对质量，
+    可升降 tier、调整 focus 归属，并输出全局最优 top_k。
+    失败时 fallback 到 RuleEvalLayer。
+    retrieve_agent 通过 asyncio.to_thread 调用，不阻塞事件循环。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Callable, Dict, List, Optional, Protocol
 
 from tools.core.models import ChunkEntry
@@ -217,12 +210,333 @@ def build_rule_eval_layer(params: Optional[RuleEvalParams] = None) -> EvalLayer:
     return RuleEvalLayer(params=params or RuleEvalParams())
 
 
-def build_eval_layer(mode: str, params: Optional[RuleEvalParams] = None) -> EvalLayer:
+# ── LlmEvalLayer（Phase 4b Step E）───────────────────────────────
+
+_TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:")
+
+
+def _render_chunk_for_eval(c: ChunkEntry, base_max: int = 300) -> str:
+    """与 source_agent_base._chunks_block 保持一致的单 chunk 渲染。
+
+    - 表格 chunk 使用 500 字宽窗口（同 _chunks_block）
+    - 输出 chunk_id（非 id alias）供 schema 对齐 TierAssignment.chunk_id
+    """
+    content = c.content or ""
+    is_table = any(m in content for m in _TABLE_MARKERS)
+    limit = 500 if is_table else base_max
+    snippet = content.replace("\n", " ").strip()
+    if len(snippet) > limit:
+        snippet = snippet[:limit] + "..."
+
+    meta = c.metadata or {}
+    source_label = meta.get("source_name") or ""
+    heading = meta.get("heading_path") or ""
+    modified = meta.get("modified_time") or meta.get("modifiedTime") or meta.get("drive_modified") or ""
+    answered = sorted(set(meta.get("answered_focuses") or []))
+    angle_tag = meta.get("angle_tag") or ""
+    sq = (c.sub_query or "")[:40]
+
+    parts = [
+        f"chunk_id={c.id}",
+        f"source={c.source}",
+        f"tier={c.tier or 'none'}",
+        f"relevance={c.score or 0:.3f}",
+        f"focuses={sorted(c.target_focuses or set())}",
+    ]
+    if answered:
+        parts.append(f"answered={answered}")
+    if angle_tag:
+        parts.append(f"angle={angle_tag}")
+    if source_label:
+        parts.append(f"src={source_label[:40]}")
+    if modified:
+        parts.append(f"modified={str(modified)[:10]}")
+    if heading:
+        parts.append(f"heading={heading[:50]}")
+    if sq:
+        parts.append(f"sq={sq}")
+
+    return "- " + " | ".join(parts) + f"\n  {snippet}"
+
+
+def _build_llm_eval_layer_prompt(
+    chunks: List[ChunkEntry],
+    focuses: List[object],
+    top_k: int,
+) -> str:
+    """构建 LlmEvalLayer 的 LLM prompt。
+
+    对齐 eval_only / plan_eval 的 prompt 规范：
+    - 使用相同 EVAL_RUBRIC_BLOCK（跨源 tier 标准统一）
+    - chunk 渲染格式与 _chunks_block 保持一致（source_name / heading / modified）
+    - 输出 schema 对齐 TierAssignment：chunk_id + tier + relevance + answered_focuses + angle_tag
+    """
+    from tools.core.llm_contracts import EVAL_RUBRIC_BLOCK
+
+    focus_lines = [f"- {getattr(f, 'focus_id', '?')}: {getattr(f, 'text', '')}" for f in focuses]
+    focuses_block = "\n".join(focus_lines)
+
+    # 分组渲染：按 focus 顺序展示，每条 chunk 归属第一个命中 focus
+    placed: set = set()
+    chunk_lines: List[str] = []
+    for f in focuses:
+        fid = getattr(f, "focus_id", "?")
+        members = [c for c in chunks if fid in (c.target_focuses or set()) and c.id not in placed]
+        if members:
+            chunk_lines.append(f"\n## {fid}: {getattr(f, 'text', '')}")
+            for c in members:
+                chunk_lines.append(_render_chunk_for_eval(c))
+                placed.add(c.id)
+    leftover = [c for c in chunks if c.id not in placed]
+    if leftover:
+        chunk_lines.append("\n## Unassigned")
+        for c in leftover:
+            chunk_lines.append(_render_chunk_for_eval(c))
+    chunks_block = "\n".join(chunk_lines)
+
+    n_focuses = len(focuses)
+    valid_fids = [getattr(f, "focus_id", "?") for f in focuses]
+
+    # multi-focus 硬约束文本：每 focus 至少 1 条
+    if n_focuses > 1:
+        per_focus_min_line = (
+            f"- 每个 focus（共 {n_focuses} 个）在 selected_ids 中**至少选 1 条**"
+            f"（哪怕最强候选只是 noise，也要选进来让下游看到'已评估'的脚印）"
+        )
+        # answered_focuses 示例展示跨 focus 赋值，用 json.dumps 保证双引号格式
+        example_answered = json.dumps(valid_fids[:2], ensure_ascii=False)
+    else:
+        per_focus_min_line = ""
+        example_answered = json.dumps([valid_fids[0]] if valid_fids else ["focus_0"], ensure_ascii=False)
+
+    constraints = f"""\
+- selected_ids 长度 ≤ {top_k}，对应 tiers 须覆盖全部 selected_ids
+{per_focus_min_line + chr(10) if per_focus_min_line else ""}\
+- chunk_id 必须来自上方 chunks_block（不允许编造不存在的 id）
+- answered_focuses 中的 focus_id 须来自 focuses_block：{valid_fids}
+- 一条 chunk 同时覆盖多个 focus 时，answered_focuses 列出所有命中的 focus_id
+- relevance 为 [0,1] 连续分；angle_tag 为 1-2 个英文小写词"""
+
+    return f"""\
+你是跨源全局检索评估器（eval_layer）。
+
+各来源（bailian / feishu / google）的 eval_only 已在**单源视角**下对每条 chunk 打了初始 tier。
+你的任务是在**全局视角**下二次评估：同一 focus 下多来源证据的相对质量，升降 tier，
+选出全局最优的 {top_k} 条 chunk，并输出完整的评估赋值。
+
+{EVAL_RUBRIC_BLOCK}
+
+current_date: {date.today().isoformat()}
+
+focuses_block:
+{focuses_block}
+
+chunks_block（{len(chunks)} 条，按 focus 分组）：
+{chunks_block}
+
+global_top_k: {top_k}
+
+## 输出 schema（严格 JSON，不输出任何其他文字）
+{{
+  "selected_ids": ["<chunk_id1>", "<chunk_id2>", ...],
+  "tiers": [
+    {{
+      "chunk_id": "<chunk_id>",
+      "tier": "critical",
+      "relevance": 0.90,
+      "answered_focuses": {example_answered},
+      "angle_tag": "timeline"
+    }}
+  ]
+}}
+
+约束：
+{constraints}
+"""
+
+
+_VALID_TIERS = {"critical", "important", "noise"}
+
+# Gemini response_schema：与 TierAssignment + selected_ids 对齐，提供字段级强制
+# （等价于 eval_only 用 pydantic output_schema 的结构约束效果）
+_EVAL_LAYER_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "selected_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "tiers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "chunk_id":        {"type": "string"},
+                    "tier":            {"type": "string", "enum": ["critical", "important", "noise"]},
+                    "relevance":       {"type": "number"},
+                    "answered_focuses":{"type": "array", "items": {"type": "string"}},
+                    "angle_tag":       {"type": "string"},
+                },
+                "required": ["chunk_id", "tier", "relevance", "answered_focuses", "angle_tag"],
+            },
+        },
+    },
+    "required": ["selected_ids", "tiers"],
+}
+
+
+@dataclass
+class LlmEvalLayer:
+    """LLM 驱动的跨源全局重排层（Phase 4b Step E）。
+
+    各源 eval_only 是单源视角打分；此处站在全量合并后的 chunk 面前，
+    比较同 focus 下多源证据相对质量，可升降 tier，输出全局最优 top_k。
+
+    同步实现（blocking）：retrieve_agent 通过 ``asyncio.to_thread`` 调用。
+    任何异常（LLM 超时 / JSON 解析 / 空选 / 幻觉 chunk_id）→ fallback RuleEvalLayer。
+    """
+    model: str = "gemini-3.1-flash-lite"
+    timeout_s: float = 30.0
+    max_input_chunks: int = 40      # 超出时先过规则层截断
+    rule_params: RuleEvalParams = field(default_factory=RuleEvalParams)
+
+    def rank(
+        self,
+        chunks: List[ChunkEntry],
+        focuses: List[object],
+        top_k: int,
+    ) -> List[ChunkEntry]:
+        if not chunks:
+            return []
+
+        rule_layer = RuleEvalLayer(params=self.rule_params)
+
+        # 超长截断：规则层先粗筛，让 LLM 看精品子集
+        if len(chunks) > self.max_input_chunks:
+            candidates = rule_layer.rank(chunks, focuses, self.max_input_chunks)
+            logger.info(
+                "LlmEvalLayer: truncated %d→%d for LLM input",
+                len(chunks), len(candidates),
+            )
+        else:
+            candidates = list(chunks)
+
+        try:
+            selected = self._llm_rank(candidates, focuses, top_k)
+        except Exception as e:
+            logger.warning("LlmEvalLayer: LLM failed (%s) → fallback RuleEvalLayer", e)
+            return rule_layer.rank(chunks, focuses, top_k)
+
+        if not selected:
+            logger.warning("LlmEvalLayer: LLM returned 0 chunks → fallback RuleEvalLayer")
+            return rule_layer.rank(chunks, focuses, top_k)
+
+        logger.info(
+            "LlmEvalLayer: selected %d/%d (cap=%d) chunks",
+            len(selected), len(candidates), top_k,
+        )
+        return selected
+
+    def _llm_rank(
+        self,
+        candidates: List[ChunkEntry],
+        focuses: List[object],
+        top_k: int,
+    ) -> List[ChunkEntry]:
+        from tools.core.llm_client import call_llm, parse_json_response
+
+        valid_fids = {getattr(f, "focus_id", "") for f in focuses}
+        prompt = _build_llm_eval_layer_prompt(candidates, focuses, top_k)
+        raw = call_llm(
+            prompt,
+            max_tokens=2048,
+            timeout=self.timeout_s,
+            _caller_tag="eval_layer.llm_tool",
+            model=self.model,
+            response_schema=_EVAL_LAYER_RESPONSE_SCHEMA,  # 结构强制（含 response_mime_type）
+        )
+        parsed = parse_json_response(raw)
+
+        selected_ids: List[str] = parsed.get("selected_ids") or []
+        tiers_list: List[Dict] = parsed.get("tiers") or []
+
+        # tiers_map: chunk_id → full assignment dict（对齐 TierAssignment schema）
+        tiers_map: Dict[str, Dict] = {}
+        for t in tiers_list:
+            cid = t.get("chunk_id")
+            if not cid:
+                continue
+            tiers_map[cid] = {
+                "tier": t.get("tier") if t.get("tier") in _VALID_TIERS else None,
+                "relevance": float(t.get("relevance") or 0.5),
+                "answered_focuses": [
+                    fid for fid in (t.get("answered_focuses") or [])
+                    if fid in valid_fids           # 白名单：过滤幻觉 focus_id
+                ],
+                "angle_tag": str(t.get("angle_tag") or "").strip().lower(),
+            }
+
+        # 组装结果，写回 tier / score / metadata（与 _assemble_top_chunks 对齐）
+        id_to_chunk: Dict[str, ChunkEntry] = {c.id: c for c in candidates}
+        result: List[ChunkEntry] = []
+        for cid in selected_ids:
+            c = id_to_chunk.get(cid)
+            if c is None:
+                logger.debug("LlmEvalLayer: hallucinated chunk_id %r, skip", cid)
+                continue
+            info = tiers_map.get(cid) or {}
+            new_tier = info.get("tier")
+            rel = info.get("relevance", c.score or 0.5)
+            answered = info.get("answered_focuses") or []
+            angle = info.get("angle_tag") or ""
+
+            # tier 更新（与 _assemble_top_chunks 一致：用 with_tier 创建副本）
+            if new_tier and new_tier != c.tier:
+                c = c.with_tier(new_tier)
+
+            # relevance 写回 score（eval_layer 公式 w_relevance=0.40 的输入）
+            # metadata 写回 answered_focuses / angle_tag（final_assembler 依赖）
+            updated_meta = dict(c.metadata or {})
+            if rel != c.score:
+                updated_meta["_eval_layer_relevance"] = rel   # 保留原 score，另存 EL 分
+            if answered:
+                updated_meta["answered_focuses"] = sorted(
+                    set(updated_meta.get("answered_focuses") or []) | set(answered)
+                )
+            if angle:
+                updated_meta["angle_tag"] = angle
+
+            c = ChunkEntry(
+                id=c.id,
+                source=c.source,
+                content=c.content,
+                metadata=updated_meta,
+                score=rel,          # 替换为 LLM 给出的连续 relevance 分
+                sub_query=c.sub_query,
+                target_focuses=set(c.target_focuses),
+                tier=c.tier,
+            )
+            result.append(c)
+            if len(result) >= top_k:
+                break
+
+        return result
+
+
+def build_eval_layer(
+    mode: str,
+    params: Optional[RuleEvalParams] = None,
+    model: Optional[str] = None,
+) -> EvalLayer:
     """按 mode 返回 eval_layer 实例。
 
-    - mode="rule": RuleEvalLayer
-    - mode="llm_tool": 未实现（Phase 4b Step E），当前回退 RuleEvalLayer
+    - ``mode="rule"``: RuleEvalLayer（lite/balanced）
+    - ``mode="llm_tool"``: LlmEvalLayer（deep_dive）；失败时 fallback 到规则层
+    - ``model``: 覆盖 LlmEvalLayer 默认模型（None → 用 dataclass 默认值）
     """
     if mode == "llm_tool":
-        logger.warning("eval_layer mode=llm_tool not implemented, fallback to rule")
+        kwargs: dict = dict(rule_params=params or RuleEvalParams())
+        if model:
+            kwargs["model"] = model
+        return LlmEvalLayer(**kwargs)
     return build_rule_eval_layer(params)

@@ -16,11 +16,42 @@
 
 from typing import Dict, List, Literal, Optional, Type
 
+from google.genai import types as _genai_types
 from pydantic import BaseModel, Field, create_model
 
 
 # ── 全局统一模型 ─────────────────────────────────────────────────────────────
 MODEL = "gemini-3.1-flash-lite"
+
+# ── LlmAgent generate_content_config token caps ─────────────────────────────
+# plan_only 输出极小（sub_queries 列表，≤300 tokens），保留 1024 上限——小 cap 对 LLM
+# 还是个隐性"紧凑输出"提示。
+# eval_only / plan_eval：去掉显式 max_output_tokens，让 model 用默认上限（gemini-3.1-
+# flash-lite 模型 max≈65K 远超实际需要），由 output_schema (Pydantic) 约束结构上限。
+# Google chunk_id 已从 ~175 字符瘦身到 ~50 字符（reuse reader 的自描述 id），实际输出
+# 体量本身也下来了；_run_llm_agent 内的 JSON repair 兜底保留作为防御深度。
+AGENT_CFG_EVAL_ONLY = _genai_types.GenerateContentConfig()
+AGENT_CFG_PLAN_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=1024)
+AGENT_CFG_PLAN_EVAL = _genai_types.GenerateContentConfig()
+
+
+# ── multi-focus 动态预算常量 ─────────────────────────────────────────────────
+# eval_only / plan_eval 的 ``top_k_chunk_ids`` schema cap = base + 此常量。
+# 运行时 ``effective_top_k = base + (n_focuses - 1) * 2``，schema 永远宽于
+# effective（让 LLM 自由产出，最后由代码层硬截到 effective）。
+# 选 10：覆盖 base=5 + 最多 6 focuses（=5+(6-1)*2=15）的极端情况。
+MULTI_FOCUS_TOP_K_EXTRA = 10
+
+
+def effective_source_top_k(base_top_k: int, n_focuses: int) -> int:
+    """运行时算 effective top_k：base + (n_focuses - 1) * 2，单 focus 维持 base。
+
+    样例（base=5）：1→5, 2→7, 3→9, 4→11, 5→13, 6→15。
+    multi-focus 路由到同一源时，给 eval_only 留足够预算让每个 focus 至少能保 1 条。
+    """
+    if n_focuses <= 1:
+        return base_top_k
+    return base_top_k + (n_focuses - 1) * 2
 
 
 # ── 共用字面量 ──────────────────────────────────────────────────────────────
@@ -61,6 +92,25 @@ EVAL_RUBRIC_BLOCK = """\
 
 ## 信息密度偏好
 优先选择包含具体数据（数字、表格、明确事实）而非泛泛描述的 chunks。
+
+## 多 focus 全面评估（multi-focus eval coverage）
+
+当 focuses_block 含 **2 个或更多 focuses** 时（本源被 router 派活 ≥2 个 focus）：
+
+- **必须对每个 focus 的候选都做评估**，不允许整段忽略某个 focus 的 chunks。
+- 评估完成后，``top_k_chunk_ids`` 应该体现"我已经看过所有 focus"的态度：
+  · 哪怕某 focus 候选整体偏弱、你判定它们都只是 noise / 边缘相关，**也应把该
+    focus 的最强候选 1-2 条放进 top_k 并如实评为 noise**，让下游能看到"已查过、确无强证据"，
+    而不是把该 focus 从输出里完全删掉。
+  · 强 focus 自然会拿到更多 critical/important 名额，这是合理的；但弱 focus 也要
+    在 top_k 里有"已评估"的脚印。
+- **tier 必须客观真实**：
+  · 不要为了让某 focus "看起来有覆盖" 就把 noise 强行升级到 important。
+  · critical / important / noise 仅由【A】回答完整度 +【B】时间符合性 +【C】角度对齐
+    决定，与 focus 之间的分配预算无关。
+  · 若一条 chunk 对应该 focus 实际只是 background，老老实实评 noise。
+- ``answered_focuses`` 如实填：一条 chunk 同时回答多 focus 时全部列出；只命中其
+  ``target_focus`` 主 focus 也只列那一个；连主 focus 都答不上则该字段为 ``[]``。
 """
 
 
@@ -146,6 +196,30 @@ def build_eval_only_model(source_top_k: int) -> Type[BaseModel]:
         tiers=(
             List[TierAssignment],
             Field(..., description="对 top_k_chunk_ids 中每个 id 的 tier 赋值"),
+        ),
+    )
+
+
+def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]) -> Type[BaseModel]:
+    """plan_eval 输出 schema 工厂（共享版，4 个源共用）。
+
+    ``sub_query_item_cls`` 是各源自己定义的 SubQueryItem，描述 ``replan_queries``
+    每条的字段集合（bailian/feishu/google/notion 各自有不同的可调字段）。
+    """
+    return create_model(  # type: ignore[call-overload]
+        f"PlanEvalOutputK{source_top_k}",
+        decision=(Decision, Field(..., description="continue=继续 replan，stop=终止并给 top_k")),
+        replan_queries=(
+            Optional[List[sub_query_item_cls]],  # type: ignore[valid-type]
+            Field(default=None, description="decision=continue 时必填"),
+        ),
+        top_k_chunk_ids=(
+            Optional[List[str]],
+            Field(default=None, max_length=source_top_k, description="decision=stop 时必填"),
+        ),
+        tiers=(
+            Optional[List[TierAssignment]],
+            Field(default=None, description="decision=stop 时必填"),
         ),
     )
 

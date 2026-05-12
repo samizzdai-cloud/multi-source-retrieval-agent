@@ -25,24 +25,70 @@ logger = logging.getLogger(__name__)
 
 
 # Module-level helper: call external API with exponential backoff on rate-limit
-def _api_call_with_backoff(func, *f_args, max_attempts: int = 5, **f_kwargs):
+def _api_call_with_backoff(
+    func, *f_args,
+    max_attempts: int = 5,
+    per_call_timeout_s: float | None = None,
+    **f_kwargs,
+):
+    """带 exp-backoff 的 API 调用 wrapper。
+
+    重试触发条件：
+      · ``99991400``：飞书 app-level 限流
+      · ``90235`` / ``"data not ready"``：暂态错误（cache 未刷新、跨机房同步 lag），
+        本地实测 1-2s 后大概率成功，作为可恢复错误处理
+      · HTTP ``429`` / ``"rate limit"`` / ``"request trigger frequency"``
+
+    backoff 策略：
+      · 90235 暂态：固定快速（0.5 + 0.5·attempt + jitter），最大 1.5s——这种错误
+        通常 1s 就好，不需要长 backoff
+      · 限流类：指数 backoff (min(10, 2^n + jitter))
+
+    Args:
+        func: 待调用函数（必须接受 ``timeout`` kwarg 才能用 per_call_timeout_s）
+        per_call_timeout_s: 注入到 func 的 ``timeout`` kwarg（仅当 caller 没显式传
+            timeout 时生效）。配合上层 asyncio.wait_for 的总预算用——例如总预算 8s
+            时设 3.0，单次 3s 内失败留时间给 2-3 次重试。
+        max_attempts: 最大尝试次数（含首次），默认 5
+    """
     last_exc = None
+    if per_call_timeout_s is not None and "timeout" not in f_kwargs:
+        f_kwargs["timeout"] = per_call_timeout_s
+
     for attempt in range(max_attempts):
         try:
             return func(*f_args, **f_kwargs)
         except Exception as e:
             last_exc = e
             s = str(e)
-            if "99991400" in s or "rate limit" in s.lower() or "request trigger frequency" in s.lower() or "429" in s:
-                backoff = min(10.0, (2 ** attempt) + random.random())
-                logger.warning(
-                    "sheet_reader: API rate-limited on %s (attempt %d/%d), backing off %.2fs",
-                    getattr(func, "__name__", str(func)), attempt + 1, max_attempts, backoff,
-                )
-                time.sleep(backoff)
-                continue
-            else:
+            sl = s.lower()
+            is_rate_limit = (
+                "99991400" in s
+                or "rate limit" in sl
+                or "request trigger frequency" in sl
+                or "429" in s
+            )
+            is_transient = (
+                "90235" in s
+                or "data not ready" in sl
+            )
+            if not (is_rate_limit or is_transient) or attempt == max_attempts - 1:
                 raise
+
+            if is_transient:
+                # 暂态错误：固定快速 backoff（实测 0.5-1.5s 就好）
+                backoff = min(1.5, 0.5 + 0.5 * attempt + random.random() * 0.3)
+                err_kind = "transient(90235)"
+            else:
+                # 限流：指数 backoff
+                backoff = min(10.0, (2 ** attempt) + random.random())
+                err_kind = "rate-limited"
+            logger.warning(
+                "sheet_reader: %s on %s (attempt %d/%d), backing off %.2fs (err=%.60s)",
+                err_kind, getattr(func, "__name__", str(func)),
+                attempt + 1, max_attempts, backoff, s,
+            )
+            time.sleep(backoff)
     raise last_exc
 
 # ── 配置 ──────────────────────────────────────────────────────────────────────
@@ -428,7 +474,10 @@ def _read_single_sheet(
         visible_tabs = [t for t in cached_tabs if not t.get("hidden")]
     else:
         try:
-            tabs = _api_call_with_backoff(client.query_all_sheets_metadata, spreadsheet_token)
+            tabs = _api_call_with_backoff(
+                client.query_all_sheets_metadata, spreadsheet_token,
+                per_call_timeout_s=3.0,
+            )
         except Exception as e:
             logger.warning("sheet_reader: metadata failed for %s: %s", spreadsheet_token, e)
             return []
@@ -495,7 +544,10 @@ def _read_single_tab(
         # 小表：全量读取
         range_str = f"{sheet_id}!A1:{number_to_column(col_count - 1)}{row_count}"
         try:
-            rows = _api_call_with_backoff(client.read_sheet_range, spreadsheet_token, range_str)
+            rows = _api_call_with_backoff(
+                client.read_sheet_range, spreadsheet_token, range_str,
+                per_call_timeout_s=3.0,
+            )
         except Exception:
             return []
         rows, effective_rows = _trim_rows(rows)
@@ -505,22 +557,37 @@ def _read_single_tab(
         sections = _split_sections(rows)
     else:
         # 大表：Find API 定位
+        # find_cells 走的是 sheets v2 端点（与 docx 99991400 桶**不共享**，
+        # 服务端有独立 QPS）。多个 keyword 并行调用，wall-clock 由 N×单次 降到 1×单次。
+        # 实测：query='nubia DTC 服务' → 3 个 keyword，从串行 3×6s ≈ 18s 降到 ~6s。
         hit_rows_set = set()
         range_str = f"{sheet_id}!A1:{number_to_column(col_count - 1)}{row_count}"
-        for kw in keywords:
+
+        def _find_one(kw: str) -> List[str]:
             try:
-                cells = _api_call_with_backoff(client.find_cells, spreadsheet_token, sheet_id, range_str, kw)
+                return _api_call_with_backoff(
+                    client.find_cells, spreadsheet_token, sheet_id, range_str, kw,
+                ) or []
             except Exception:
-                cells = []
-            for cell_ref in cells:
-                r, c = _parse_cell_ref(cell_ref)
-                hit_rows_set.add(r)
+                return []
+
+        if keywords:
+            # 单进程内的轻量 worker pool，仅覆盖此 tab 的 find_cells 调用
+            with ThreadPoolExecutor(max_workers=min(len(keywords), 4)) as kw_ex:
+                future_map = {kw_ex.submit(_find_one, kw): kw for kw in keywords}
+                for fut in as_completed(future_map):
+                    for cell_ref in fut.result():
+                        r, _c = _parse_cell_ref(cell_ref)
+                        hit_rows_set.add(r)
 
         if not hit_rows_set:
             # Find 无命中 → 读取前 50 行
             range_str = f"{sheet_id}!A1:{number_to_column(col_count - 1)}{min(row_count, 50)}"
             try:
-                rows = _api_call_with_backoff(client.read_sheet_range, spreadsheet_token, range_str)
+                rows = _api_call_with_backoff(
+                    client.read_sheet_range, spreadsheet_token, range_str,
+                    per_call_timeout_s=3.0,
+                )
             except Exception:
                 return []
             rows, _ = _trim_rows(rows)
@@ -528,7 +595,10 @@ def _read_single_tab(
         else:
             # 读取全量（大表也需全量来正确分割 section）
             try:
-                rows = _api_call_with_backoff(client.read_sheet_range, spreadsheet_token, range_str)
+                rows = _api_call_with_backoff(
+                    client.read_sheet_range, spreadsheet_token, range_str,
+                    per_call_timeout_s=3.0,
+                )
             except Exception:
                 return []
             rows, _ = _trim_rows(rows)

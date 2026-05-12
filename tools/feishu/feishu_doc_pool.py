@@ -55,11 +55,16 @@ class FeishuDocPool:
         uat: str,
         query_type: str = "structured",
         executor: Optional[concurrent.futures.Executor] = None,
+        lite_block_only: bool = False,
     ):
         self.uat = uat
         self.default_query_type = query_type
         # 注入的源专属线程池；None 时走 asyncio 默认全局池（向后兼容）
         self._executor = executor
+        # lite 模式专用：block_api 分流文档仅调用 list_document_blocks，跳过
+        # IO 块的 sheet/bitable/whiteboard 扩展 API + comments。所有 99991400
+        # 共享桶预算都给主路径，避免 5 qps 桶被次要项稀释。
+        self._lite_block_only = bool(lite_block_only)
 
         # 共享缓存: doc_id → List[Chunk]
         self._doc_chunks: Dict[str, List[Chunk]] = {}
@@ -366,7 +371,11 @@ class FeishuDocPool:
                             query=self._doc_query.get(doc_id, ""),
                             candidates=[doc],
                             user_access_token=self.uat,
-                            cfg=PipelineConfig(max_candidates=1, skip_scoring=True),
+                            cfg=PipelineConfig(
+                                max_candidates=1,
+                                skip_scoring=True,
+                                lite_block_only=self._lite_block_only,
+                            ),
                         )
                         # 转换 ChunkResult → Chunk（保留原始格式）
                         chunks = []

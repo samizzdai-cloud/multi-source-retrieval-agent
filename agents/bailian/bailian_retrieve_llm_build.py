@@ -4,7 +4,11 @@ from typing import List, Literal, Optional, Type
 from pydantic import BaseModel, Field, create_model
 
 from google.adk.agents.llm_agent import LlmAgent
-from tools.core.llm_contracts import MODEL, Decision, TierAssignment, build_eval_only_model, EVAL_RUBRIC_BLOCK
+from tools.core.llm_contracts import (
+    MODEL, Decision, TierAssignment, build_eval_only_model, build_plan_eval_model,
+    EVAL_RUBRIC_BLOCK, MULTI_FOCUS_TOP_K_EXTRA,
+    AGENT_CFG_EVAL_ONLY, AGENT_CFG_PLAN_ONLY, AGENT_CFG_PLAN_EVAL,
+)
 from tools.core.source_query_config import ENTITY_FIDELITY_BLOCK
 
 # ============================================================================
@@ -20,15 +24,6 @@ class SubQueryItem(BaseModel):
 
 class PlanOnlyOutput(BaseModel):
     sub_queries: List[SubQueryItem] = Field(..., description="按 focus 拆解出的子查询列表")
-
-def build_plan_eval_model(source_top_k: int) -> Type[BaseModel]:
-    return create_model(
-        f"PlanEvalOutputK{source_top_k}",
-        decision=(Decision, Field(..., description="continue=继续 replan，stop=终止并给 top_k")),
-        replan_queries=(Optional[List[SubQueryItem]], Field(default=None, description="decision=continue 时必填")),
-        top_k_chunk_ids=(Optional[List[str]], Field(default=None, max_length=source_top_k, description="decision=stop 时必填")),
-        tiers=(Optional[List[TierAssignment]], Field(default=None, description="decision=stop 时必填")),
-    )
 
 # ============================================================================
 # Prompts
@@ -107,14 +102,18 @@ def build_bailian_plan_only_agent() -> Optional[LlmAgent]:
         model=MODEL,
         instruction=PLAN_ONLY_INSTRUCTION,
         output_schema=PlanOnlyOutput,
+        generate_content_config=AGENT_CFG_PLAN_ONLY,
     )
 
 def build_bailian_eval_only_agent(source_top_k: int) -> LlmAgent:
+    # Schema cap 留出 multi-focus 动态预算空间（base + EXTRA），运行时由
+    # SourceAgent._effective_source_top_k 决定实际 effective N（≤ schema cap）。
     return LlmAgent(
         name="bailian_eval_only",
         model=MODEL,
         instruction=EVAL_ONLY_INSTRUCTION,
-        output_schema=build_eval_only_model(source_top_k),
+        output_schema=build_eval_only_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA),
+        generate_content_config=AGENT_CFG_EVAL_ONLY,
     )
 
 def build_bailian_plan_eval_agent(source_top_k: int) -> Optional[LlmAgent]:
@@ -122,5 +121,6 @@ def build_bailian_plan_eval_agent(source_top_k: int) -> Optional[LlmAgent]:
         name="bailian_plan_eval",
         model=MODEL,
         instruction=PLAN_EVAL_INSTRUCTION,
-        output_schema=build_plan_eval_model(source_top_k),
+        output_schema=build_plan_eval_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA, SubQueryItem),
+        generate_content_config=AGENT_CFG_PLAN_EVAL,
     )

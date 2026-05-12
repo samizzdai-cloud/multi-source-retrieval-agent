@@ -536,10 +536,17 @@ def build_sheet_chunk(
 
     try:
         from .basic_tool.sheet_utils import parse_sheet_token, number_to_column
+        from .sheet_reader import _api_call_with_backoff
         spreadsheet_token, sheet_id = parse_sheet_token(raw_token)
         # 限制范围：嵌入式 sheet 只读前 100 行 × 20 列，避免大表超时
         range_str = f"{sheet_id}!A1:{number_to_column(19)}100"
-        rows_raw = client.read_sheet_range(spreadsheet_token, range_str)
+        # 走 sheet_reader 共用的 retry wrapper：3s per-call timeout + 90235 重试
+        # 配合上层 8s 总预算（type30 是 docx Stage 4 内部调用，没有外层 wait_for；
+        # 故 max_attempts=3 让最坏 3×3 = 9s 受 stage timeout 兜底）
+        rows_raw = _api_call_with_backoff(
+            client.read_sheet_range, spreadsheet_token, range_str,
+            per_call_timeout_s=3.0, max_attempts=3,
+        )
     except Exception as e:
         # 结构化失败日志（S2.1 观测），便于统一 grep 分析是否值得做短期缓存
         msg = str(e)

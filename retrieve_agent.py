@@ -31,10 +31,22 @@ from google.adk.events.event_actions import EventActions
 from google.genai import types as genai_types
 from typing_extensions import override
 
-from tools.core.models import ChunkEntry, RetrieveConfig, SourceAgentConfig, SourceConfig
+from tools.core.models import (
+    BailianIndexCatalog,
+    ChunkEntry,
+    RetrieveConfig,
+    SourceAgentConfig,
+    SourceConfig,
+)
 from tools.core.query_planner import plan_query
+from tools.core.global_planner import PlannerFailure, plan_global
+from tools.core.planner_runner import (
+    NormalizedPlan,
+    build_default_validators,
+    normalize_plan,
+)
 
-from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult
+from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult, SubQuery
 from tools.core.eval_layer import build_eval_layer
 from tools.core.focus_board import FocusBoard
 from tools.core.final_assembler import (
@@ -47,21 +59,17 @@ logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Global planner：v2.1 直接返回 flat focuses（FG 下线）
+# Planner v1 (legacy fallback)：仅产 flat focuses，dispatch 时各源走老 plan_only_LLM
 # ─────────────────────────────────────────────────────────────────────
-def _prepare_focuses(
+def _prepare_focuses_v1(
     query: str,
     available_sources: List[str],
     bailian_allowed_indexes: Optional[List[str]] = None,
 ) -> List[Focus]:
-    """调用 query_planner，把 ``QueryPlan.focuses`` 映射到 runtime ``Focus``。
+    """老 v1 路径：``query_planner.plan_query`` → ``List[Focus(text, targets)]``。
 
-    v2.1 QueryPlan 已是 flat 结构（PlanFocus{text, targets}），本函数仅负责：
-    - 补上 runtime ``focus_id``（``focus_0`` / ``focus_1`` ...）
-    - 对 targets 再做一次交集兜底（planner 内已做，这里是 defense-in-depth）
-
-    SourceAgent 各自的 plan_only LLM 再基于 focus.text + 源专业规则产出
-    sub_queries（含 tags / indexes / time_filter），不依赖 planner 下发 hints。
+    仅在 v2 ``global_planner`` 整盘失败或 ``force_v1=True`` 时使用；
+    各源 ``plan_only_LLM`` 会基于 focus.text 自主产出 sub_queries（与重构前一致）。
     """
     try:
         plan = plan_query(
@@ -71,7 +79,7 @@ def _prepare_focuses(
             session_context="",
         )
     except Exception as e:
-        logger.warning("plan_query failed (%s), fallback to single focus", e)
+        logger.warning("plan_query v1 failed (%s), fallback to single focus", e)
         return [Focus(focus_id="focus_0", text=query, targets=list(available_sources))]
 
     focuses: List[Focus] = []
@@ -91,7 +99,102 @@ def _prepare_focuses(
 
 
 # 兼容旧名字（防外部 import）
-_flatten_focuses = _prepare_focuses
+_prepare_focuses = _prepare_focuses_v1
+_flatten_focuses = _prepare_focuses_v1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Planner v2.2：global_planner + planner_runner 双层（替代 v1 主链）
+# ─────────────────────────────────────────────────────────────────────
+def _prepare_plan(
+    query: str,
+    available_sources: List[str],
+    config: RetrieveConfig,
+) -> NormalizedPlan:
+    """v2.2 主入口：global_planner 直出 GlobalPlan → runner 校验/转译 → NormalizedPlan。
+
+    决策路径（按优先级）：
+      1. ``config.global_planner.force_v1=True`` → 直接走 v1（不调 v2 LLM）
+      2. 尝试 v2 ``plan_global``；若抛 ``PlannerFailure`` 且 ``fallback_to_v1=True`` → 走 v1
+      3. runner.normalize_plan 后若所有 focus 在所有源都进了 replan_needed（即整盘
+         语义偏差）且 ``fallback_to_v1=True`` → 走 v1
+      4. 其它 → 返 NormalizedPlan（含 pre_planned_by_source + replan_needed）
+    """
+    gp_cfg = config.global_planner
+    catalog = config.bailian_catalog
+
+    # 路径 1：硬开关
+    if gp_cfg.force_v1:
+        logger.info("global_planner: force_v1=True → using v1 path")
+        return _normalize_v1_to_plan(query, available_sources, catalog)
+
+    # 路径 2：v2 LLM
+    try:
+        plan = plan_global(
+            query=query,
+            enabled_sources=available_sources,
+            cfg=gp_cfg,
+            bailian_catalog=catalog,
+            session_context="",
+        )
+    except PlannerFailure as e:
+        if gp_cfg.fallback_to_v1:
+            logger.warning(
+                "global_planner v2 failed (%s) → fallback_to_v1",
+                e,
+            )
+            return _normalize_v1_to_plan(query, available_sources, catalog)
+        # 不允许回退：抛出整盘失败，retrieve_agent 上层会做兜底（单 focus 广播）
+        raise
+
+    validators = build_default_validators(bailian_catalog=catalog, enabled_sources=available_sources)
+    normalized = normalize_plan(plan, validators, enabled_sources=available_sources)
+
+    # 路径 3：整盘语义偏差 —— 所有 source 都没拿到任何 pre_planned sub_query
+    all_empty = all(not v for v in normalized.pre_planned_by_source.values())
+    if all_empty:
+        if gp_cfg.fallback_to_v1:
+            logger.warning(
+                "global_planner v2 produced 0 pre_planned sub_queries across all sources "
+                "(rejected=%d) → fallback_to_v1",
+                normalized.rejected_count,
+            )
+            return _normalize_v1_to_plan(query, available_sources, catalog)
+        logger.warning(
+            "global_planner v2 produced 0 pre_planned sub_queries; fallback disabled, "
+            "will rely on per-focus replan via plan_only_LLM"
+        )
+
+    return normalized
+
+
+def _normalize_v1_to_plan(
+    query: str,
+    available_sources: List[str],
+    bailian_catalog: Optional[BailianIndexCatalog],
+) -> NormalizedPlan:
+    """v1 路径包装成 NormalizedPlan：focuses 全部进 ``replan_needed``，
+    让各源走老 plan_only_LLM；行为与重构前完全一致。
+
+    与"完全不传 kwarg"的微妙差异：
+    - 不传 kwarg 时 SourceAgent._plan 走纯老路径（无 replan_focuses）
+    - 这里走 replan_focuses 路径——_plan 会调 _plan_via_plan_only_llm(replan_focuses)
+    两者最终都跑老 plan_only_LLM，语义等价；走 replan_focuses 在日志上更清晰
+    （能区分"v2 失败回落"与"v1 原生"）。
+    """
+    bailian_allowed = bailian_catalog.allowed if bailian_catalog else None
+    focuses = _prepare_focuses_v1(query, available_sources, bailian_allowed)
+    replan_needed: Dict[str, List[Focus]] = {s: [] for s in available_sources}
+    for f in focuses:
+        for tgt in f.targets:
+            if tgt in replan_needed:
+                replan_needed[tgt].append(f)
+    return NormalizedPlan(
+        focuses=focuses,
+        pre_planned_by_source={s: [] for s in available_sources},
+        replan_needed=replan_needed,
+        rejected_count=0,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -220,6 +323,8 @@ async def _dispatch_sources(
     sources: Dict[str, SourceAgent],
     focuses: List[Focus],
     focus_board: Optional[FocusBoard] = None,
+    pre_planned_by_source: Optional[Dict[str, List[SubQuery]]] = None,
+    replan_needed: Optional[Dict[str, List[Focus]]] = None,
 ) -> List[SourceAgentResult]:
     """按 focus.targets 把 focuses 路由到对应 SourceAgent 后并发执行。
 
@@ -227,6 +332,11 @@ async def _dispatch_sources(
     的源被整体跳过（返回空结果但保留在 per_source 里，供调用方统计）。
 
     P4: 在每源完成后立即向 ``focus_board`` 回填，跨源共享 focus 满足状态。
+
+    v2.2 新增：
+    - ``pre_planned_by_source``: 该源 planner_runner 已校验通过的 SubQuery 列表
+    - ``replan_needed``: 该源被 validator 整 focus 整源 reject 的 Focus 列表
+    两者都为 None 时回退老 v1 行为（SourceAgent._plan 走老 plan_only_LLM）。
     """
     # 按源拆 focuses
     per_source_focuses: Dict[str, List[Focus]] = {name: [] for name in sources}
@@ -239,15 +349,29 @@ async def _dispatch_sources(
 
     async def _one(name: str, agent: SourceAgent) -> SourceAgentResult:
         fs = per_source_focuses.get(name) or []
-        if not fs:
+        # v2.2 注入位
+        pre_planned = (pre_planned_by_source or {}).get(name)
+        replan = (replan_needed or {}).get(name)
+        if not fs and not pre_planned and not replan:
             logger.info("[%s] no focus routed, skip", name)
             return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=0.0)
         timeout_s = agent.cfg.source_timeout_s
         # P4: 把 focus_board 注入 source_agent（plan_eval focus-aware 用）
         if focus_board is not None:
             setattr(agent, "_focus_board", focus_board)
+        logger.info(
+            "[%s] dispatch: focuses=%d pre_planned_sq=%d replan_focuses=%d",
+            name, len(fs), len(pre_planned or []), len(replan or []),
+        )
         try:
-            result = await asyncio.wait_for(agent.run(fs), timeout=timeout_s)
+            result = await asyncio.wait_for(
+                agent.run(
+                    fs,
+                    pre_planned_sub_queries=pre_planned,
+                    replan_focuses=replan,
+                ),
+                timeout=timeout_s,
+            )
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
             return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
@@ -306,14 +430,8 @@ class RetrieveAgent(BaseAgent):
             f"[retrieve] start preset={self.config.preset} sources={','.join(enabled)}",
         )
 
-        # 1. Global plan → focuses (v2.1 flat, FG retired)
+        # 1. Global plan (v2.2: global_planner + planner_runner)
         plan_started = time.perf_counter()
-        
-        # 将 bailian 的限制名单透传给 Global Planner
-        bailian_allowed = None
-        if "bailian" in self.sources:
-            # self.sources["bailian"] 是 BailianSourceAgent 的实例
-            bailian_allowed = getattr(self.sources["bailian"], "_allowed_indexes", None)
 
         # feishu open_id: 配置优先注入；无配置时不请求，lazy 到 FeishuSourceAgent 内部按需获取
         if "feishu" in self.sources:
@@ -325,28 +443,48 @@ class RetrieveAgent(BaseAgent):
         # Google Drive 顶级空间懒加载：仅当 SourceAgent 内部分发到 personal_recent
         # 类型 sub_query 时才发起 list_drive_spaces_async，普通 query 不付出此代价。
 
-        focuses = await asyncio.to_thread(
-            _prepare_focuses,
+        normalized: NormalizedPlan = await asyncio.to_thread(
+            _prepare_plan,
             query,
             enabled,
-            bailian_allowed,
+            self.config,
         )
+        focuses = normalized.focuses
+        if not focuses:
+            # planner 没产任何 focus（极端 fallback 也失败）→ 单 focus 广播兜底
+            logger.warning("RetrieveAgent: planner produced 0 focuses, broadcasting single focus")
+            focuses = [Focus(focus_id="focus_0", text=query, targets=list(enabled))]
+            normalized = NormalizedPlan(
+                focuses=focuses,
+                pre_planned_by_source={s: [] for s in enabled},
+                replan_needed={s: list(focuses) for s in enabled},
+                rejected_count=0,
+            )
+
         logger.info(
-            "TIMING retrieve.prepare_focuses focuses=%d ms=%.1f",
+            "TIMING retrieve.prepare_plan focuses=%d pre_planned=%s replan_needed=%s rejected=%d ms=%.1f",
             len(focuses),
+            {s: len(v) for s, v in normalized.pre_planned_by_source.items()},
+            {s: len(v) for s, v in normalized.replan_needed.items()},
+            normalized.rejected_count,
             (time.perf_counter() - plan_started) * 1000.0,
         )
         yield self._make_text_event(
             ctx,
             f"[retrieve] plan focuses={len(focuses)} total_ms={(time.monotonic() - start) * 1000:.0f}",
         )
-        logger.info("RetrieveAgent: %d focuses produced", len(focuses))
 
         # 2. Dispatch（每源超时独立走 SourceAgent.cfg.source_timeout_s）
         # P4: 实例化 FocusBoard，跨源共享 focus 满足状态（plan_eval focus-aware 与早停依赖）
         focus_board = FocusBoard.from_focuses(focuses, quota=self.config.focus_quota)
         dispatch_started = time.perf_counter()
-        per_source = await _dispatch_sources(self.sources, focuses, focus_board=focus_board)
+        per_source = await _dispatch_sources(
+            self.sources,
+            focuses,
+            focus_board=focus_board,
+            pre_planned_by_source=normalized.pre_planned_by_source,
+            replan_needed=normalized.replan_needed,
+        )
         # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
         for fid in focus_board.unsatisfied_focus_ids():
             focus_board.mark_terminal(fid, status="noise_only")
@@ -383,8 +521,13 @@ class RetrieveAgent(BaseAgent):
         focus_quota = self.config.focus_quota
 
         if self.config.eval_layer_active:
-            eval_layer = build_eval_layer(self.config.eval_layer_effective_mode)
-            selected = eval_layer.rank(merged, focuses, final_top_k)
+            eval_layer = build_eval_layer(
+                self.config.eval_layer_effective_mode,
+                model=self.config.MODEL,
+            )
+            # LlmEvalLayer.rank() 是同步阻塞调用（含 LLM RTT），通过 to_thread 不阻塞事件循环；
+            # RuleEvalLayer.rank() 亦是同步，同样走 to_thread 保持一致（开销可忽略）。
+            selected = await asyncio.to_thread(eval_layer.rank, merged, focuses, final_top_k)
             logger.info(
                 "TIMING retrieve.eval_layer candidates=%d picked=%d cap=%d mode=%s ms=%.1f",
                 len(merged), len(selected), final_top_k, self.config.eval_layer_effective_mode,
@@ -472,6 +615,9 @@ def build_retrieve_agent(
     from tools.bailian.bailian_retrieve import get_all_configured_indexes
 
     sources: Dict[str, SourceAgent] = {}
+    # v2.2：bailian_catalog 在构建期一次性派生，复用给 SourceAgent 与 GlobalPlanner
+    bailian_allowed_resolved: List[str] = []
+    bailian_symbol_to_kb: Dict[str, str] = {}
     for src in cfg.enabled_sources:
         sa_cfg = cfg.effective_config_for(src)
         if src == "bailian":
@@ -482,7 +628,10 @@ def build_retrieve_agent(
                 allowed = [name for name in allowed_names if name in all_configured]
             else:
                 allowed = list(all_configured.keys())
-                
+
+            bailian_allowed_resolved = list(allowed)
+            bailian_symbol_to_kb = {k: v for k, v in all_configured.items() if k in allowed}
+
             sources[src] = BailianSourceAgent(
                 cfg=sa_cfg,
                 allowed_indexes=allowed,
@@ -521,6 +670,14 @@ def build_retrieve_agent(
     if not sources:
         raise RuntimeError("RetrieveAgent: no sources enabled")
 
+    # v2.2：把 bailian symbolic index 信息固化到 RetrieveConfig.bailian_catalog，
+    # global_planner 装 prompt 时用；调用方若已显式注入则尊重外部覆盖。
+    if cfg.bailian_catalog is None and "bailian" in sources:
+        cfg.bailian_catalog = BailianIndexCatalog(
+            allowed=bailian_allowed_resolved,
+            symbol_to_kb=bailian_symbol_to_kb,
+        )
+
     return RetrieveAgent(
         name=name,
         description="v1 多源并行检索（spec_plan v1）",
@@ -543,7 +700,9 @@ def _build_feishu_source_agent(
     doc_pool = None
     table_pool = None
     if uat:
-        doc_pool = FeishuDocPool(uat=uat)
+        # lite preset：block_api 分流文档只调 list_document_blocks，跳过
+        # sheet/bitable/whiteboard/comments 扩展 API（节省 99991400 共享桶预算）
+        doc_pool = FeishuDocPool(uat=uat, lite_block_only=(preset == "lite"))
         table_pool = TablePool(uat=uat)
     else:
         logger.warning("FeishuSourceAgent: FEISHU_UAT empty, proceeding without pools")

@@ -491,21 +491,38 @@ def _select_chunks_for_sub_query(
 def _unified_to_chunk_entry(
     uc: UnifiedChunk, sub_query: str, target_focus: str,
 ) -> ChunkEntry:
-    """UnifiedChunk → ChunkEntry。id 设计见 spec_plan §3。"""
+    """UnifiedChunk → ChunkEntry。id 设计：
+
+    下层 reader（slide/sheet/excel/csv/gmail）已经把 chunk_id 构造为自描述短 id：
+        google:slide:{file_id}:{idx}
+        google:sheet:{file_id}:{chunk_counter}
+        google:gmail:body:{thread_id}:{i}
+        ...
+    单 id 约 50 字符。早期实现把它再包一层 ``google:{url}:{node_id}`` 导致 id 膨胀到
+    175+ 字符（Drive URL 含 ``#slide=id.xxx`` 锚点又长），eval_only LLM 输出 top_k_chunk_ids
+    数组时频繁触顶 max_output_tokens 导致 JSON 截断。本函数信任 reader 的 chunk_id，
+    直接复用作为 cid；仅当 reader 没产 chunk_id（理论极少）才用 file_id+hash 兜底。
+    """
     meta = uc.metadata or {}
-    doc_id = (
-        meta.get("url")
-        or uc.source_url
-        or meta.get("doc_id")
-        or uc.source_name
-        or "unknown"
-    )
-    node_id = (
-        meta.get("anchor")
-        or meta.get("chunk_id")
-        or hashlib.md5((uc.text or "").encode("utf-8")).hexdigest()[:10]
-    )
-    cid = f"google:{doc_id}:{node_id}"
+    node_id = meta.get("anchor") or meta.get("chunk_id") or ""
+
+    if isinstance(node_id, str) and node_id.startswith("google:"):
+        # 复用 reader 自描述短 id（含 type + file_id + idx），不重新包前缀
+        cid = node_id
+    else:
+        # 兜底路径：reader 没产 chunk_id。用 file_id（短）而不是 URL（长）做主键。
+        file_id = (
+            meta.get("file_id")
+            or meta.get("drive_file_id")
+            or meta.get("doc_id")
+            or uc.source_name
+            or "unknown"
+        )
+        fallback_node = (
+            str(node_id)
+            or hashlib.md5((uc.text or "").encode("utf-8")).hexdigest()[:10]
+        )
+        cid = f"google:{file_id}:{fallback_node}"
 
     merged_meta = {
         **meta,

@@ -476,126 +476,6 @@ def _default_table_parent_score(rank: int) -> float:
     return max(0.0, 1.0 - (rank - 1) * 0.03)
 
 
-async def _select_table_children_for_parent(
-    parent: dict,
-    *,
-    token: str,
-    focus_id: str,
-    focus_text: str,
-    sub_query: str,
-    sub_query_id: str,
-    query_type: str,
-    parent_rank: int,
-    table_pool: "Optional[object]" = None,
-) -> Optional[dict]:
-    started = time.perf_counter()
-    children = await _fetch_table_structure(parent, token=token, table_pool=table_pool)
-    if not children:
-        logger.info(
-            "TIMING feishu.table_child_select parent=%s doc_type=%s children=0 selected=0 ms=%.1f",
-            parent.get("id", "")[:16],
-            parent.get("doc_type", ""),
-            _elapsed_ms(started),
-        )
-        return None
-
-    question = build_focus_sub_query_question(focus_text or sub_query, sub_query)
-    parent_doc_type = str(parent.get("doc_type", "") or "").upper()
-    if parent_doc_type == "SHEET":
-        child_candidates = _build_sheet_structure_candidates(parent, children)
-        child_id_field = "selected_sheet_ids"
-        child_title_field = "selected_sheet_titles"
-        child_id_key = "sheet_id"
-    else:
-        child_candidates = _build_bitable_structure_candidates(parent, children)
-        child_id_field = "selected_table_ids"
-        child_title_field = "selected_table_titles"
-        child_id_key = "table_id"
-
-    selected_children: List[dict]
-    parent_score = _default_table_parent_score(parent_rank)
-    parent_child_rank = parent_rank
-    if len(child_candidates) <= TABLE_CHILD_SELECT_TOP_K:
-        selected_children = child_candidates
-    else:
-        rerank_result = select_search_candidates(
-            query=question,
-            candidates=child_candidates,
-            top_n=TABLE_CHILD_SELECT_TOP_K,
-            score_threshold=TABLE_CHILD_SCORE_THRESHOLD,
-            min_keep=TABLE_CHILD_MIN_KEEP,
-            instruct_template="qa",
-        )
-        if rerank_result.get("status") == "success":
-            selected_children = list(rerank_result.get("selected_candidates") or [])
-            selected_items = list(rerank_result.get("selected_results") or [])
-            if selected_items:
-                parent_score = float(selected_items[0].get("relevance_score", parent_score) or parent_score)
-                parent_child_rank = int(selected_items[0].get("rank", parent_rank) or parent_rank)
-        else:
-            logger.warning(
-                "feishu_retrieve: table child rerank failed for parent=%s sub_query_id=%s: %s",
-                parent.get("title", ""),
-                sub_query_id or "unknown",
-                rerank_result.get("message"),
-            )
-            selected_children = child_candidates[:TABLE_CHILD_SELECT_TOP_K]
-
-    selected_ids = []
-    selected_titles = []
-    child_title_by_id = {
-        child.get(child_id_key, ""): child.get("title", "") or child.get("name", "") or ""
-        for child in children
-    }
-    for child in selected_children:
-        child_id = child.get("id", "")
-        if not child_id:
-            continue
-        selected_ids.append(child_id)
-        selected_titles.append(child.get("_child_title") or child_title_by_id.get(child_id, ""))
-
-    if not selected_ids:
-        logger.info(
-            "TIMING feishu.table_child_select parent=%s doc_type=%s children=%d selected=0 ms=%.1f",
-            parent.get("id", "")[:16],
-            parent.get("doc_type", ""),
-            len(children),
-            _elapsed_ms(started),
-        )
-        return None
-
-    annotated = _annotate_selected_candidate(
-        parent,
-        focus_id=focus_id,
-        sub_query_id=sub_query_id,
-        score=parent_score,
-        rank=parent_child_rank,
-    )
-    annotated["selected_query_types"] = sorted(
-        set(annotated.get("selected_query_types") or []) | {query_type}
-    )
-    annotated["table_structure_child_count"] = len(children)
-    annotated["table_selected_child_count"] = len(selected_ids)
-    annotated[child_id_field] = _merge_unique_strs(
-        list(annotated.get(child_id_field) or []),
-        selected_ids,
-    )
-    annotated[child_title_field] = _merge_unique_strs(
-        list(annotated.get(child_title_field) or []),
-        selected_titles,
-    )
-    annotated["read_query"] = sub_query
-    logger.info(
-        "TIMING feishu.table_child_select parent=%s doc_type=%s children=%d selected=%d ms=%.1f",
-        parent.get("id", "")[:16],
-        parent.get("doc_type", ""),
-        len(children),
-        len(selected_ids),
-        _elapsed_ms(started),
-    )
-    return annotated
-
-
 def _fallback_select_doc_candidates(
     candidates: List[dict],
     *,
@@ -654,6 +534,19 @@ def _select_doc_candidates_for_sub_query(
                 score=1.0,
                 rank=1,
             )
+        ]
+
+    # 候选 ≤ top_k → 全要：跳过 rerank API（省 300-500ms），按 search 原序赋分。
+    # rerank 仅当候选数 > top_k 才有筛选价值；候选已经少于配额时 rerank 只是排序，
+    # 而下游 chunk-level rerank/eval 会重新打分，doc 顺序对最终结果影响弱。
+    if len(candidates) <= top_k:
+        return [
+            _annotate_selected_candidate(
+                cand, focus_id=focus_id, sub_query_id=sub_query_id,
+                score=max(0.0, 1.0 - rank_idx * 0.05),
+                rank=rank_idx + 1,
+            )
+            for rank_idx, cand in enumerate(candidates)
         ]
 
     result = select_search_candidates(
