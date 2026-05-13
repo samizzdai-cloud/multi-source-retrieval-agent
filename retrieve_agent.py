@@ -58,6 +58,44 @@ from tools.core.final_assembler import (
 logger = logging.getLogger(__name__)
 
 
+def _apply_runtime_config(sc: SourceConfig) -> None:
+    """把显式 SourceConfig 注入运行时依赖，优先于环境变量。"""
+    google_api_key = sc.get("google_api_key", "GOOGLE_API_KEY")
+    gemini_model = sc.get("gemini_model", "GEMINI_MODEL")
+    gemini_fallback_model = sc.get("gemini_fallback_model", "GEMINI_FALLBACK_MODEL")
+    dashscope_api_key = sc.get("dashscope_api_key", "DASHSCOPE_API_KEY")
+    google_credentials_path = sc.get("google_credentials_path", "GOOGLE_CREDENTIALS_PATH")
+    google_token_path = sc.get("google_token_path", "GOOGLE_TOKEN_PATH")
+
+    # ADK LlmAgent 当前通过底层 Google SDK 读取 GOOGLE_API_KEY；这里由 config 注入。
+    if google_api_key:
+        os.environ["GOOGLE_API_KEY"] = google_api_key
+        from tools.core.llm_client import configure_llm_client
+        configure_llm_client(
+            api_key=google_api_key,
+            model=gemini_model or None,
+            fallback_model=gemini_fallback_model,
+        )
+
+    if dashscope_api_key:
+        from tools.core.rerank import configure_rerank_api_key
+        configure_rerank_api_key(dashscope_api_key)
+
+    from tools.bailian.bailian_retrieve import configure_bailian_runtime
+    configure_bailian_runtime(
+        workspace_id=sc.get("bailian_workspace_id", "BAILIAN_WORKSPACE_ID"),
+        access_key_id=sc.get("bailian_access_key_id", "ALIBABA_CLOUD_ACCESS_KEY_ID"),
+        access_key_secret=sc.get("bailian_access_key_secret", "ALIBABA_CLOUD_ACCESS_KEY_SECRET"),
+        index_map=sc.get("bailian_index_map", "BAILIAN_INDEX_MAP"),
+        index_id=sc.get("bailian_index_id", "BAILIAN_INDEX_ID"),
+    )
+
+    if google_credentials_path:
+        os.environ["GOOGLE_CREDENTIALS_PATH"] = google_credentials_path
+    if google_token_path:
+        os.environ["GOOGLE_TOKEN_PATH"] = google_token_path
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Planner v1 (legacy fallback)：仅产 flat focuses，dispatch 时各源走老 plan_only_LLM
 # ─────────────────────────────────────────────────────────────────────
@@ -438,7 +476,7 @@ class RetrieveAgent(BaseAgent):
             configured_open_id = self.source_config.get("feishu_open_id", "FEISHU_OPEN_ID")
             if configured_open_id:
                 self.sources["feishu"]._current_open_id = configured_open_id
-                logger.info("RetrieveAgent: Injected configured Feishu open_id")
+                logger.debug("RetrieveAgent: Injected configured Feishu open_id")
 
         # Google Drive 顶级空间懒加载：仅当 SourceAgent 内部分发到 personal_recent
         # 类型 sub_query 时才发起 list_drive_spaces_async，普通 query 不付出此代价。
@@ -488,7 +526,7 @@ class RetrieveAgent(BaseAgent):
         # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
         for fid in focus_board.unsatisfied_focus_ids():
             focus_board.mark_terminal(fid, status="noise_only")
-        logger.info("FocusBoard final: %s", focus_board.snapshot())
+        logger.debug("FocusBoard final: %s", focus_board.snapshot())
         logger.info(
             "TIMING retrieve.dispatch sources=%d ms=%.1f",
             len(self.sources),
@@ -608,6 +646,8 @@ def build_retrieve_agent(
     """按配置装配 SourceAgent 字典。"""
     cfg = config or RetrieveConfig(enabled_sources=["bailian"])
     sc = source_config or SourceConfig(load_from_env=True)
+    os.environ["RAG_PRESET"] = cfg.preset
+    _apply_runtime_config(sc)
 
     from agents.bailian.bailian_source_agent import BailianSourceAgent
     from agents.google.google_source_agent import GoogleSourceAgent
@@ -654,7 +694,7 @@ def build_retrieve_agent(
                     cred_path=google_credentials_path or None,
                     token_path=google_token_path or None,
                 )
-                logger.info("Google credentials validated successfully.")
+                logger.debug("Google credentials validated successfully.")
             except Exception as e:
                 logger.error("Failed to initialize Google credentials: %s", e)
                 raise RuntimeError("Google Workspace auth failed. Please authorize in terminal.") from e

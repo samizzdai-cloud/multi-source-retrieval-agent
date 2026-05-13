@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass, field, replace
-from typing import ClassVar, Dict, List, Literal, Optional, Set
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Set
 
 
 @dataclass
@@ -17,7 +17,15 @@ class SourceConfig:
     feishu_uat: str = ""
     feishu_open_id: str = ""              # 飞书用户 open_id（用于 author_filter="me" / personal_recent）
     bailian_allowed_indexes: str = ""     # "nubia,hypershell"，空时代表不限制，允许所有注册的知识库
+    bailian_workspace_id: str = ""        # 百炼 workspace_id
+    bailian_access_key_id: str = ""       # 阿里云 AccessKey ID
+    bailian_access_key_secret: str = ""   # 阿里云 AccessKey Secret
+    bailian_index_map: str = ""           # "nubia:idx_a,hypershell:idx_b"
+    bailian_index_id: str = ""            # 旧版单库 fallback
     dashscope_api_key: str = ""           # text-embedding-v4
+    google_api_key: str = ""              # Gemini / ADK 使用的 Google API Key
+    gemini_model: str = ""                # 传统 llm_client 调用默认模型
+    gemini_fallback_model: str = ""       # 传统 llm_client 失败时 fallback 模型
     google_credentials_path: str = ""      # OAuth2 client credentials.json；空时走 GOOGLE_CREDENTIALS_PATH 或默认路径
     google_token_path: str = ""            # OAuth2 token.json；空时走 GOOGLE_TOKEN_PATH 或默认路径
     load_from_env: bool = True            # 开关：True 时空字段 fallback 到 env var
@@ -59,8 +67,22 @@ class AgentConfig:
 
     # ── 百炼凭证 ──────────────────────────────────────────────
     bailian_allowed_indexes: str = ""     # 允许查询的知识库白名单，如 "nubia,hypershell"，空时走全部
+    bailian_workspace_id: str = ""        # 百炼 workspace_id
+    bailian_access_key_id: str = ""       # 阿里云 AccessKey ID
+    bailian_access_key_secret: str = ""   # 阿里云 AccessKey Secret
+    bailian_index_map: str = ""           # "nubia:idx_a,hypershell:idx_b"
+    bailian_index_id: str = ""            # 旧版单库 fallback
+
+    # ── LLM / Rerank 凭证 ─────────────────────────────────────
+    google_api_key: str = ""              # Gemini / ADK 共用 Google API Key
+    gemini_model: str = ""                # 老 llm_client 默认模型，可留空
+    gemini_fallback_model: str = ""       # 老 llm_client fallback 模型，可留空
+    dashscope_api_key: str = ""           # Qwen rerank API key
+
+    # ── Google OAuth 文件路径 ─────────────────────────────────
     google_credentials_path: str = ""      # Google OAuth2 client credentials.json
     google_token_path: str = ""            # Google OAuth2 token.json
+    load_from_env: bool = False            # 外部母程序默认走显式注入，不依赖环境变量
 
     def to_retrieve_config(self) -> "RetrieveConfig":
         """转换为 RetrieveConfig（行为配置）。"""
@@ -75,10 +97,38 @@ class AgentConfig:
             feishu_uat=self.feishu_uat,
             feishu_open_id=self.feishu_open_id,
             bailian_allowed_indexes=self.bailian_allowed_indexes,
+            bailian_workspace_id=self.bailian_workspace_id,
+            bailian_access_key_id=self.bailian_access_key_id,
+            bailian_access_key_secret=self.bailian_access_key_secret,
+            bailian_index_map=self.bailian_index_map,
+            bailian_index_id=self.bailian_index_id,
             google_credentials_path=self.google_credentials_path,
             google_token_path=self.google_token_path,
-            load_from_env=True,           # 空字段始终 fallback 到环境变量
+            dashscope_api_key=self.dashscope_api_key,
+            google_api_key=self.google_api_key,
+            gemini_model=self.gemini_model,
+            gemini_fallback_model=self.gemini_fallback_model,
+            load_from_env=self.load_from_env,
         )
+
+
+@dataclass
+class RetrieveRequest:
+    """单次 retrieve 调用请求。"""
+    user_query: str
+    preset_override: Optional[str] = None
+    enabled_sources_override: Optional[List[str]] = None
+    auth_override: Optional[SourceConfig] = None
+
+
+@dataclass
+class RetrieveInvocationResult:
+    """程序化调用 retrieve_agent 的结构化返回。"""
+    query: str
+    raw_payload: Dict[str, Any] = field(default_factory=dict)
+    chunks: List[Dict[str, Any]] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    progress_events: List[str] = field(default_factory=list)
 
 
 @dataclass

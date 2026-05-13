@@ -175,7 +175,18 @@ def _select_chunks_for_sub_query(
     if not uc_list:
         return []
     cfg = get_chunk_selection_config(query_type)
-    question = build_focus_sub_query_question(focus_text, query)
+    # [V17] chunk-rerank Question = focus_text + brand-only keywords:
+    # 实验 focus_only 显示 5 个 case 大幅提升(Doc3_Q1 37→74, Sheet1_Q1 33→88,
+    # Sheet1_Q2 ✗→94, Bitable1_Q2 ✗→25),但 Bitable1_Q1 失去 brand "Haivivi"
+    # 锚点 → ✓→✗ 退化。
+    # 折中:仍以 focus_text 为主信号,再从 sub_query 抽英文/数字 brand token
+    # (Haivivi/UGC/Z80/ROAS 等) 作补充,避免 brand anchor 丢失。
+    base_q = focus_text or query
+    brand_toks = re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}", query or "")
+    if brand_toks:
+        question = f"{base_q}\nKeywords: {' '.join(brand_toks[:3])}"
+    else:
+        question = base_q
     payloads = [_uc_to_rerank_payload(uc) for uc in uc_list]
     result = select_reranked_chunks(
         query=question, chunks=payloads,
@@ -240,9 +251,19 @@ def _classify_focus_mode(text: str) -> str:
 
 
 def _stabilize_query(sq: SubQuery, focus_text: str, mode: str) -> SubQuery:
-    """如果 LLM 产出的 query 过于泛化，用 focus 锚点词替换。"""
+    """如果 LLM 产出的 query 过于泛化，用 focus 锚点词替换。
+
+    [V13] 已含英文 brand + >=3 token 的 query 视为足够丰富,直接保持原样;
+    避免对 "Haivivi 运营 计划" 这类 broad-but-meaningful query 错误重写,
+    让 Path B variants 在 dual-path 中独立承担 anchor 注入。
+    """
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", (sq.query or "").lower())
     if not tokens:
+        return sq
+    has_english_brand = any(
+        re.fullmatch(r"[a-z][a-z0-9_-]+", t) for t in tokens
+    )
+    if has_english_brand and len(tokens) >= 3:
         return sq
     non_generic = [t for t in tokens if t not in _FEISHU_GENERIC_QUERY_TOKENS]
     brand_only = all(bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", t or "")) for t in non_generic) if non_generic else True
@@ -401,7 +422,7 @@ def _assign_doc_route_hints(doc_list: List[dict], *, min_block: int = 2) -> None
         else:
             c["route_hint"] = "mcp"
             mcp_count += 1
-    logger.info("[feishu] doc route_hint block=%d mcp=%d total=%d",
+    logger.debug("[feishu] doc route_hint block=%d mcp=%d total=%d",
                 block_count, mcp_count, len(doc_list))
 
 
@@ -601,7 +622,7 @@ class FeishuSourceAgent(SourceAgent):
 
     source = "feishu"
 
-    DEFAULT_EXECUTOR_WORKERS: int = 16
+    DEFAULT_EXECUTOR_WORKERS: int = 24   # V14: 16 → 24, 容纳 dual-path × 多 sub_query 并发
 
     def __init__(
         self,
@@ -662,7 +683,35 @@ class FeishuSourceAgent(SourceAgent):
         sanitized = _sanitize_feishu_sub_queries(focuses, sub_queries)
         if len(sanitized) != len(sub_queries):
             logger.info("[feishu] plan sanitized total_sub_queries %d -> %d", len(sub_queries), len(sanitized))
-        return sanitized
+        enriched = self._enrich_sub_queries_with_variants(focuses, sanitized)
+        return enriched
+
+    def _enrich_sub_queries_with_variants(
+        self, focuses: List[Focus], sub_queries: List[SubQuery],
+    ) -> List[SubQuery]:
+        """为每条 sub_query 生成 dual-path Path B 的变体,写入 sq.variants。
+
+        变体生成依赖 sub_query.query + focus.text。Path A 用原 query,Path B 用 variants
+        + RRF 合并,实现"宽召回 + title 锚定"双路。
+        """
+        if not sub_queries:
+            return sub_queries
+        from tools.core.query_expansion import build_query_variants
+        focus_lookup = {f.focus_id: f.text for f in focuses}
+        for sq in sub_queries:
+            focus_text = focus_lookup.get(sq.target_focus, "") or ""
+            try:
+                variants = build_query_variants(sq.query or "", focus_text)
+            except Exception as e:
+                logger.warning("[feishu] _enrich_sub_queries variant gen failed: %s", e)
+                variants = []
+            sq.variants = variants
+            if variants:
+                logger.info(
+                    "[feishu] plan variants focus=%s query=%r variants=%s",
+                    sq.target_focus, sq.query, variants,
+                )
+        return sub_queries
 
     # ── table ROI 日志 ────────────────────────────────────────
     def _final_selected_table_tokens(self, chunks: List[ChunkEntry]) -> Set[str]:
@@ -691,14 +740,14 @@ class FeishuSourceAgent(SourceAgent):
         final_sel = [r for r in rows if r.get("final_selected")]
         wasted = [r for r in submitted if not r.get("final_selected")]
         skipped = [r for r in rows if r.get("submit_skipped")]
-        logger.info(
+        logger.debug(
             "[feishu] table roi summary total=%d submitted=%d final_selected=%d wasted=%d skipped=%d read_ms=%.1f read_chunks=%d",
             len(rows), len(submitted), len(final_sel), len(wasted), len(skipped),
             sum(float(r.get("read_ms", 0) or 0) for r in submitted),
             sum(int(r.get("read_chunks", 0) or 0) for r in submitted),
         )
         for r in rows:
-            logger.info(
+            logger.debug(
                 "[feishu] table roi token=%s title=%r doc_type=%s score=%.3f rank=%d "
                 "selected_child_count=%d structure_child_count=%d child_ratio=%.3f "
                 "read_ms=%.1f read_chunks=%d submit_selected=%s submit_skipped=%s final_selected=%s "
@@ -750,7 +799,7 @@ class FeishuSourceAgent(SourceAgent):
                 data = resp.json()
                 if data.get("code") == 0:
                     self._current_open_id = data["data"].get("open_id")
-                    logger.info("[feishu] Lazy fetched open_id for personal_recent")
+                    logger.debug("[feishu] Lazy fetched open_id for personal_recent")
         except Exception as e:
             logger.warning("[feishu] Failed to fetch open_id for personal_recent: %s", e)
 
@@ -829,10 +878,11 @@ class FeishuSourceAgent(SourceAgent):
             else:
                 try:
                     doc_cands = await search_and_select_feishu_doc_candidates(
-                        sq.query, token=self._uat, time_filter=sq.time_filter, page_size=20,
+                        sq.query, token=self._uat, time_filter=sq.time_filter, page_size=14,
                         query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
                         sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
                         executor=self._executor,
+                        variants=list(sq.variants or []),
                     )
                 except Exception as e:
                     logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
@@ -850,12 +900,13 @@ class FeishuSourceAgent(SourceAgent):
                 return {"sq": sq, "table_candidates": []}
             try:
                 table_cands = await search_and_select_feishu_table_candidates(
-                    sq.query, token=self._uat, page_size=20,
+                    sq.query, token=self._uat, page_size=14,
                     query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
                     sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
                     direct_limit=3 if self._preset in ("lite", "balanced") else 6,
                     wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
                     executor=self._executor,
+                    variants=list(sq.variants or []),
                 )
             except Exception as e:
                 logger.warning("[feishu] table search failed for %r: %s", sq.query, e)
@@ -874,7 +925,7 @@ class FeishuSourceAgent(SourceAgent):
                     await self._doc_pool.submit_and_read(
                         early_doc_list, query="__global_feishu_route_plan__",
                     )
-                    logger.info("TIMING feishu.submit_doc docs=%d preset=%s ms=%.1f",
+                    logger.debug("TIMING feishu.submit_doc docs=%d preset=%s ms=%.1f",
                                  len(early_doc_list), self._preset, _elapsed_ms(prepare_started))
                 except Exception as e:
                     logger.warning("[feishu] doc submit failed: %s", e)
@@ -889,7 +940,7 @@ class FeishuSourceAgent(SourceAgent):
         (doc_prepared, early_doc_list, doc_ids_by_sq), (table_prepared, table_list, table_ids_by_sq) = (
             await asyncio.gather(_doc_track(), _table_track())
         )
-        logger.info("TIMING feishu.batch_prepare_search sub_queries=%d ms=%.1f",
+        logger.debug("TIMING feishu.batch_prepare_search sub_queries=%d ms=%.1f",
                      len(sub_queries), _elapsed_ms(prepare_started))
 
         # 合并 doc/table prepared 为下游 _execute_one 用的 batch 列表（保留 sq 顺序）
@@ -983,7 +1034,7 @@ class FeishuSourceAgent(SourceAgent):
                             score=0.0, confidence_tier=uc.confidence_tier, metadata=meta,
                         ))
                     table_chunks_by_token[token] = normalized
-                    logger.info("TIMING feishu.table_read token=%s type=%s chunks=%d ms=%.1f",
+                    logger.debug("TIMING feishu.table_read token=%s type=%s chunks=%d ms=%.1f",
                                 token[:16], doc_type, len(normalized), read_ms)
                 except Exception as e:
                     logger.warning("[feishu] table read failed token=%s: %s", token[:16], e)
@@ -1004,7 +1055,7 @@ class FeishuSourceAgent(SourceAgent):
                     and focus_ids
                     and all(board.is_satisfied(fid) for fid in focus_ids)
                 ):
-                    logger.info(
+                    logger.debug(
                         "[feishu] table skip (focus satisfied) token=%s focus_ids=%s",
                         token[:16], focus_ids,
                     )
@@ -1015,7 +1066,7 @@ class FeishuSourceAgent(SourceAgent):
                     continue
                 asyncio.create_task(_read_table_one(cand))
 
-        logger.info("TIMING feishu.batch_prepare docs=%d tables=%d ms=%.1f",
+        logger.debug("TIMING feishu.batch_prepare docs=%d tables=%d ms=%.1f",
                      len(early_doc_list), len(table_list), _elapsed_ms(prepare_started))
 
         # ── Step 4: 并行等待 doc + table → chunk rerank ──────
@@ -1033,7 +1084,7 @@ class FeishuSourceAgent(SourceAgent):
                     chunks = await self._doc_pool.wait_and_collect(
                         d_ids, total_timeout=doc_pool_timeout, per_doc_timeout=per_doc_timeout
                     )
-                    logger.info("TIMING feishu.execute_one_doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
+                    logger.debug("TIMING feishu.execute_one_doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
                                  sq.sub_query_id, len(d_ids), len(chunks), _elapsed_ms(started))
                     return chunks
                 except Exception as e:
@@ -1088,9 +1139,9 @@ class FeishuSourceAgent(SourceAgent):
                             logger.warning("[feishu] table wait timeout token=%s", tid[:16])
                     collected.extend(table_chunks_by_token.get(tid, []))
                 if abandoned:
-                    logger.info("[feishu] table wait abandoned sub_query_id=%s focus=%s abandoned=%d (focus satisfied externally)",
+                    logger.debug("[feishu] table wait abandoned sub_query_id=%s focus=%s abandoned=%d (focus satisfied externally)",
                                  sq.sub_query_id, sq.target_focus, abandoned)
-                logger.info("TIMING feishu.execute_one_table_wait sub_query_id=%s parents=%d chunks=%d ms=%.1f",
+                logger.debug("TIMING feishu.execute_one_table_wait sub_query_id=%s parents=%d chunks=%d ms=%.1f",
                              sq.sub_query_id, len(t_ids), len(collected), _elapsed_ms(started))
                 return collected
 
@@ -1258,7 +1309,7 @@ class FeishuSourceAgent(SourceAgent):
 
         prepare_started = time.perf_counter()
         prepared = await asyncio.gather(*[_search_docs_lite(sq) for sq in sub_queries])
-        logger.info("TIMING feishu.lite.batch_prepare_search sub_queries=%d ms=%.1f",
+        logger.debug("TIMING feishu.lite.batch_prepare_search sub_queries=%d ms=%.1f",
                      len(sub_queries), _elapsed_ms(prepare_started))
 
         # Step 2: 跨 sq 去重合并，取前 _LITE_DOC_CAP 篇；
@@ -1280,7 +1331,7 @@ class FeishuSourceAgent(SourceAgent):
             else:
                 cand["route_hint"] = "block_api"
                 block_count += 1
-        logger.info(
+        logger.debug(
             "[feishu][lite] doc route_hint mcp=%d block_api=%d total=%d (lite_block_only=True)",
             mcp_count, block_count, len(doc_list),
         )
@@ -1288,12 +1339,12 @@ class FeishuSourceAgent(SourceAgent):
         if doc_list and self._doc_pool is not None:
             try:
                 await self._doc_pool.submit_and_read(doc_list, query="__lite_split__")
-                logger.info("TIMING feishu.lite.submit_doc docs=%d ms=%.1f",
+                logger.debug("TIMING feishu.lite.submit_doc docs=%d ms=%.1f",
                              len(doc_list), _elapsed_ms(prepare_started))
             except Exception as e:
                 logger.warning("[feishu][lite] doc submit failed: %s", e)
 
-        logger.info("TIMING feishu.lite.batch_prepare docs=%d tables=0 ms=%.1f",
+        logger.debug("TIMING feishu.lite.batch_prepare docs=%d tables=0 ms=%.1f",
                      len(doc_list), _elapsed_ms(prepare_started))
 
         # Step 3: 等待 doc chunks → doc-only rerank → chunk_pool
@@ -1312,7 +1363,7 @@ class FeishuSourceAgent(SourceAgent):
                 doc_chunks = await self._doc_pool.wait_and_collect(
                     d_ids, total_timeout=doc_pool_timeout, per_doc_timeout=6.0,
                 )
-                logger.info("TIMING feishu.lite.doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
+                logger.debug("TIMING feishu.lite.doc_wait sub_query_id=%s docs=%d chunks=%d ms=%.1f",
                              sq.sub_query_id, len(d_ids), len(doc_chunks), _elapsed_ms(started))
             except Exception as e:
                 logger.warning("[feishu][lite] doc wait failed: %s", e)

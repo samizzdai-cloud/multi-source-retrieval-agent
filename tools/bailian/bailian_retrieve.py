@@ -38,9 +38,44 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-BAILIAN_WORKSPACE_ID = os.getenv("BAILIAN_WORKSPACE_ID", "")
-ALIBABA_CLOUD_ACCESS_KEY_ID = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
-ALIBABA_CLOUD_ACCESS_KEY_SECRET = os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
+_RUNTIME_BAILIAN_WORKSPACE_ID = ""
+_RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_ID = ""
+_RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_SECRET = ""
+_RUNTIME_BAILIAN_INDEX_MAP = ""
+_RUNTIME_BAILIAN_INDEX_ID = ""
+
+
+def configure_bailian_runtime(
+    *,
+    workspace_id: str = "",
+    access_key_id: str = "",
+    access_key_secret: str = "",
+    index_map: str = "",
+    index_id: str = "",
+) -> None:
+    """显式注入百炼运行时配置，优先于环境变量。"""
+    global _RUNTIME_BAILIAN_WORKSPACE_ID
+    global _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_ID
+    global _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_SECRET
+    global _RUNTIME_BAILIAN_INDEX_MAP
+    global _RUNTIME_BAILIAN_INDEX_ID
+    _RUNTIME_BAILIAN_WORKSPACE_ID = workspace_id
+    _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_ID = access_key_id
+    _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_SECRET = access_key_secret
+    _RUNTIME_BAILIAN_INDEX_MAP = index_map
+    _RUNTIME_BAILIAN_INDEX_ID = index_id
+
+
+def _workspace_id() -> str:
+    return _RUNTIME_BAILIAN_WORKSPACE_ID or os.getenv("BAILIAN_WORKSPACE_ID", "")
+
+
+def _access_key_id() -> str:
+    return _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_ID or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_ID", "")
+
+
+def _access_key_secret() -> str:
+    return _RUNTIME_ALIBABA_CLOUD_ACCESS_KEY_SECRET or os.getenv("ALIBABA_CLOUD_ACCESS_KEY_SECRET", "")
 
 
 def get_all_configured_indexes() -> Dict[str, str]:
@@ -48,7 +83,7 @@ def get_all_configured_indexes() -> Dict[str, str]:
 
     读取 BAILIAN_INDEX_MAP 环境变量，最后 fallback 到 BAILIAN_INDEX_ID（单库旧版配置）。
     """
-    raw = os.getenv("BAILIAN_INDEX_MAP", "").strip()
+    raw = (_RUNTIME_BAILIAN_INDEX_MAP or os.getenv("BAILIAN_INDEX_MAP", "")).strip()
     if raw:
         result = {}
         for entry in raw.split(","):
@@ -61,7 +96,7 @@ def get_all_configured_indexes() -> Dict[str, str]:
         if result:
             return result
 
-    fallback = os.getenv("BAILIAN_INDEX_ID", "").strip()
+    fallback = (_RUNTIME_BAILIAN_INDEX_ID or os.getenv("BAILIAN_INDEX_ID", "")).strip()
     return {"default": fallback} if fallback else {}
 
 
@@ -71,8 +106,8 @@ def _build_client():
     from alibabacloud_tea_openapi.models import Config # type: ignore
 
     config = Config(
-        access_key_id=ALIBABA_CLOUD_ACCESS_KEY_ID,
-        access_key_secret=ALIBABA_CLOUD_ACCESS_KEY_SECRET,
+        access_key_id=_access_key_id(),
+        access_key_secret=_access_key_secret(),
         endpoint="bailian.cn-beijing.aliyuncs.com",
     )
     return Client(config)
@@ -127,9 +162,12 @@ def _retrieve_single_index(
     Args:
         tags: 可选标签过滤（l2分类 + 时效）。空/None 则不过滤，全量检索。
     """
-    if not BAILIAN_WORKSPACE_ID:
+    workspace_id = _workspace_id()
+    access_key_id = _access_key_id()
+    access_key_secret = _access_key_secret()
+    if not workspace_id:
         return {"status": "error", "message": "未配置 BAILIAN_WORKSPACE_ID"}
-    if not ALIBABA_CLOUD_ACCESS_KEY_ID or not ALIBABA_CLOUD_ACCESS_KEY_SECRET:
+    if not access_key_id or not access_key_secret:
         return {"status": "error", "message": "未配置阿里云 AccessKey"}
 
     try:
@@ -155,7 +193,7 @@ def _retrieve_single_index(
             if filters:
                 request.search_filters = filters
 
-        response = client.retrieve(BAILIAN_WORKSPACE_ID, request)
+        response = client.retrieve(workspace_id, request)
         body = response.body
 
         # Tag 兜底：以下两种情况去掉 tag 重试
@@ -172,7 +210,7 @@ def _retrieve_single_index(
                 index_id,
             )
             request.search_filters = None
-            response = client.retrieve(BAILIAN_WORKSPACE_ID, request)
+            response = client.retrieve(workspace_id, request)
             body = response.body
 
         if not body.success:
@@ -328,4 +366,3 @@ async def bailian_retrieve_unified(
         len(all_chunks), len(target_indexes),
     )
     return all_chunks
-

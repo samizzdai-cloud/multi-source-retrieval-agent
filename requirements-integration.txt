@@ -1,0 +1,17 @@
+google-adk
+google-genai
+python-dotenv
+requests
+dashscope
+PyYAML
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+httplib2
+python-docx
+python-pptx
+openpyxl
+pandas
+alibabacloud-bailian20231229
+alibabacloud-tea-openapi

@@ -25,6 +25,21 @@ LLM_TEMPERATURE = 0.0
 
 _client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
 
+
+def configure_llm_client(
+    *,
+    api_key: str,
+    model: str | None = None,
+    fallback_model: str | None = None,
+) -> None:
+    """显式注入 llm_client 运行时配置，避免依赖 .env 读取。"""
+    global _client, LLM_MODEL, LLM_FALLBACK
+    _client = genai.Client(api_key=api_key)
+    if model:
+        LLM_MODEL = model
+    if fallback_model is not None:
+        LLM_FALLBACK = fallback_model
+
 # ── Trace hook ───────────────────────────────────────────────────
 _llm_trace_hook: Any = None
 

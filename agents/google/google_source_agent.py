@@ -623,7 +623,7 @@ class GoogleSourceAgent(SourceAgent):
             spaces = [s["name"] for s in spaces_info if s.get("name")]
             self._drive_spaces_cache = spaces
             self._drive_spaces_cache_ts = now
-            logger.info(
+            logger.debug(
                 "[google] lazy-fetched %d drive spaces for personal_recent ms=%.1f",
                 len(spaces), (time.perf_counter() - started) * 1000.0,
             )
@@ -856,7 +856,7 @@ class GoogleSourceAgent(SourceAgent):
         }
         # 任一 sq cap=0 → 该 sq 不贡献文件；若所有 sq cap=0 → 全空
         if all(c <= 0 for c in per_sq_caps.values()):
-            logger.info(
+            logger.debug(
                 "TIMING google.sheet_prefilter raw=%d selected=0 reason=cap_zero ms=%.1f",
                 raw_count, _elapsed_ms(started),
             )
@@ -873,7 +873,7 @@ class GoogleSourceAgent(SourceAgent):
             for sq_id in all_sq_ids
         )
         if raw_count <= trigger or all_within_cap:
-            logger.info(
+            logger.debug(
                 "TIMING google.sheet_prefilter raw=%d selected=%d reason=below_trigger_or_within_cap ms=%.1f",
                 raw_count, raw_count, _elapsed_ms(started),
             )
@@ -918,7 +918,7 @@ class GoogleSourceAgent(SourceAgent):
                 filtered.append(f)
             res["files"] = filtered
 
-        logger.info(
+        logger.debug(
             "TIMING google.sheet_prefilter raw=%d selected=%d n_sqs=%d caps=%s local_ms=%.1f reason=per_sq_local selected_ids=%s",
             raw_count, len(selected_set), len(all_sq_ids),
             {sq_id: per_sq_caps.get(sq_id, 0) for sq_id in sorted(all_sq_ids)},
@@ -1084,7 +1084,7 @@ class GoogleSourceAgent(SourceAgent):
                     mime = str(f.get("mimeType", "") or "").rsplit(".", 1)[-1]
                     fid = str(f.get("id", "") or "")
                     top.append(f"{name}<{mime}>:{fid[-8:]}")
-                logger.info("[google] candidates sq=%s channel=%s count=%d top=%s",
+                logger.debug("[google] candidates sq=%s channel=%s count=%d top=%s",
                             sq.sub_query_id, channel, len(files), top)
 
             def _merge_file_candidates(primary: List[dict], extra: List[dict]) -> List[dict]:
@@ -1239,7 +1239,7 @@ class GoogleSourceAgent(SourceAgent):
             # ── Sheet sidecar 合并（已在 gather 拿到 title_sheets_pre）
             if title_sheets_pre:
                 files_sheet = _merge_file_candidates(files_sheet, title_sheets_pre)
-                logger.info("[google] title sidecar sheet sq=%s results=%d merged=%d",
+                logger.debug("[google] title sidecar sheet sq=%s results=%d merged=%d",
                             sq.sub_query_id, len(title_sheets_pre), len(files_sheet))
 
             # ── Fallback: 0 召回的通道走 fallback1（gather 并发）─────────────
@@ -1277,7 +1277,7 @@ class GoogleSourceAgent(SourceAgent):
                         files_slide = r or []
                     elif name == "sheet":
                         files_sheet = _merge_file_candidates(files_sheet, _tag_sheet_candidates(r or [], "fallback"))
-                    logger.info("[google] fallback %s sq=%s max_groups=2 results=%d",
+                    logger.debug("[google] fallback %s sq=%s max_groups=2 results=%d",
                                 name, sq.sub_query_id, len(r) if r else 0)
 
             # Fallback 2: 仍空 → raw_query（同样 gather 并发）
@@ -1315,7 +1315,7 @@ class GoogleSourceAgent(SourceAgent):
                         files_slide = r or []
                     elif name == "sheet":
                         files_sheet = _merge_file_candidates(files_sheet, _tag_sheet_candidates(r or [], "fallback"))
-                    logger.info("[google] fallback2 %s sq=%s raw_query results=%d",
+                    logger.debug("[google] fallback2 %s sq=%s raw_query results=%d",
                                 name, sq.sub_query_id, len(r) if r else 0)
 
             # ── Broader fallback: 三路总和 < 3 时启动一次广义搜索 ──────────────
@@ -1340,7 +1340,7 @@ class GoogleSourceAgent(SourceAgent):
                     files_doc = files_doc + new_doc
                     files_slide = files_slide + new_slide
                     files_sheet = files_sheet + new_sheet
-                    logger.info(
+                    logger.debug(
                         "[google] broad fallback sq=%s total<3 recovered=%d (doc+%d slide+%d sheet+%d)",
                         sq.sub_query_id, len(broad_files), len(new_doc), len(new_slide), len(new_sheet),
                     )
@@ -1359,7 +1359,7 @@ class GoogleSourceAgent(SourceAgent):
                         ),
                         self.cfg.google_slide_search_per_sq, order_by,
                     ) or []
-                    logger.info("[google] fallback title slide sq=%s results=%d", sq.sub_query_id, len(files_slide))
+                    logger.debug("[google] fallback title slide sq=%s results=%d", sq.sub_query_id, len(files_slide))
                 except Exception as e:
                     logger.warning("[google] fallback title slide search failed for sq=%s: %s", sq.sub_query_id, e)
             if len(files_slide) == 0:
@@ -1373,7 +1373,7 @@ class GoogleSourceAgent(SourceAgent):
                         ),
                         self.cfg.google_slide_search_per_sq, order_by,
                     ) or []
-                    logger.info("[google] fallback2 title slide sq=%s results=%d", sq.sub_query_id, len(files_slide))
+                    logger.debug("[google] fallback2 title slide sq=%s results=%d", sq.sub_query_id, len(files_slide))
                 except Exception as e:
                     logger.warning("[google] fallback2 title slide search failed for sq=%s: %s", sq.sub_query_id, e)
 
@@ -1387,7 +1387,7 @@ class GoogleSourceAgent(SourceAgent):
                 drop_slide = pre_slide - len(files_slide)
                 drop_sheet = pre_sheet - len(files_sheet)
                 if drop_doc or drop_slide or drop_sheet:
-                    logger.info(
+                    logger.debug(
                         "[google] dedup native_vs_nonnative sq=%s doc-=%d slide-=%d sheet-=%d",
                         sq.sub_query_id, drop_doc, drop_slide, drop_sheet,
                     )
@@ -1494,7 +1494,7 @@ class GoogleSourceAgent(SourceAgent):
                 min(float(self.cfg.source_timeout_s) * 0.25, float(self.cfg.google_api_timeout_s) + 5.0),
             )
             phase_b_started = time.perf_counter()
-            logger.info(
+            logger.debug(
                 "[google] Phase B metadata_prefetch start spreadsheets=%d workers=%d batch_timeout=%.1fs api_timeout=%ss",
                 len(all_spreadsheet_ids), 8, metadata_timeout, int(self.cfg.google_api_timeout_s),
             )
@@ -1510,7 +1510,7 @@ class GoogleSourceAgent(SourceAgent):
                 logger.warning("[google] sheet metadata prefetch skipped after error: %s", e)
             finally:
                 cached_after = sum(1 for fid in all_spreadsheet_ids if sheet_pool.get_meta(fid))
-                logger.info(
+                logger.debug(
                     "TIMING google.phase_b.metadata_prefetch spreadsheets=%d cached=%d missing=%d ms=%.1f",
                     len(all_spreadsheet_ids),
                     cached_after,
@@ -1678,12 +1678,12 @@ class GoogleSourceAgent(SourceAgent):
                     filter_fn=_doc_filter,
                 )
                 if selected_docs:
-                    logger.info("[google] doc filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_docs))
+                    logger.debug("[google] doc filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_docs))
             skipped = [f.get("id", "") for f in doc_files]
             kept = set(selected_docs)
             skipped_count = sum(1 for fid in skipped if fid not in kept)
             if skipped_count:
-                logger.info("[google] doc filter skipped %d oversized native docs for sq=%s, kept %d",
+                logger.debug("[google] doc filter skipped %d oversized native docs for sq=%s, kept %d",
                             skipped_count, sq.sub_query_id, len(selected_docs))
             for fid in selected_docs:
                 sq_doc_selections[sq.sub_query_id].append(
@@ -1730,12 +1730,12 @@ class GoogleSourceAgent(SourceAgent):
                     filter_fn=_slide_filter,
                 )
                 if selected_slides:
-                    logger.info("[google] slide filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_slides))
+                    logger.debug("[google] slide filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_slides))
             skipped = [f.get("id", "") for f in slide_files]
             kept = set(selected_slides)
             skipped_count = sum(1 for fid in skipped if fid not in kept)
             if skipped_count:
-                logger.info("[google] slide filter skipped %d oversized pptx for sq=%s, kept %d",
+                logger.debug("[google] slide filter skipped %d oversized pptx for sq=%s, kept %d",
                             skipped_count, sq.sub_query_id, len(selected_slides))
             for fid in selected_slides:
                 from google_workspace_tool.slide_pool import SlideSelection
@@ -1828,10 +1828,10 @@ class GoogleSourceAgent(SourceAgent):
             all_gmail_selections.extend(selections)
         merged_gmail = gmail_pool.merge_selections(all_gmail_selections)  # thread_id → set(sq_ids)
 
-        logger.info("[google] Phase D summary: merged_sheets=%d merged_sheet_nonnative=%d merged_docs=%d merged_slides=%d merged_gmail=%d",
+        logger.debug("[google] Phase D summary: merged_sheets=%d merged_sheet_nonnative=%d merged_docs=%d merged_slides=%d merged_gmail=%d",
                     len(merged_sheets), len(merged_sheet_nonnative), len(merged_docs), len(merged_slides), len(merged_gmail))
         timeout_s = self.cfg.source_timeout_s
-        logger.info(
+        logger.debug(
             "[google] Phase E queue summary sheets=%d sheet_nonnative=%d docs=%d slides=%d gmail=%d executor_workers=%d per_file_timeout=%.1fs",
             len(merged_sheets), len(merged_sheet_nonnative), len(merged_docs), len(merged_slides), len(merged_gmail), 12, min(20.0, timeout_s),
         )
@@ -1879,7 +1879,7 @@ class GoogleSourceAgent(SourceAgent):
                 _gc_cached = _cache_get(_ck, self.cfg.google_file_content_cache_ttl_s) if self.cfg.google_enable_file_content_cache else None
                 if _gc_cached is not None:
                     gc_list = _gc_cached
-                    logger.info("[google] sheet cache HIT %s", _short_id(fid))
+                    logger.debug("[google] sheet cache HIT %s", _short_id(fid))
                 else:
                     sheet_meta = sheet_pool.get_meta(fid)
                     _known_meta = None
@@ -1913,14 +1913,14 @@ class GoogleSourceAgent(SourceAgent):
                     orig_len = len(uc_list)
                     cap = int(self.cfg.google_sheet_chunk_cap)
                     uc_list = _fallback_select(uc_list, cap)
-                    logger.info("[google] sheet truncate %s: %d -> %d", fid, orig_len, cap)
+                    logger.debug("[google] sheet truncate %s: %d -> %d", fid, orig_len, cap)
                 size = sheet_meta.drive_size if sheet_meta else None
-                logger.info(
+                logger.debug(
                     "TIMING google.file_read type=sheet file=%s size=%s selected_titles=%d gc=%d uc=%d ms=%.1f",
                     _short_id(fid), size if size is not None else "N/A", len(titles), len(gc_list), len(uc_list),
                     _elapsed_ms(started),
                 )
-                logger.info("[google] sheet read done %s: titles=%d range_names=%s gc=%d uc=%d size=%s",
+                logger.debug("[google] sheet read done %s: titles=%d range_names=%s gc=%d uc=%d size=%s",
                             fid, len(titles), range_names, len(gc_list), len(uc_list), size if size is not None else "N/A")
                 status = "ok" if len(uc_list) > 0 else "zero_chunks"
                 _log_file_read(fid, "sheet", sheet_sq_map.get(fid, set()), status, len(uc_list))
@@ -1944,7 +1944,7 @@ class GoogleSourceAgent(SourceAgent):
                 _gc_cached = _cache_get(_ck, self.cfg.google_file_content_cache_ttl_s) if self.cfg.google_enable_file_content_cache else None
                 if _gc_cached is not None:
                     gc_list = _gc_cached
-                    logger.info("[google] sheet_nonnative cache HIT %s", _short_id(fid))
+                    logger.debug("[google] sheet_nonnative cache HIT %s", _short_id(fid))
                 else:
                     _known_meta = None
                     if meta:
@@ -1974,14 +1974,14 @@ class GoogleSourceAgent(SourceAgent):
                     orig_len = len(uc_list)
                     cap = int(self.cfg.google_sheet_chunk_cap)
                     uc_list = _fallback_select(uc_list, cap)
-                    logger.info("[google] sheet_nonnative truncate %s: %d -> %d", fid, orig_len, cap)
+                    logger.debug("[google] sheet_nonnative truncate %s: %d -> %d", fid, orig_len, cap)
                 if meta:
                     for uc in uc_list:
                         uc.metadata.setdefault("modified_time", meta.modified_time)
                         uc.metadata.setdefault("drive_size", meta.drive_size)
                         uc.metadata.setdefault("owner", meta.owner)
                 size = meta.drive_size if meta else None
-                logger.info(
+                logger.debug(
                     "TIMING google.file_read type=sheet_nonnative file=%s mime=%s size=%s gc=%d uc=%d ms=%.1f",
                     _short_id(fid), mime.rsplit(".", 1)[-1], size if size is not None else "N/A",
                     len(gc_list), len(uc_list), _elapsed_ms(started),
@@ -2011,7 +2011,7 @@ class GoogleSourceAgent(SourceAgent):
                 _gc_cached = _cache_get(_ck, self.cfg.google_file_content_cache_ttl_s) if self.cfg.google_enable_file_content_cache else None
                 if _gc_cached is not None:
                     gc_list = _gc_cached
-                    logger.info("[google] doc cache HIT %s", _short_id(fid))
+                    logger.debug("[google] doc cache HIT %s", _short_id(fid))
                 else:
                     _known_meta = None
                     if meta:
@@ -2038,19 +2038,19 @@ class GoogleSourceAgent(SourceAgent):
                     orig_len = len(uc_list)
                     cap = int(self.cfg.google_doc_chunk_cap)
                     uc_list = _fallback_select(uc_list, cap)
-                    logger.info("[google] doc truncate %s: %d -> %d", fid, orig_len, cap)
+                    logger.debug("[google] doc truncate %s: %d -> %d", fid, orig_len, cap)
                 if meta:
                     for uc in uc_list:
                         uc.metadata.setdefault("modified_time", meta.modified_time)
                         uc.metadata.setdefault("drive_size", meta.drive_size)
                         uc.metadata.setdefault("owner", meta.owner)
                 size = meta.drive_size if meta else None
-                logger.info(
+                logger.debug(
                     "TIMING google.file_read type=doc file=%s mime=%s size=%s gc=%d uc=%d ms=%.1f",
                     _short_id(fid), mime.rsplit(".", 1)[-1], size if size is not None else "N/A",
                     len(gc_list), len(uc_list), _elapsed_ms(started),
                 )
-                logger.info("[google] doc read done %s: mime=%s gc=%d uc=%d size=%s",
+                logger.debug("[google] doc read done %s: mime=%s gc=%d uc=%d size=%s",
                             fid, mime, len(gc_list), len(uc_list), size if size is not None else "N/A")
                 status = "ok" if len(uc_list) > 0 else "zero_chunks"
                 _log_file_read(fid, "doc", sq_ids, status, len(uc_list))
@@ -2075,7 +2075,7 @@ class GoogleSourceAgent(SourceAgent):
                 _gc_cached = _cache_get(_ck, self.cfg.google_file_content_cache_ttl_s) if self.cfg.google_enable_file_content_cache else None
                 if _gc_cached is not None:
                     gc_list = _gc_cached
-                    logger.info("[google] slide cache HIT %s", _short_id(fid))
+                    logger.debug("[google] slide cache HIT %s", _short_id(fid))
                 else:
                     _known_meta = None
                     if meta:
@@ -2101,19 +2101,19 @@ class GoogleSourceAgent(SourceAgent):
                     orig_len = len(uc_list)
                     cap = int(self.cfg.google_slide_chunk_cap)
                     uc_list = _query_aware_truncate(uc_list, query, cap)
-                    logger.info("[google] slide truncate %s: %d -> %d (query-aware)", fid, orig_len, cap)
+                    logger.debug("[google] slide truncate %s: %d -> %d (query-aware)", fid, orig_len, cap)
                 if meta:
                     for uc in uc_list:
                         uc.metadata.setdefault("modified_time", meta.modified_time)
                         uc.metadata.setdefault("drive_size", meta.drive_size)
                         uc.metadata.setdefault("owner", meta.owner)
                 size = meta.drive_size if meta else None
-                logger.info(
+                logger.debug(
                     "TIMING google.file_read type=slide file=%s mime=%s size=%s gc=%d uc=%d ms=%.1f",
                     _short_id(fid), mime.rsplit(".", 1)[-1], size if size is not None else "N/A",
                     len(gc_list), len(uc_list), _elapsed_ms(started),
                 )
-                logger.info("[google] slide read done %s: mime=%s gc=%d uc=%d size=%s",
+                logger.debug("[google] slide read done %s: mime=%s gc=%d uc=%d size=%s",
                             fid, mime, len(gc_list), len(uc_list), size if size is not None else "N/A")
                 status = "ok" if len(uc_list) > 0 else "zero_chunks"
                 _log_file_read(fid, "slide", merged_slides.get(fid, set()), status, len(uc_list))
@@ -2291,7 +2291,7 @@ class GoogleSourceAgent(SourceAgent):
                         sq_id, ftype, _short_id(fid), _file_size_of(fid, ftype) or "N/A", elapsed,
                     )
                 else:
-                    logger.info(
+                    logger.debug(
                         "TIMING google.wait_done sq=%s type=%s file=%s size=%s chunks=%d ms=%.1f",
                         sq_id, ftype, _short_id(fid), _file_size_of(fid, ftype) or "N/A", len(result), elapsed,
                     )
@@ -2414,7 +2414,7 @@ class GoogleSourceAgent(SourceAgent):
                     executors[target_key].submit(_read_gmail_task, tid)
                     pool_submit_counts[target_key] = pool_submit_counts.get(target_key, 0) + 1
 
-            logger.info(
+            logger.debug(
                 "[google] pool submits %s type_pools=%s",
                 {k: v for k, v in sorted(pool_submit_counts.items()) if v},
                 use_type_pools,
@@ -2428,7 +2428,7 @@ class GoogleSourceAgent(SourceAgent):
             # Phase F 汇总 + 漏斗报告
             for sq in sub_queries:
                 sq_id = sq.sub_query_id
-                logger.info("[google] Phase F sq=%s chunks_collected=%d", sq_id, len(chunks_by_sq.get(sq_id, [])))
+                logger.debug("[google] Phase F sq=%s chunks_collected=%d", sq_id, len(chunks_by_sq.get(sq_id, [])))
 
                 final_uc = chunks_by_sq.get(sq_id, [])
                 final_sheet = sum(1 for uc in final_uc if _chunk_family(uc.source_tool) == "sheet")
@@ -2457,9 +2457,9 @@ class GoogleSourceAgent(SourceAgent):
             # 文件级读取结果追踪
             failed_reads = [(fid, info) for fid, info in file_read_log.items() if info["status"] in ("failed", "zero_chunks")]
             if failed_reads:
-                logger.info("[google] FILE_READ_ISSUES count=%d", len(failed_reads))
+                logger.debug("[google] FILE_READ_ISSUES count=%d", len(failed_reads))
                 for fid, info in failed_reads[:10]:
-                    logger.info("[google] FILE_READ_ISSUE %s type=%s status=%s chunks=%d error=%.100s sqs=%s",
+                    logger.debug("[google] FILE_READ_ISSUE %s type=%s status=%s chunks=%d error=%.100s sqs=%s",
                                 fid, info["type"], info["status"], info["chunks"], info.get("error", ""), info["sq_ids"])
 
             # ── Phase F-G: Per-type pool budget（条件触发 Qwen，常规路径不 rerank）──
@@ -2668,7 +2668,7 @@ class GoogleSourceAgent(SourceAgent):
         order_by = sq.google_order_by if sq.google_order_by is not None else self.cfg.google_order_by_mode
         keyword_groups = generate_grouped_keywords(sq.query)
 
-        logger.info(
+        logger.debug(
             "[google] execute sub_query: %r, keyword_groups: %s, enable_fulltext: %s, order_by: %s",
             sq.query, keyword_groups, enable_fulltext, order_by
         )

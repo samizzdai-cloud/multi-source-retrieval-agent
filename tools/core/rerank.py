@@ -67,6 +67,12 @@ CHUNK_SELECTION_CONFIGS: Dict[str, Dict[str, float]] = {
 }
 
 
+def configure_rerank_api_key(api_key: str) -> None:
+    """显式注入 DashScope API key，避免依赖 .env。"""
+    global DASHSCOPE_API_KEY
+    DASHSCOPE_API_KEY = api_key
+
+
 # ── 基础工具 ─────────────────────────────────────────────────────────────────
 
 DocumentInput = Union[str, Mapping[str, Any]]

@@ -60,16 +60,215 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 FEISHU_UAT = os.getenv("FEISHU_UAT", "")
-TABLE_SEARCH_ROUTE_TOP_K = 6          # balanced/deep_dive 每路召回上限
-TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # lite 每路召回上限
+TABLE_SEARCH_ROUTE_TOP_K = 6          # balanced/deep_dive 每路召回上限(单路 / Path A 现状)
+TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # lite 每路召回上限(单路 / Path A 现状)
 TABLE_CHILD_SELECT_TOP_K = 2          # 每个 parent 最多保留的 child 数
 TABLE_CHILD_SELECT_GLOBAL_TOP_K = 10  # 跨所有 parent 的全局 child rerank 上限
 TABLE_CHILD_SCORE_THRESHOLD = 0.18
 TABLE_CHILD_MIN_KEEP = 1
 
+# Dual-path table 召回: Path A/B 不对称配置
+# Path A (原 query): 收缩到 2 per route → 6 candidates max → 资源主要节省点
+# Path B (变体 + RRF): 保留 3 per route → 6 candidates per variant,RRF 后 cap 3
+# 总进入 Step 2 (structure fetch) 的 unique parents ≈ 5-7,与单路 6 持平
+TABLE_PATH_A_ROUTE_TOP_K = 3               # Path A 每路每个 route 的 cap (回退到 3)
+TABLE_PATH_A_ROUTE_TOP_K_LITE = 2          # lite Path A cap
+TABLE_PATH_B_ROUTE_TOP_K = 3               # Path B 每路每个 route 的 cap (保持)
+TABLE_PATH_B_ROUTE_TOP_K_LITE = 2          # lite Path B cap
+TABLE_PATH_B_RRF_CAP = 3                   # Path B RRF 合并后输出 cap (非 lite)
+TABLE_PATH_B_RRF_CAP_LITE = 2              # Path B RRF 合并后输出 cap (lite)
+
+# Time-filter widening: planner sets time_filter from user's date intent (e.g. "1月15日"
+# → ">2026-01-15"). But edit_time often doesn't reflect content time — narrow cutoff
+# excludes valid docs. Widen left boundary, then narrow via date-anchor content filter.
+TIME_FILTER_LEFT_BUFFER_DAYS = 90
+
 
 def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
+
+
+# ── 日期锚点抽取与候选预过滤 ─────────────────────────────────────────────────────
+# 用户 query 中的日期(如 "2026年1月15日" / "1月15日到21日")会被 planner 蒸馏掉，
+# 进入 rerank 时只剩通用关键词("Nubia 销售")。但目标文档的 title/summary 经常含日期
+# (如 "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21)")，可以用作内容预过滤信号。
+
+_DATE_PATTERNS = [
+    re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"),  # 2026年1月15日
+    re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日"),                   # 1月15日
+    re.compile(r"(\d{4})[-/](\d{1,2})[-/](\d{1,2})"),                  # 2026-01-15 / 2026/1/15
+    re.compile(r"(\d{1,2})[-/](\d{1,2})(?!\d)"),                       # 1-15 / 1/15
+]
+
+
+def _extract_date_anchors(text: str) -> List[str]:
+    """从 text 中抽取所有日期表达，并展开为多种字符串变体用于 substring 匹配。
+
+    例: "1月15日到21日" → ["1月15", "01-15", "1-15", "01/15", "1/15", "1月21", "01-21", ...]
+    """
+    if not text:
+        return []
+    out: set = set()
+    for m in _DATE_PATTERNS[0].finditer(text):  # 2026年1月15日
+        y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+        out.update({
+            f"{y}-{mo:02d}-{d:02d}", f"{y}/{mo:02d}/{d:02d}",
+            f"{mo:02d}-{d:02d}", f"{mo}-{d}", f"{mo:02d}/{d:02d}", f"{mo}/{d}",
+            f"{mo}月{d}日", f"{mo}月{d}",
+        })
+    for m in _DATE_PATTERNS[1].finditer(text):  # 1月15日
+        mo, d = int(m.group(1)), int(m.group(2))
+        out.update({
+            f"{mo:02d}-{d:02d}", f"{mo}-{d}", f"{mo:02d}/{d:02d}", f"{mo}/{d}",
+            f"{mo}月{d}日", f"{mo}月{d}",
+        })
+    for m in _DATE_PATTERNS[2].finditer(text):  # 2026-01-15
+        y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+        out.update({
+            f"{y}-{mo:02d}-{d:02d}", f"{mo:02d}-{d:02d}", f"{mo}-{d}",
+            f"{mo}月{d}日",
+        })
+    return sorted(out)
+
+
+def _candidate_text_for_anchor_match(cand: dict) -> str:
+    """合并 candidate 的 title + summary,用于 anchor substring 匹配。"""
+    parts = [
+        str(cand.get("title") or cand.get("name") or ""),
+        str(cand.get("summary") or cand.get("snippet") or ""),
+    ]
+    return " ".join(parts).lower()
+
+
+# ── 双路召回:query 变体生成 + RRF 合并 ────────────────────────────────────────
+# Path A 用原 sub_query (单条 + 0 结果 fallback);
+# Path B 用 user-anchored 变体并行 fan-out + RRF 合并。
+# 两路独立 fetch,合并后统一过 time_filter + date_prefilter + rerank。
+
+# 高信息量名词:从 focus_text 抽 user 真实说的词,补回 sub_query 末尾
+_USER_ANCHOR_PATTERNS = [
+    re.compile(r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*"),       # 英文专有名 e.g. "X Ultra", "Paid Media"
+    re.compile(r"[A-Z]{2,}[0-9]*"),                              # 缩写 e.g. "UGC", "EDM", "ROAS"
+    re.compile(r"[A-Z][0-9]+(?:\s+[A-Za-z]+)*"),                  # 型号 e.g. "Z80 Ultra", "Z70"
+    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),                        # 日期 e.g. "2026-01-15"
+    re.compile(r"\d{1,2}月\d{1,2}日"),                            # 中文日期
+]
+
+_GENERIC_NOUNS_TO_DROP = {
+    "运营", "销售", "营销", "市场", "计划", "策略", "管理", "业务",
+    "项目", "工作", "内容", "合作", "情况", "方案", "进度", "表现",
+    "数据", "报告", "总结", "复盘", "动态", "情况",
+}
+
+
+def _extract_user_anchors(focus_text: str, max_anchors: int = 3) -> List[str]:
+    """从 focus_text 抽取高信息量的 user 原词:专有名、缩写、型号、日期。"""
+    if not focus_text:
+        return []
+    anchors: List[str] = []
+    for pat in _USER_ANCHOR_PATTERNS:
+        for m in pat.findall(focus_text):
+            m = m.strip()
+            if m and m.lower() not in {a.lower() for a in anchors}:
+                anchors.append(m)
+                if len(anchors) >= max_anchors:
+                    return anchors
+    return anchors
+
+
+def _build_query_variants(sub_query: str, focus_text: str) -> List[str]:
+    """Path B 变体生成。返回 1-2 条"与原 sub_query 不同"的搜索 query。
+
+    策略:
+      V1. user-anchored: 原 sub_query + 从 focus_text 抽的高信息量名词
+      V2. brand-only:   只保留 sub_query 中的品牌/英文词,做宽召回兜底
+    """
+    variants: List[str] = []
+    seen = {sub_query.strip().lower()}
+
+    # V1: 加 user 锚点
+    anchors = _extract_user_anchors(focus_text)
+    if anchors:
+        v1 = f"{sub_query.strip()} {' '.join(anchors)}".strip()
+        if v1.lower() not in seen:
+            variants.append(v1)
+            seen.add(v1.lower())
+
+    # V2: 品牌-only(从原 sub_query 抽英文专有名)
+    brand_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]+", sub_query)
+    if brand_tokens:
+        v2 = " ".join(brand_tokens[:2])
+        if v2.lower() not in seen and v2.lower() != sub_query.strip().lower():
+            variants.append(v2)
+            seen.add(v2.lower())
+
+    return variants
+
+
+def _rrf_merge(result_lists: List[List[dict]], k: int = 60) -> List[dict]:
+    """Reciprocal Rank Fusion: 多组排名结果合并,重复出现的 doc 累加分数。
+
+    返回按融合分数降序的去重列表。
+    """
+    scores: Dict[str, float] = {}
+    cand_by_key: Dict[str, dict] = {}
+    for results in result_lists:
+        for rank_idx, cand in enumerate(results):
+            key = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or cand.get("url") or ""
+            if not key:
+                continue
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank_idx + 1)
+            if key not in cand_by_key:
+                cand_by_key[key] = cand
+    ordered_keys = sorted(scores.keys(), key=lambda x: -scores[x])
+    return [cand_by_key[k] for k in ordered_keys]
+
+
+def _dedupe_candidates(*lists: List[dict]) -> List[dict]:
+    """按 doc_id 去重,保留第一次出现的顺序。"""
+    seen = set()
+    out: List[dict] = []
+    for lst in lists:
+        for cand in lst:
+            key = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or cand.get("url") or ""
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out.append(cand)
+    return out
+
+
+def _filter_candidates_by_date_anchors(
+    candidates: List[dict],
+    focus_text: str,
+    sub_query: str,
+    sub_query_id: str,
+) -> List[dict]:
+    """若 focus_text/sub_query 含日期表达,只保留 title/summary 含匹配日期的候选。
+
+    无日期 → 不过滤(返回原样)
+    有日期但零匹配 → 不过滤(兜底,避免破坏召回)
+    有日期且至少 1 个匹配 → 只保留匹配的候选
+    """
+    anchors = _extract_date_anchors(f"{focus_text or ''}\n{sub_query or ''}")
+    if not anchors:
+        return candidates
+    matched = []
+    for cand in candidates:
+        text = _candidate_text_for_anchor_match(cand)
+        if any(a.lower() in text for a in anchors):
+            matched.append(cand)
+    if not matched:
+        logger.debug(
+            "feishu_retrieve: date_prefilter sub_query_id=%s anchors=%s raw=%d matched=0 → keep all (no-op)",
+            sub_query_id or "unknown", anchors[:5], len(candidates),
+        )
+        return candidates
+    logger.debug(
+        "feishu_retrieve: date_prefilter sub_query_id=%s anchors=%s raw=%d matched=%d",
+        sub_query_id or "unknown", anchors[:5], len(candidates), len(matched),
+    )
+    return matched
 
 
 # ── 预检策略：快速判断搜索结果是否值得深度读取 ──────────────────────────────────
@@ -110,7 +309,7 @@ def _try_brand_case_variant(query: str) -> Optional[str]:
                 for v in variants:
                     if v != current_variant:
                         new_query = query.replace(current_variant, v)
-                        logger.info(
+                        logger.debug(
                             "_try_brand_case_variant: '%s' → '%s' (brand case)",
                             query, new_query
                         )
@@ -151,7 +350,7 @@ def _simplify_feishu_query(query: str) -> Optional[str]:
                 simplified = f"{brand_word} {other[0]}"
         else:
             simplified = " ".join(words[:2])
-        logger.info("_simplify_feishu_query: '%s' → '%s' (brand+action)", query, simplified)
+        logger.debug("_simplify_feishu_query: '%s' → '%s' (brand+action)", query, simplified)
         return simplified
 
     # 策略2：去掉中文国家名
@@ -159,12 +358,12 @@ def _simplify_feishu_query(query: str) -> Optional[str]:
     filtered = [w for w in words if w not in country_words]
     if len(filtered) < len(words) and filtered:
         simplified = " ".join(filtered)
-        logger.info("_simplify_feishu_query: '%s' → '%s' (remove country)", query, simplified)
+        logger.debug("_simplify_feishu_query: '%s' → '%s' (remove country)", query, simplified)
         return simplified
 
     # [P3-A] 策略3：品牌名单独搜索（最后兜底）
     if brand_word and len(words) == 2:
-        logger.info("_simplify_feishu_query: '%s' → '%s' (brand only)", query, brand_word)
+        logger.debug("_simplify_feishu_query: '%s' → '%s' (brand only)", query, brand_word)
         return brand_word
 
     return None
@@ -425,7 +624,7 @@ async def _fetch_table_structure(
     if doc_type == "SHEET":
         if table_pool is not None and hasattr(table_pool, "get_sheet_structure"):
             rows = await table_pool.get_sheet_structure(parent)
-            logger.info(
+            logger.debug(
                 "TIMING feishu.table_structure kind=sheet parent=%s count=%d ms=%.1f cache=pool",
                 parent.get("id", "")[:16],
                 len(rows),
@@ -440,7 +639,7 @@ async def _fetch_table_structure(
             t for t in tabs
             if not t.get("hidden") and t.get("resource_type") == "sheet"
         ]
-        logger.info(
+        logger.debug(
             "TIMING feishu.table_structure kind=sheet parent=%s count=%d ms=%.1f cache=miss",
             parent.get("id", "")[:16],
             len(rows),
@@ -451,7 +650,7 @@ async def _fetch_table_structure(
     if doc_type == "BITABLE":
         if table_pool is not None and hasattr(table_pool, "get_bitable_structure"):
             rows = await table_pool.get_bitable_structure(parent)
-            logger.info(
+            logger.debug(
                 "TIMING feishu.table_structure kind=bitable parent=%s count=%d ms=%.1f cache=pool",
                 parent.get("id", "")[:16],
                 len(rows),
@@ -461,7 +660,7 @@ async def _fetch_table_structure(
         from feishu_read_tool.basic_tool.bitable_read import list_tables
 
         rows = await asyncio.to_thread(list_tables, parent_id, token)
-        logger.info(
+        logger.debug(
             "TIMING feishu.table_structure kind=bitable parent=%s count=%d ms=%.1f cache=miss",
             parent.get("id", "")[:16],
             len(rows),
@@ -515,6 +714,15 @@ def _select_doc_candidates_for_sub_query(
     sub_query_id: str,
     query_type: str,
 ) -> List[dict]:
+    if not candidates:
+        return []
+
+    # Date-anchor content pre-filter: when user query has date intent, narrow
+    # candidates to those whose title/summary contains the date before rerank.
+    # No-op if no date detected or zero candidates match (preserves recall).
+    candidates = _filter_candidates_by_date_anchors(
+        candidates, focus_text=focus_text, sub_query=sub_query, sub_query_id=sub_query_id,
+    )
     if not candidates:
         return []
 
@@ -593,7 +801,7 @@ def _select_doc_candidates_for_sub_query(
             focus_id=focus_id,
             sub_query_id=sub_query_id,
         )
-    logger.info(
+    logger.debug(
         "feishu_retrieve: doc candidate selection sub_query_id=%s query_type=%s raw=%d selected=%d threshold=%.2f min_keep=%d top_k=%d",
         sub_query_id or "unknown",
         query_type,
@@ -618,6 +826,7 @@ async def search_and_select_feishu_doc_candidates(
     sub_query_id: str = "",
     owner_ids: Optional[List[str]] = None,
     executor: Optional[concurrent.futures.Executor] = None,
+    variants: Optional[List[str]] = None,
 ) -> List[dict]:
     """执行 Feishu doc 搜索并返回当前 sub_query 选中的候选文档。
 
@@ -630,47 +839,87 @@ async def search_and_select_feishu_doc_candidates(
     """
     started = time.perf_counter()
     query_type = _normalize_query_type(query_type)
-    try:
-        # Step 1: 原 query 直接搜索（不做品牌变体并发）
-        doc_result = await _exec_to_thread(
-            executor, search_feishu_docs,
-            query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+
+    # ── Path A: 原 query + 0 结果 fallback 链 ──
+    async def _path_a() -> List[dict]:
+        try:
+            r = await _exec_to_thread(
+                executor, search_feishu_docs,
+                query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+            )
+            cands = r.get("items", [])
+            if not cands:
+                simplified = _simplify_feishu_query(query)
+                if simplified:
+                    logger.debug("feishu_retrieve: PathA ZERO, retry simplified '%s'", simplified)
+                    r = await _exec_to_thread(
+                        executor, search_feishu_docs,
+                        query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                    )
+                    cands = r.get("items", [])
+            if not cands:
+                variant = _try_brand_case_variant(query)
+                if variant:
+                    logger.debug("feishu_retrieve: PathA still ZERO, try brand variant '%s'", variant)
+                    r = await _exec_to_thread(
+                        executor, search_feishu_docs,
+                        query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                    )
+                    cands = r.get("items", [])
+            return cands
+        except Exception as e:
+            logger.warning("feishu_retrieve PathA failed: %s", e)
+            return []
+
+    # ── Path B: 多变体并行 + RRF 合并 ──
+    # 变体来源优先级:1) 调用方传入的 variants (source_agent 在 _enrich_sub_queries 中生成);
+    # 2) 回退到本地 _build_query_variants (向后兼容,无 enrich 时仍能工作)
+    # Path B page_size 减半: 变体是探索性召回,不需要 path A 同等深度,
+    # 减半可降低 wiki/mcp API 调用开销 ~30-40%,RRF 合并后仍有足够候选送 rerank。
+    path_b_page_size = max(5, page_size // 2)
+    async def _path_b() -> List[dict]:
+        path_b_variants = list(variants) if variants else _build_query_variants(query, focus_text or query)
+        if not path_b_variants:
+            return []
+        logger.debug(
+            "feishu_retrieve: PathB sub_query_id=%s page_size=%d variants=%s",
+            sub_query_id or "unknown", path_b_page_size, path_b_variants,
         )
-        doc_candidates = doc_result.get("items", [])
-
-        # Step 2: 零结果 → 简化重试
-        if not doc_candidates:
-            simplified = _simplify_feishu_query(query)
-            if simplified:
-                logger.info("feishu_retrieve: ZERO results, retry with simplified '%s'", simplified)
-                retry_result = await _exec_to_thread(
+        try:
+            # Path B 跳过 MCP: Path A 已经覆盖 MCP,Path B 只需 Wiki 补充长尾召回。
+            # 省 ~0.5-1s API RTT,避免 MCP 重复调用。
+            results = await asyncio.gather(*[
+                _exec_to_thread(
                     executor, search_feishu_docs,
-                    query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                    query=v, count=path_b_page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+                    skip_mcp=True,
                 )
-                doc_candidates = retry_result.get("items", [])
+                for v in path_b_variants
+            ], return_exceptions=True)
+            valid = [r.get("items", []) if isinstance(r, dict) else [] for r in results]
+            merged = _rrf_merge(valid)
+            return merged
+        except Exception as e:
+            logger.warning("feishu_retrieve PathB failed: %s", e)
+            return []
 
-        # Step 3: 仍零结果 → 品牌变体 fallback
-        if not doc_candidates:
-            variant = _try_brand_case_variant(query)
-            if variant:
-                logger.info("feishu_retrieve: still ZERO, try brand variant '%s'", variant)
-                variant_result = await _exec_to_thread(
-                    executor, search_feishu_docs,
-                    query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
-                )
-                doc_candidates = variant_result.get("items", [])
+    raw_a, raw_b = await asyncio.gather(_path_a(), _path_b())
 
-    except Exception as e:
-        logger.warning("feishu_retrieve doc search failed: %s", e)
-        doc_candidates = []
+    # 记录两路独立召回情况
+    logger.info(
+        "feishu_retrieve: dual_path sub_query_id=%s pathA=%d pathB=%d",
+        sub_query_id or "unknown", len(raw_a), len(raw_b),
+    )
 
-    if not doc_candidates:
+    if not raw_a and not raw_b:
         logger.info(
             "TIMING feishu.doc_candidate_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
-            sub_query_id or "unknown",
-            _elapsed_ms(started),
+            sub_query_id or "unknown", _elapsed_ms(started),
         )
         return []
+
+    # 合并去重(A 顺序优先)。time_filter 应用于合并后的池子,避免 2x metadata fetch。
+    doc_candidates = _dedupe_candidates(raw_a, raw_b)
 
     # Time post-filtering for non-MCP doc candidates.
     if time_filter:
@@ -681,9 +930,20 @@ async def search_and_select_feishu_doc_candidates(
                 import datetime
                 dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
                 cutoff_timestamp = dt.timestamp()
+                # Widen left boundary: edit_time often doesn't reflect content time.
+                # E.g. user asks for "2026-01-15 weekly report" → planner sets
+                # ">2026-01-15", but the actual doc might have been edited earlier.
+                # Subtract buffer; content-level date matching happens downstream.
+                cutoff_timestamp -= TIME_FILTER_LEFT_BUFFER_DAYS * 86400
+                logger.debug(
+                    "feishu_retrieve: time_filter widened sub_query_id=%s original=%s effective_cutoff=%s (buffer=%dd)",
+                    sub_query_id or "unknown", time_filter,
+                    datetime.datetime.fromtimestamp(cutoff_timestamp).strftime("%Y-%m-%d"),
+                    TIME_FILTER_LEFT_BUFFER_DAYS,
+                )
             except ValueError:
                 pass
-                
+
         if cutoff_timestamp > 0:
             # 提取所有需要验证时间的非 MCP token
             tokens_to_check = []
@@ -715,7 +975,7 @@ async def search_and_select_feishu_doc_candidates(
                     if edit_time >= cutoff_timestamp:
                         filtered_cands.append(cand)
                     else:
-                        logger.info("feishu_retrieve: filtered out doc candidate %s (edit_time: %s < %s)",
+                        logger.debug("feishu_retrieve: filtered out doc candidate %s (edit_time: %s < %s)",
                                     tok[:12], edit_time, cutoff_timestamp)
                         
             doc_candidates = filtered_cands
@@ -727,14 +987,44 @@ async def search_and_select_feishu_doc_candidates(
         )
         return []
 
-    selected = _select_doc_candidates_for_sub_query(
-        doc_candidates,
-        sub_query=query,
-        focus_id=focus_id,
-        focus_text=focus_text or query,
-        sub_query_id=sub_query_id,
-        query_type=query_type,
-    )
+    # Lite 模式无 rerank: 按 path A=2 / path B=3 平分,去重后保留 ≤5 个 doc 进入读取阶段
+    preset = (os.getenv("RAG_PRESET", "balanced") or "balanced").strip().lower()
+    if preset == "lite":
+        # 用 doc_id 标记每个候选属于哪一路(在 time_filter 之后仍保留 raw_a/raw_b 顺序)
+        survived_ids = set()
+        for c in doc_candidates:
+            cid = c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or ""
+            if cid:
+                survived_ids.add(cid)
+        a_filtered_ordered = [c for c in raw_a
+                              if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") in survived_ids]
+        b_filtered_ordered = [c for c in raw_b
+                              if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") in survived_ids]
+
+        a_pick = a_filtered_ordered[:2]
+        a_pick_ids = {c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "" for c in a_pick}
+        b_pick = [c for c in b_filtered_ordered
+                  if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") not in a_pick_ids][:3]
+
+        selected = []
+        for rank_idx, cand in enumerate(a_pick + b_pick):
+            selected.append(_annotate_selected_candidate(
+                cand, focus_id=focus_id, sub_query_id=sub_query_id,
+                score=max(0.0, 1.0 - rank_idx * 0.05), rank=rank_idx + 1,
+            ))
+        logger.debug(
+            "feishu_retrieve: lite_split sub_query_id=%s pathA=%d pathB=%d selected=%d",
+            sub_query_id or "unknown", len(a_pick), len(b_pick), len(selected),
+        )
+    else:
+        selected = _select_doc_candidates_for_sub_query(
+            doc_candidates,
+            sub_query=query,
+            focus_id=focus_id,
+            focus_text=focus_text or query,
+            sub_query_id=sub_query_id,
+            query_type=query_type,
+        )
     for candidate in selected:
         candidate["selected_query_types"] = sorted(
             set(candidate.get("selected_query_types") or []) | {query_type}
@@ -763,6 +1053,7 @@ async def search_and_select_feishu_table_candidates(
     wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     owner_ids: Optional[List[str]] = None,
     executor: Optional[concurrent.futures.Executor] = None,
+    variants: Optional[List[str]] = None,
 ) -> List[dict]:
     """执行 Feishu table 搜索，全局 child rerank，返回已选中子表的父文件候选。
 
@@ -781,21 +1072,64 @@ async def search_and_select_feishu_table_candidates(
     if query_type != "structured":
         return []
 
-    try:
-        raw_result = await _exec_to_thread(
-            executor, search_feishu_tables,
-            query=query,
-            count=page_size,
-            uat=token,
-            owner_ids=owner_ids,
-        )
-    except Exception as e:
-        logger.warning("feishu_retrieve table search failed: %s", e)
-        return []
+    # Dual-path table 召回(Path A/B 不对称):
+    # - Path A 收缩到 2/route → 6 raw → 减少 structure fetch 数量(主要省时点)
+    # - Path B 保持 3/route → 通过 variants 扩宽召回
+    preset = (os.getenv("RAG_PRESET", "balanced") or "balanced").strip().lower()
+    is_lite = preset == "lite"
+    path_a_direct = TABLE_PATH_A_ROUTE_TOP_K_LITE if is_lite else TABLE_PATH_A_ROUTE_TOP_K
+    path_a_wiki = path_a_direct
+    path_b_direct = TABLE_PATH_B_ROUTE_TOP_K_LITE if is_lite else TABLE_PATH_B_ROUTE_TOP_K
+    path_b_wiki = path_b_direct
+    path_b_cap = TABLE_PATH_B_RRF_CAP_LITE if is_lite else TABLE_PATH_B_RRF_CAP
 
-    parent_candidates = _dedupe_table_candidates(
-        raw_result, direct_limit=direct_limit, wiki_limit=wiki_limit,
+    # ── Path A: 原 query 单路调用 search_feishu_tables (收缩 2/route) ──
+    async def _path_a() -> List[dict]:
+        try:
+            r = await _exec_to_thread(
+                executor, search_feishu_tables,
+                query=query, count=page_size, uat=token, owner_ids=owner_ids,
+            )
+            return _dedupe_table_candidates(
+                r, direct_limit=path_a_direct, wiki_limit=path_a_wiki,
+            )
+        except Exception as e:
+            logger.warning("feishu_retrieve table PathA failed: %s", e)
+            return []
+
+    # ── Path B: 多变体并行 search,RRF 合并 (保留 3/route) ──
+    async def _path_b() -> List[dict]:
+        b_variants = list(variants or [])
+        if not b_variants:
+            return []
+        try:
+            results = await asyncio.gather(*[
+                _exec_to_thread(
+                    executor, search_feishu_tables,
+                    query=v, count=page_size, uat=token, owner_ids=owner_ids,
+                )
+                for v in b_variants
+            ], return_exceptions=True)
+            per_variant_lists: List[List[dict]] = []
+            for r in results:
+                if isinstance(r, dict):
+                    deduped = _dedupe_table_candidates(
+                        r, direct_limit=path_b_direct, wiki_limit=path_b_wiki,
+                    )
+                    per_variant_lists.append(deduped)
+            merged = _rrf_merge(per_variant_lists)
+            return merged[:path_b_cap]
+        except Exception as e:
+            logger.warning("feishu_retrieve table PathB failed: %s", e)
+            return []
+
+    raw_a, raw_b = await asyncio.gather(_path_a(), _path_b())
+    logger.info(
+        "feishu_retrieve: table dual_path sub_query_id=%s variants=%s pathA=%d pathB=%d",
+        sub_query_id or "unknown", list(variants or [])[:3], len(raw_a), len(raw_b),
     )
+
+    parent_candidates = _dedupe_candidates(raw_a, raw_b)
     if not parent_candidates:
         logger.info(
             "TIMING feishu.table_parent_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
@@ -1029,7 +1363,7 @@ async def search_and_read_feishu_tables(
         if table_pool is not None:
             selected_ids = await table_pool.submit_and_read(table_candidates)
             chunks = await table_pool.wait_and_collect(selected_ids)
-            logger.info(
+            logger.debug(
                 "TIMING feishu.table_pipeline mode=pool selected=%d chunks=%d ms=%.1f",
                 len(selected_ids),
                 len(chunks),
@@ -1150,7 +1484,7 @@ async def feishu_retrieve(
                 doc_chunks = await doc_pool.wait_and_collect(
                     selected_ids, **ws_kwargs,
                 )
-                logger.info(
+                logger.debug(
                     "feishu_retrieve [pool]: query=%.30r → %d raw doc chunks (timeout=%s)",
                     query, len(doc_chunks),
                     f"{doc_pool_timeout:.1f}s" if doc_pool_timeout else "default",
@@ -1164,7 +1498,7 @@ async def feishu_retrieve(
         table_chunks = await table_read_task
 
     all_chunks = doc_chunks + table_chunks
-    logger.info(
+    logger.debug(
         "feishu_retrieve: total %d chunks (doc=%d table=%d) query_type=%s",
         len(all_chunks), len(doc_chunks), len(table_chunks), query_type,
     )

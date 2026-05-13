@@ -376,7 +376,7 @@ def _sync_google_retrieve(
     # 仅在非全文搜索时允许自定义排序
     order_by = order_by_mode if not enable_fulltext_search else None
     
-    logger.info("google_retrieve: query=%r, drive_q=%.80r, order_by=%r", query, q, order_by)
+    logger.debug("google_retrieve: query=%r, drive_q=%.80r, order_by=%r", query, q, order_by)
 
     try:
         # 初次召回更多文件
@@ -394,7 +394,7 @@ def _sync_google_retrieve(
         return []
 
     if not files:
-        logger.info("google_retrieve: no files found for query=%r", query)
+        logger.debug("google_retrieve: no files found for query=%r", query)
         return []
 
     # 过滤不支持的 MIME
@@ -402,7 +402,7 @@ def _sync_google_retrieve(
     
     # 文件候选重排：利用 Rerank 选出最相关的 Top N (e.g. 5) 避免全部下载
     files = _select_drive_candidates(query, files, top_n=5)
-    logger.info("google_retrieve: selected %d files after candidate rerank...", len(files))
+    logger.debug("google_retrieve: selected %d files after candidate rerank...", len(files))
 
     def _process_file(f):
         file_id = f.get("id")
@@ -443,7 +443,7 @@ def _sync_google_retrieve(
             chunks = future.result()
             all_chunks.extend(chunks)
 
-    logger.info(
+    logger.debug(
         "google_retrieve: query=%r, files=%d, total_chunks=%d",
         query,
         len(files),
