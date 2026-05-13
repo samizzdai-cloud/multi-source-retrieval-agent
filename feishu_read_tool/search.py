@@ -399,8 +399,11 @@ def search_feishu_docs(
     uat: str = "",
     time_filter: Optional[str] = None,
     owner_ids: Optional[List[str]] = None,
+    skip_mcp: bool = False,
 ) -> Dict[str, Any]:
     """文档搜索：MCP + Wiki doc 类，按 title 去重（MCP 优先）。
+
+    skip_mcp=True 时只查 Wiki(用于 dual-path Path B,避免与 Path A 的 MCP 重复)。
 
     Returns:
         {"status": "success", "items": [...], "_debug": {...}}
@@ -408,6 +411,17 @@ def search_feishu_docs(
     token = uat or FEISHU_UAT
     if not token:
         return {"status": "error", "message": "未配置 FEISHU_UAT"}
+
+    if skip_mcp:
+        # Path B 专用: 只查 Wiki,避免和 Path A 的 MCP 重复调用
+        wiki_all = _search_wiki(query, count, token)
+        wiki_doc_items = [w for w in wiki_all if w.get("doc_type") in _WIKI_DOC_TYPES]
+        return {
+            "status": "success",
+            "total_fetched": len(wiki_doc_items),
+            "items": wiki_doc_items,
+            "_debug": {"wiki_doc_count": len(wiki_doc_items), "mcp_skipped": True},
+        }
 
     # 并行: MCP ∥ Wiki
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:

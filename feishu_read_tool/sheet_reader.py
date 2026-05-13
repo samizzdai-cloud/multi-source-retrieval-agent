@@ -684,7 +684,7 @@ def _read_single_tab(
 
         # O2: 丰富 metadata
         chunks.append(UnifiedChunk(
-            text=md,
+            text=f"## {heading}\n\n{md}",
             source_name=sheet_title,
             source_url=sheet_url,
             source_tool="feishu",

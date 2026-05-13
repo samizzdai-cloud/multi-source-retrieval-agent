@@ -480,7 +480,7 @@ def _read_single_table(
     # O2: 丰富 metadata
     is_bm25_filtered = len(records) > BM25_FILTER_THRESHOLD_ROWS
     return [UnifiedChunk(
-        text=md,
+        text=f"## {heading}\n\n{md}",
         source_name=bitable_title,
         source_url=bitable_url,
         source_tool="feishu",

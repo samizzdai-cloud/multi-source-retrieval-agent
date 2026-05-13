@@ -83,6 +83,9 @@ class SubQuery:
     google_order_by: Optional[str] = None
     author_filter: Optional[str] = None
     sub_query_id: str = ""
+    # Path-B 变体: 由 source-agent 在 _enrich_sub_queries 中填充,供 dual-path 召回使用。
+    # 为空时下游回退到单路径(向后兼容)。
+    variants: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -205,20 +208,23 @@ def _chunks_block(
 ) -> str:
     """渲染候选 chunks 列表供 LLM 评估。
 
-    表格类 chunk（content 含 markdown 表格）使用更大的摘要窗口（500 字），
+    表格类 chunk（content 含 markdown 表格）使用更大的摘要窗口（2000 字），
     让 LLM 能看到实际数据行，而不只是表头。普通 chunk 使用 300 字。
+    历史：500 → 2000（2025-Q4）—— Sheet1 类多行小表 1500+ 字时,500 字会切掉
+    "原神/星穹铁道..." 等非首行数据 → eval LLM 误判为 noise。2000 字基本覆盖
+    单 sheet section 全部行。token 成本约 +1.5K/chunk × 7 = ~10K，可接受。
     """
     if not chunks:
         return "(empty)"
 
-    _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:")
+    _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:", "Excel:")
 
     def _is_table_chunk(c: ChunkEntry) -> bool:
         content = c.content or ""
         return any(m in content for m in _TABLE_MARKERS)
 
     def _render_one(c: ChunkEntry) -> str:
-        effective_max = 500 if _is_table_chunk(c) else max_chars
+        effective_max = 2000 if _is_table_chunk(c) else max_chars
         snippet = (c.content or "").replace("\n", " ").strip()
         if len(snippet) > effective_max:
             snippet = snippet[:effective_max] + "..."
