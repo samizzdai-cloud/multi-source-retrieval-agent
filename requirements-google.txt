@@ -1,5 +1,0 @@
-# Python deps for google_workspace_tool office file parsing.
-# Install with: .venv/bin/pip install -r requirements-google.txt
-python-docx>=1.0,<2
-python-pptx>=0.6,<2
-openpyxl>=3.1,<4

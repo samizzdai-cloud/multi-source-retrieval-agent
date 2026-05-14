@@ -39,8 +39,6 @@ google_workspace_tool/test_results/
 *.swp
 *.swo
 
-# Logs
-*.log
 
 # Bench output (JSON results from eval_preset_bench.py)
 results_*.json
