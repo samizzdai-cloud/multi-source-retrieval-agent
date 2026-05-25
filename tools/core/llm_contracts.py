@@ -21,7 +21,25 @@ from pydantic import BaseModel, Field, create_model
 
 
 # ── 全局统一模型 ─────────────────────────────────────────────────────────────
+# 这一行被 source_agent 的 plan_only / eval_only / plan_eval LlmAgent 共用，
+# 也被 final_assembler 的 LLM eval_layer 共用。由 retrieve_agent.build_retrieve_agent
+# 在装配前调 set_model(cfg.eval_model_override) 注入运行时覆盖。
 MODEL = "gemini-3.1-flash-lite"
+_DEFAULT_MODEL = MODEL  # 不可变的原始默认；reset 时使用
+
+
+def set_model(model: str = "") -> None:
+    """运行时注入 eval-stage LLM 模型（source_agent eval_only / plan_only /
+    plan_eval + final_assembler）。空串视为 reset 回 _DEFAULT_MODEL。
+
+    必须在 SourceAgent / LlmAgent 实例化**之前**调用——LlmAgent 在
+    __init__ 时把 model 字段烘焙进实例，构造后不再受 MODEL 全局变化影响。
+
+    调用方：retrieve_agent.build_retrieve_agent
+    驱动字段：RetrieveConfig.eval_model_override（← AgentConfig.eval_model）
+    """
+    global MODEL
+    MODEL = model or _DEFAULT_MODEL
 
 # ── LlmAgent generate_content_config token caps ─────────────────────────────
 # plan_only 输出极小（sub_queries 列表，≤300 tokens），保留 1024 上限——小 cap 对 LLM

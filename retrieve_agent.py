@@ -61,19 +61,20 @@ logger = logging.getLogger(__name__)
 def _apply_runtime_config(sc: SourceConfig) -> None:
     """把显式 SourceConfig 注入运行时依赖，优先于环境变量。"""
     google_api_key = sc.get("google_api_key", "GOOGLE_API_KEY")
-    gemini_model = sc.get("gemini_model", "GEMINI_MODEL")
     gemini_fallback_model = sc.get("gemini_fallback_model", "GEMINI_FALLBACK_MODEL")
     dashscope_api_key = sc.get("dashscope_api_key", "DASHSCOPE_API_KEY")
     google_credentials_path = sc.get("google_credentials_path", "GOOGLE_CREDENTIALS_PATH")
     google_token_path = sc.get("google_token_path", "GOOGLE_TOKEN_PATH")
 
     # ADK LlmAgent 当前通过底层 Google SDK 读取 GOOGLE_API_KEY；这里由 config 注入。
+    # 注：call_llm 的默认 LLM_MODEL 不再由 config 控制——planner / eval / source
+    # 内部 LLM 各自走专属字段（planner_model / eval_model）；这里只设置 api_key 与
+    # fallback_model。
     if google_api_key:
         os.environ["GOOGLE_API_KEY"] = google_api_key
         from tools.core.llm_client import configure_llm_client
         configure_llm_client(
             api_key=google_api_key,
-            model=gemini_model or None,
             fallback_model=gemini_fallback_model,
         )
 
@@ -561,7 +562,7 @@ class RetrieveAgent(BaseAgent):
         if self.config.eval_layer_active:
             eval_layer = build_eval_layer(
                 self.config.eval_layer_effective_mode,
-                model=self.config.MODEL,
+                model=self.config.eval_model_override or self.config.MODEL,
             )
             # LlmEvalLayer.rank() 是同步阻塞调用（含 LLM RTT），通过 to_thread 不阻塞事件循环；
             # RuleEvalLayer.rank() 亦是同步，同样走 to_thread 保持一致（开销可忽略）。
@@ -648,6 +649,12 @@ def build_retrieve_agent(
     sc = source_config or SourceConfig(load_from_env=True)
     os.environ["RAG_PRESET"] = cfg.preset
     _apply_runtime_config(sc)
+
+    # 注入 eval-stage LLM 模型（覆盖 source_agent 的 eval_only/plan_only/plan_eval +
+    # final_assembler LLM）。空字符串 reset 回 llm_contracts._DEFAULT_MODEL。
+    # 必须在下面 SourceAgent.__init__ 之前调用——LlmAgent 在 __init__ 时把 model 烘焙进实例。
+    from tools.core import llm_contracts as _llm_contracts
+    _llm_contracts.set_model(cfg.eval_model_override)
 
     from agents.bailian.bailian_source_agent import BailianSourceAgent
     from agents.google.google_source_agent import GoogleSourceAgent

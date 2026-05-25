@@ -24,7 +24,6 @@ class SourceConfig:
     bailian_index_id: str = ""            # 旧版单库 fallback
     dashscope_api_key: str = ""           # text-embedding-v4
     google_api_key: str = ""              # Gemini / ADK 使用的 Google API Key
-    gemini_model: str = ""                # 传统 llm_client 调用默认模型
     gemini_fallback_model: str = ""       # 传统 llm_client 失败时 fallback 模型
     google_credentials_path: str = ""      # OAuth2 client credentials.json；空时走 GOOGLE_CREDENTIALS_PATH 或默认路径
     google_token_path: str = ""            # OAuth2 token.json；空时走 GOOGLE_TOKEN_PATH 或默认路径
@@ -75,9 +74,15 @@ class AgentConfig:
 
     # ── LLM / Rerank 凭证 ─────────────────────────────────────
     google_api_key: str = ""              # Gemini / ADK 共用 Google API Key
-    gemini_model: str = ""                # 老 llm_client 默认模型，可留空
     gemini_fallback_model: str = ""       # 老 llm_client fallback 模型，可留空
     dashscope_api_key: str = ""           # Qwen rerank API key
+
+    # ── Planner / Eval 模型分离接口 ────────────────────────────
+    # 两类模型可独立配置；留空都用 dataclass 默认值
+    #   planner_model:  global_planner v2.2 LLM，默认 gemini-3.5-flash
+    #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 lite
+    planner_model: str = ""               # 空 → GlobalPlannerConfig.model 默认（3.5-flash）
+    eval_model: str = ""                  # 空 → RetrieveConfig.MODEL 默认（lite-preview）
 
     # ── Google OAuth 文件路径 ─────────────────────────────────
     google_credentials_path: str = ""      # Google OAuth2 client credentials.json
@@ -85,11 +90,22 @@ class AgentConfig:
     load_from_env: bool = False            # 外部母程序默认走显式注入，不依赖环境变量
 
     def to_retrieve_config(self) -> "RetrieveConfig":
-        """转换为 RetrieveConfig（行为配置）。"""
-        return RetrieveConfig(
+        """转换为 RetrieveConfig（行为配置）。
+
+        分离的两类模型按需注入 RetrieveConfig：
+          - planner_model → RetrieveConfig.global_planner.model
+          - eval_model    → RetrieveConfig.eval_model_override
+        留空时各自走 dataclass 默认值。
+        """
+        rc = RetrieveConfig(
             preset=self.preset,           # type: ignore[arg-type]
             enabled_sources=list(self.sources),
         )
+        if self.planner_model:
+            rc.global_planner = GlobalPlannerConfig(model=self.planner_model)  # type: ignore[arg-type]
+        if self.eval_model:
+            rc.eval_model_override = self.eval_model
+        return rc
 
     def to_source_config(self) -> "SourceConfig":
         """转换为 SourceConfig（凭证配置）。"""
@@ -106,7 +122,6 @@ class AgentConfig:
             google_token_path=self.google_token_path,
             dashscope_api_key=self.dashscope_api_key,
             google_api_key=self.google_api_key,
-            gemini_model=self.gemini_model,
             gemini_fallback_model=self.gemini_fallback_model,
             load_from_env=self.load_from_env,
         )
@@ -217,15 +232,19 @@ class GlobalPlan:
 class GlobalPlannerConfig:
     """Global planner（v2.2）行为配置。模型在此切换，不走 env。
 
-    - ``model``: A/B 评测后锁定为 ``gemini-3-flash-preview`` ——
-      实测在 3 源 / balanced+lite 下 focus 拆解更深（4 vs 2 focuses）、
-      Google 召回覆盖更全；planner 多 1s LLM RTT 由跳过各源 plan_only LLM 抵消。
-      回退 lite 模型仅作 A/B 评测保留。eval 层 / eval_only / plan_eval 仍走 lite。
+    - ``model``: 默认 ``gemini-3.5-flash``（GenerateContent + response_schema 路径）。
+      历史选项 ``gemini-3-flash-preview`` / ``gemini-3.1-flash-lite`` 仍受支持。
+      eval_layer / plan_only LLM 仍走 lite，由 ``RetrieveConfig.eval_model_override``
+      / ``LLM_MODEL`` 单独控制，不受此字段影响。
     - ``fallback_to_v1``: 整盘失败（LLM 异常 / JSON 错 / 0 focus / 所有 focus 都
       被 validator reject）时是否回落到老 query_planner + 各源 plan_only_LLM 路径。
     - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2，直接走老路径。
     """
-    model: Literal["gemini-3.1-flash-lite", "gemini-3-flash-preview"] = "gemini-3-flash-preview"
+    model: Literal[
+        "gemini-3.1-flash-lite",
+        "gemini-3-flash-preview",
+        "gemini-3.5-flash",
+    ] = "gemini-3.5-flash"
     timeout_s: float = 15.0
     max_focuses: int = 6
     fallback_to_v1: bool = True
@@ -493,6 +512,10 @@ class RetrieveConfig:
     # BAILIAN_ALLOWED_INDEXES 过滤；planner 注入此对象的 allowed 列表，runner
     # 用同一对象做 indexes symbolic 校验。
     bailian_catalog: Optional[BailianIndexCatalog] = None
+
+    # eval_layer / LLM rerank 模型覆盖；留空时用 ``MODEL`` ClassVar 默认（lite）。
+    # 由外部 AgentConfig.eval_model 透传，不读 env。
+    eval_model_override: str = ""
 
     # ── 内部常量（不作为构造参数；调整请改源码或 preset 表）──
     EVAL_LAYER_TOP_K: ClassVar[int] = 12

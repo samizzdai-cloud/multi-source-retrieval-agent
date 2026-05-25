@@ -4,8 +4,9 @@ from typing import List, Literal, Optional, Type
 from pydantic import BaseModel, Field, create_model
 
 from google.adk.agents.llm_agent import LlmAgent
+from tools.core import llm_contracts as _llm_contracts
 from tools.core.llm_contracts import (
-    MODEL, Decision, TierAssignment, build_eval_only_model, build_plan_eval_model,
+    Decision, TierAssignment, build_eval_only_model, build_plan_eval_model,
     EVAL_RUBRIC_BLOCK, MULTI_FOCUS_TOP_K_EXTRA,
     AGENT_CFG_EVAL_ONLY, AGENT_CFG_PLAN_ONLY, AGENT_CFG_PLAN_EVAL,
 )
@@ -89,7 +90,7 @@ EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪�
 def build_notion_plan_only_agent() -> Optional[LlmAgent]:
     return LlmAgent(
         name="notion_plan_only",
-        model=MODEL,
+        model=_llm_contracts.MODEL,
         instruction=PLAN_ONLY_INSTRUCTION,
         output_schema=PlanOnlyOutput,
         generate_content_config=AGENT_CFG_PLAN_ONLY,
@@ -99,7 +100,7 @@ def build_notion_eval_only_agent(source_top_k: int) -> LlmAgent:
     # Schema cap 留 multi-focus 动态预算（base + EXTRA）；运行时由 effective_top_k 截断。
     return LlmAgent(
         name="notion_eval_only",
-        model=MODEL,
+        model=_llm_contracts.MODEL,
         instruction=EVAL_ONLY_INSTRUCTION,
         output_schema=build_eval_only_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA),
         generate_content_config=AGENT_CFG_EVAL_ONLY,
@@ -108,7 +109,7 @@ def build_notion_eval_only_agent(source_top_k: int) -> LlmAgent:
 def build_notion_plan_eval_agent(source_top_k: int) -> Optional[LlmAgent]:
     return LlmAgent(
         name="notion_plan_eval",
-        model=MODEL,
+        model=_llm_contracts.MODEL,
         instruction=PLAN_EVAL_INSTRUCTION,
         output_schema=build_plan_eval_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA, SubQueryItem),
         generate_content_config=AGENT_CFG_PLAN_EVAL,

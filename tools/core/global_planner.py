@@ -223,6 +223,11 @@ session_context：{session_context or "无"}
   1. **可评估**：给任一切片能直接判断是否命中（不能是 'nubia'/'销售数据' 这类泛词）
   2. **自包含**：实体 + 维度 + 可选限定，15-40 字
   3. **不重叠**：focuses 间语义边界清晰
+  4. **anchor 保真**：user_query 中出现的英文专有名（如 X Ultra / Paid Media）、
+     全大写缩写（如 ROAS / UGC / EDM / DTC / GMV）、型号编号（如 Z80 / Z70 Ultra /
+     11 Pro）、明确时点（YYYY-MM / YYYY Q1 / N 月）**必须原样保留**进每条相关
+     focus_content；这些是下游检索的关键命中词，不可改写、不可抽象化为"销售数据 /
+     广告记录 / 项目进展"这类泛词。
 
 ## 数量约束（硬要求）
 
