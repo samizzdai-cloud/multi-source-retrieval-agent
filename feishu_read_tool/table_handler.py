@@ -642,6 +642,20 @@ def build_table_chunk(
     if all(_is_blank_row(row) for row in rows):
         return [], consumed
 
+    # Strip all-blank columns (Feishu layout tables often have many empty trailing cols)
+    if rows:
+        ncols = max(len(r) for r in rows)
+        last_nonempty_col = -1
+        for col_idx in range(ncols - 1, -1, -1):
+            if any(len(r) > col_idx and r[col_idx].strip() for r in rows):
+                last_nonempty_col = col_idx
+                break
+        if last_nonempty_col >= 0:
+            rows = [r[:last_nonempty_col + 1] for r in rows]
+            col_count = last_nonempty_col + 1
+        else:
+            return [], consumed
+
     # ── Small table: direct Markdown ──────────────────────────────
     if is_small_table(row_count, col_count, cfg):
         content = _render_markdown(rows)

@@ -234,24 +234,13 @@ def _build_whiteboard_chunk(
     Returns:
         Chunk 或 None（画板无文字节点时）
     """
-    # 优先使用 mermaid（保留节点连线语义），fallback 到 flat pipe 格式
-    mermaid = client.get_whiteboard_mermaid(board_token)
-    if mermaid:
-        content = "[画板]\n```mermaid\n" + mermaid + "\n```"
-    else:
-        nodes = client.get_whiteboard_nodes(board_token)
-        if not nodes:
-            return None
-        seen: set = set()
-        unique_texts: List[str] = []
-        for node in nodes:
-            t = " ".join(node["text"].split())
-            if t and t not in seen:
-                seen.add(t)
-                unique_texts.append(t)
-        if not unique_texts:
-            return None
-        content = "[画板] " + " | ".join(unique_texts)
+    # 三路自动渲染：mindmap 树 / mermaid 流程图 / 2D 坐标网格
+    from .whiteboard_md_renderer import render_whiteboard_md
+    raw_nodes = client._fetch_whiteboard_nodes(board_token)
+    body = render_whiteboard_md(raw_nodes)
+    if not body:
+        return None
+    content = "[画板]\n" + body
     chunk_counter[0] += 1
     return Chunk(
         chunk_id=f"{doc_id}_{chunk_counter[0]}",
