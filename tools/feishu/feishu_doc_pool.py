@@ -133,9 +133,15 @@ class FeishuDocPool:
             "selected_query_types": sorted(
                 set(existing.get("selected_query_types") or []) | set(candidate.get("selected_query_types") or [])
             ),
-            "candidate_rerank_score": max(
-                float(existing.get("candidate_rerank_score", 0.0) or 0.0),
-                float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
+            "cross_query_hit_count": int(existing.get("cross_query_hit_count", 1) or 1)
+            + int(candidate.get("cross_query_hit_count", 1) or 1),
+            "best_api_rank": min(
+                int(existing.get("best_api_rank", 10**9) or 10**9),
+                int(candidate.get("best_api_rank", 10**9) or 10**9),
+            ),
+            "first_seen_order": min(
+                int(existing.get("first_seen_order", 10**9) or 10**9),
+                int(candidate.get("first_seen_order", 10**9) or 10**9),
             ),
         }
         return merged
@@ -311,7 +317,9 @@ class FeishuDocPool:
                             "selected_sub_query_ids": list(meta.get("selected_sub_query_ids") or []),
                             "selected_feishu_urls": list(meta.get("selected_feishu_urls") or []),
                             "selected_query_types": list(meta.get("selected_query_types") or []),
-                            "candidate_rerank_score": float(meta.get("candidate_rerank_score", 0.0) or 0.0),
+                            "cross_query_hit_count": int(meta.get("cross_query_hit_count", 1) or 1),
+                            "best_api_rank": int(meta.get("best_api_rank", 10**9) or 10**9),
+                            "first_seen_order": int(meta.get("first_seen_order", 10**9) or 10**9),
                         },
                     )
                     doc_chunks.append(uc)

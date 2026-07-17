@@ -14,18 +14,26 @@
   ``response_schema.maxItems``。
 """
 
-from typing import Dict, List, Literal, Optional, Type
+import logging
+from typing import Any, Dict, List, Literal, Mapping, Optional, Type
 
 from google.genai import types as _genai_types
+
+logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field, create_model
 
 
 # ── 全局统一模型 ─────────────────────────────────────────────────────────────
-# 这一行被 source_agent 的 plan_only / eval_only / plan_eval LlmAgent 共用，
-# 也被 final_assembler 的 LLM eval_layer 共用。由 retrieve_agent.build_retrieve_agent
-# 在装配前调 set_model(cfg.eval_model_override) 注入运行时覆盖。
-MODEL = "gemini-3.1-flash-lite"
+# 这一行被 source_agent 的 plan_only / eval_only / eval_layer LlmAgent 共用。
+# 由 retrieve_agent.build_retrieve_agent 在装配前调 set_model(cfg.eval_model_override)
+# 注入运行时覆盖。
+MODEL = "deepseek/deepseek-v4-flash"
 _DEFAULT_MODEL = MODEL  # 不可变的原始默认；reset 时使用
+
+# ── Thinking 配置 ─────────────────────────────────────────────────────────
+# 由 retrieve_agent 在装配前调 set_thinking_config(...) 注入。
+# DeepSeek 模型通过 LiteLlm(thinking={...}) 传递；Gemini 模型自动忽略。
+_THINKING_CONFIG: Optional[dict] = None
 
 
 def set_model(model: str = "") -> None:
@@ -41,16 +49,84 @@ def set_model(model: str = "") -> None:
     global MODEL
     MODEL = model or _DEFAULT_MODEL
 
-# ── LlmAgent generate_content_config token caps ─────────────────────────────
-# plan_only 输出极小（sub_queries 列表，≤300 tokens），保留 1024 上限——小 cap 对 LLM
-# 还是个隐性"紧凑输出"提示。
-# eval_only / plan_eval：去掉显式 max_output_tokens，让 model 用默认上限（gemini-3.1-
-# flash-lite 模型 max≈65K 远超实际需要），由 output_schema (Pydantic) 约束结构上限。
-# Google chunk_id 已从 ~175 字符瘦身到 ~50 字符（reuse reader 的自描述 id），实际输出
-# 体量本身也下来了；_run_llm_agent 内的 JSON repair 兜底保留作为防御深度。
-AGENT_CFG_EVAL_ONLY = _genai_types.GenerateContentConfig()
-AGENT_CFG_PLAN_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=1024)
-AGENT_CFG_PLAN_EVAL = _genai_types.GenerateContentConfig()
+
+def set_thinking_config(config: Optional[dict] = None) -> None:
+    """注入 DeepSeek thinking 配置。None 表示清除。"""
+    global _THINKING_CONFIG
+    _THINKING_CONFIG = config
+
+
+def build_llm_model() -> Any:
+    """构建当前配置下的模型实例（LiteLlm 或字符串）。
+
+    若 MODEL 以 'deepseek/' 开头，返回配置了 thinking 和 provider 的 LiteLlm 实例。
+    必须显式传 custom_llm_provider="deepseek"——ADK 的 LLMRegistry 解析后会把
+    模型名前缀去掉，导致 litellm 无法识别 provider。
+    """
+    if MODEL.startswith("deepseek/"):
+        try:
+            from google.adk.models.lite_llm import LiteLlm
+            actual_model = MODEL.split("/", 1)[1] if "/" in MODEL else MODEL
+            extra: dict = {"custom_llm_provider": "deepseek"}
+            if _THINKING_CONFIG:
+                extra.update(_THINKING_CONFIG)
+            return LiteLlm(model=actual_model, **extra)
+        except ImportError:
+            pass
+    return MODEL
+
+
+# ── DeepSeek response_format 适配 ───────────────────────────────────────
+# ADK 的 LiteLlm._to_litellm_response_format 对非 Gemini 模型输出
+# {"type": "json_schema", "json_schema": {...}}，但 DeepSeek 只支持
+# {"type": "json_object"}。此处 monkey-patch 该函数，对 DeepSeek 模型降级。
+
+_patched_response_format = False
+
+
+def _ensure_response_format_patch() -> None:
+    """Monkey-patch ADK LiteLlm 的 response_format 生成逻辑。
+
+    DeepSeek API 只支持 ``response_format={"type": "json_object"}``，
+    不支持 OpenAI 的 ``json_schema`` 格式。ADK 对非 Gemini 模型默认输出
+    json_schema 会导致 400 错误。
+
+    此 patch 在 build_retrieve_agent 阶段调用一次（幂等）。
+    """
+    global _patched_response_format
+    if _patched_response_format:
+        return
+
+    try:
+        from google.adk.models import lite_llm as _llm_module
+        _original = _llm_module._to_litellm_response_format
+
+        def _patched_to_litellm_response_format(
+            response_schema: Any, model: str,
+        ) -> Optional[dict]:
+            result = _original(response_schema, model)
+            if result is None:
+                return None
+            # DeepSeek 模型: 降级 json_schema → json_object
+            if "deepseek" in str(model).lower():
+                if result.get("type") == "json_schema":
+                    return {"type": "json_object"}
+            return result
+
+        _llm_module._to_litellm_response_format = _patched_to_litellm_response_format
+        _patched_response_format = True
+        logger.debug("llm_contracts: patched _to_litellm_response_format for DeepSeek")
+    except ImportError:
+        pass
+
+# ── LlmAgent generate_content_config ────────────────────────────────────────
+# JSON mode does not make output unbounded.  A full judgment list can be much
+# larger than top-K when a source has accumulated many previews; leave enough
+# room for every active chunk's compact TierAssignment instead of recovering a
+# truncated top_k-only response.
+AGENT_CFG_EVAL_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=16384)
+AGENT_CFG_PLAN_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=4096)
+AGENT_CFG_PLAN_EVAL = _genai_types.GenerateContentConfig(max_output_tokens=16384)
 
 
 # ── multi-focus 动态预算常量 ─────────────────────────────────────────────────
@@ -170,10 +246,28 @@ class TierAssignment(BaseModel):
     )
 
 
+class FocusEvidenceLedger(BaseModel):
+    """Compact, batch-local evidence accounting for later global plan_eval."""
+    focus_id: str
+    evidence_chunk_ids: List[str] = Field(default_factory=list)
+    covered_aspects: List[str] = Field(default_factory=list)
+    remaining_gap: str = ""
+
+
+class FocusReplanDecision(BaseModel):
+    """Per-focus plan-eval conclusion retained in the compact trace."""
+    focus_id: str
+    status: Literal["covered", "gap", "insufficient"]
+    gap_type: Literal["none", "upstream_evidence_needed", "query_refinement"] = "none"
+    reason: str = ""
+
+
 def tiers_list_to_dict(tiers: Optional[List[dict]]) -> Dict[str, str]:
     """把 ``[{chunk_id, tier, ...}, ...]`` 归一成 ``{chunk_id: tier}``（兼容旧调用）。"""
     out: Dict[str, str] = {}
     for item in tiers or []:
+        if not isinstance(item, Mapping):
+            continue
         cid = item.get("chunk_id")
         tier = item.get("tier")
         if cid and tier:
@@ -189,6 +283,8 @@ def tiers_list_to_map(tiers: Optional[List[dict]]) -> Dict[str, Dict]:
     """
     out: Dict[str, Dict] = {}
     for item in tiers or []:
+        if not isinstance(item, Mapping):
+            continue
         cid = item.get("chunk_id")
         if not cid:
             continue
@@ -218,6 +314,17 @@ def build_eval_only_model(source_top_k: int) -> Type[BaseModel]:
     )
 
 
+def build_partial_eval_model(max_chunks: int = 2000) -> Type[BaseModel]:
+    """Judges every chunk in one context batch; deliberately has no top-K."""
+    return create_model(  # type: ignore[call-overload]
+        f"PartialEvalOutputK{max_chunks}",
+        tiers=(List[TierAssignment], Field(..., max_length=max_chunks,
+              description="judgment for every supplied chunk; do not omit complementary evidence")),
+        focus_ledger=(List[FocusEvidenceLedger], Field(default_factory=list,
+              description="batch-local coverage and remaining gap per focus")),
+    )
+
+
 def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]) -> Type[BaseModel]:
     """plan_eval 输出 schema 工厂（共享版，4 个源共用）。
 
@@ -237,7 +344,11 @@ def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]
         ),
         tiers=(
             Optional[List[TierAssignment]],
-            Field(default=None, description="decision=stop 时必填"),
+            Field(default=None, description="all active preview chunks must be judged for both continue and stop"),
+        ),
+        focus_decisions=(
+            List[FocusReplanDecision],
+            Field(default_factory=list, description="per-focus coverage/gap decision for trace and replan routing"),
         ),
     )
 
@@ -260,6 +371,7 @@ def validate_plan_eval_output(payload: dict) -> dict:
     elif decision == "stop":
         payload["top_k_chunk_ids"] = payload.get("top_k_chunk_ids") or []
         payload["tiers"] = payload.get("tiers") or []
+    payload["focus_decisions"] = payload.get("focus_decisions") or []
     return payload
 
 

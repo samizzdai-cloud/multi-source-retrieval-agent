@@ -2,8 +2,9 @@ google-adk
 google-genai
 python-dotenv
 requests
-dashscope
 PyYAML
+lark-oapi
+httpx
 google-api-python-client
 google-auth
 google-auth-oauthlib

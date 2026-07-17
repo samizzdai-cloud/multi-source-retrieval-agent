@@ -118,7 +118,7 @@ import re as _re
 
 
 def _dedupe_text_hash(text: str) -> str:
-    """对 chunk text 取 MD5，用于并行结果去重（与 reranker 保持相同逻辑）。"""
+    """对 chunk text 取 MD5，用于并行结果去重。"""
     normalized = _re.sub(r"\s+", " ", text[:500].strip().lower())
     return _hashlib.md5(normalized.encode()).hexdigest()
 
@@ -153,9 +153,6 @@ def _retrieve_single_index(
     tags: Optional[List[str]] = None,
     dense_similarity_top_k: int = 20,
     sparse_similarity_top_k: int = 20,
-    enable_reranking: bool = True,
-    rerank_min_score: float = 0.5,
-    rerank_top_n: int = 8,
 ) -> Dict[str, Any]:
     """调用百炼单个知识库检索接口（同步）。
 
@@ -171,7 +168,7 @@ def _retrieve_single_index(
         return {"status": "error", "message": "未配置阿里云 AccessKey"}
 
     try:
-        from alibabacloud_bailian20231229.models import RetrieveRequest, RetrieveRequestRerank # type: ignore
+        from alibabacloud_bailian20231229.models import RetrieveRequest # type: ignore
         client = _build_client()
 
         request = RetrieveRequest(
@@ -179,12 +176,6 @@ def _retrieve_single_index(
             index_id=index_id,
             dense_similarity_top_k=dense_similarity_top_k,
             sparse_similarity_top_k=sparse_similarity_top_k,
-            enable_reranking=enable_reranking,
-            rerank_min_score=rerank_min_score,
-            rerank_top_n=rerank_top_n,
-            rerank=[RetrieveRequestRerank(
-                model_name="qwen3-rerank-hybrid",
-            )],
         )
 
         # Tag filtering via SearchFilters
@@ -270,8 +261,6 @@ async def bailian_retrieve_unified(
     index_id: Optional[str] = None,
     tags: Optional[List[str]] = None,
     indexes: Optional[List[str]] = None,
-    rerank_top_n_override: Optional[int] = None,
-    rerank_min_score_override: Optional[float] = None,
     executor: Optional[concurrent.futures.Executor] = None,
 ) -> List[UnifiedChunk]:
     """百炼多知识库并行检索，返回 UnifiedChunk 列表。
@@ -281,8 +270,6 @@ async def bailian_retrieve_unified(
         index_id: 指定单个知识库 ID（旧版兼容，优先级低于 indexes）
         tags: tag 过滤列表（l2分类 + 时效），空/None = 不过滤全量检索
         indexes: 指定知识库名列表（["nubia", "hypershell"]），空/None = 查全部
-        rerank_top_n_override: 覆盖 rerank_top_n 默认值（12）
-        rerank_min_score_override: 覆盖 rerank_min_score 默认值（0.5）
 
     每个 chunk.metadata["index_name"] 标注来源知识库名。
     每个 chunk.metadata["filtered_by_tags"] 标注使用的 tag 过滤。
@@ -317,15 +304,11 @@ async def bailian_retrieve_unified(
         query, list(target_indexes.keys()), effective_tags,
     )
 
-    # rerank_top_n：实验验证 dense/sparse top_k 对百炼无效，只有 top_n 有效
-    # 默认 12（[P1.3↑] 扩大每个 index call 的返回量以提升召回）
-    _rerank_top = rerank_top_n_override or 12
-    _rerank_min = rerank_min_score_override if rerank_min_score_override is not None else 0.5
+    # Index API 返回量由服务端默认值控制；客户端不再作内容选择。
 
     async def _fetch_one(name: str, idx_id: str, call_tags: Optional[List[str]]) -> List[UnifiedChunk]:
         r = await _exec_to_thread(
             executor, _retrieve_single_index, query, idx_id, call_tags or None,
-            rerank_min_score=_rerank_min, rerank_top_n=_rerank_top,
         )
         if r.get("status") != "success":
             logger.warning("bailian index '%s' (tags=%s) failed: %s", name, call_tags, r.get("message"))

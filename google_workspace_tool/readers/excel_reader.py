@@ -239,7 +239,7 @@ def read_chunks(
         # 1. 结构级筛选
         # Excel/CSV are selected at the sheet-family level upstream. Once the
         # file is downloaded, process all internal worksheets so subquery-level
-        # sheet rerank can decide using actual table chunks.
+        # Downstream preview evaluation receives the actual table chunks.
         selected_sheets = sheet_names
         if range_names:
             selected_sheets = [s for s in sheet_names if s in range_names]

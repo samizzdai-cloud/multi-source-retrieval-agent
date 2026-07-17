@@ -8,7 +8,7 @@ Docx Pipeline — doc/docx 文档的 block 读取 + chunking 链路（Stage 3-4�
 当前主链（DocPool 模式, skip_scoring=True）：
   · Stage 3: Fetch document blocks（Block API / MCP 并发读取）
   · Stage 4: Build chunks（文本 + 表格块切割）
-  · Stage 2/5 被跳过；候选过滤和 chunk 评分由上游 / 下游 qwen3-rerank 完成
+  · Stage 2/5 被跳过；候选读取顺序由上游保留，证据判断由下游完成
 
 遗留模式（skip_scoring=False，非主链）：
   · Stage 2: BM25 candidate trim
@@ -469,9 +469,9 @@ def run_rag_pipeline(
     Runs Stage 3-7 of the RAG pipeline.
 
     当前主链（DocPool 模式）下：
-      · candidates 已由上游 feishu_retrieve 的 qwen3-rerank 做 candidate selection
+      · candidates 已由上游 feishu_retrieve 在原生顺序和预算内选定
       · skip_scoring=True 时跳过 Stage 2/5，直接返回 raw chunks
-      · chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
+      · chunk 证据判断由下游 FeishuSourceAgent 统一完成
 
     Args:
         query: User search query string.
@@ -788,7 +788,7 @@ def run_rag_pipeline(
 
     # ── Stage 5: Score and Select (DEPRECATED in main chain) ─────────────────
     # DocPool 模式：跳过 Stage 5，直接将 Chunk 转为 ChunkResult（score=0）
-    # chunk 评分由下游 FeishuSourceAgent 的 qwen3-rerank 统一完成
+    # Chunk evidence judgment is performed by FeishuSourceAgent after reads.
     logger.info("Stage 5: SKIP (scoring disabled), converting %d chunks directly", len(all_chunks))
     scored_chunks: List[ChunkResult] = []
     for chunk in all_chunks:
@@ -812,8 +812,8 @@ def run_rag_pipeline(
         query=query,
         total_docs_searched=total_docs_searched,
         total_docs_read=total_docs_read,
-        total_chunks=0,       # filled by caller after budget allocation
-        total_tokens=0,       # filled by caller after budget allocation
+        total_chunks=len(scored_chunks),
+        total_tokens=sum(int(getattr(c, "token_count", 0) or 0) for c in scored_chunks),
         chunks=scored_chunks,
     )
 

@@ -53,7 +53,7 @@ PLAN_ONLY_INSTRUCTION = f"""你是检索规划器。针对给定的 source，按
 
 输出示例（飞书源）：
 {{"sub_queries": [
-  {{"query": "nubia 英国 销售", "target_focus": "focus_0", "time_filter": null, "query_type": "structured"}},
+  {{"query": "用户给定实体 月度 销售", "target_focus": "focus_0", "time_filter": null, "query_type": "structured"}},
   {{"query": "复盘 总结", "target_focus": "focus_1", "time_filter": "last_30_days", "query_type": "personal_recent", "author_filter": "me"}}
 ]}}
 """
@@ -62,35 +62,42 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 
 用户消息里会提供：
 - focuses_block: 检索维度列表
-- chunks_block: 按 focus 分组渲染的候选 chunks，每个 chunk 标注了 focuses=[...] 和 sq=...
+- chunks_block: 按 focus 分组渲染的候选 chunks，每个 chunk 标注了 chunk_ref=C1/C2/...、focuses=[...] 和 sq=...
 - loop_info: loop_n + min_loops + max_loops
 - source_top_k: top_k_chunk_ids 上限
 
 {ENTITY_FIDELITY_BLOCK}
 
 ## 决策规则
-- 若已有 chunks 足够覆盖所有 focus → decision="stop"
-- 否则 → decision="continue"，给出 replan_queries（同样遵守上述实体保真原则）
+- 先为每个 focus 输出 focus_decisions：status、gap_type、reason。
+- 当前文档只有诊断或结论、但回答需要上游日期/账户/结构化原始资料 → gap_type="upstream_evidence_needed"；replan_queries 使用可执行 query_type（需要表格时为 structured）。
+- 仅在词面/API 召回不足且仍有合理同一意图检索方式 → gap_type="query_refinement"。
+- 若已有 chunks 足够覆盖所有 focus → decision="stop"。
+- 否则 → decision="continue"，给出与每个 gap_type 一致的 replan_queries（同样遵守上述实体保真原则）。
 
 {EVAL_RUBRIC_BLOCK}
 
 ## decision=stop 时输出
-- top_k_chunk_ids 按相关度降序
+- top_k_chunk_ids 和 tiers[].chunk_id 只能使用 chunks_block 中的 chunk_ref（如 C1），不得输出 canonical chunk ID；按相关度降序。
 - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
+- 严格输出 JSON 对象，且 `tiers` 必须包含每个 active preview chunk 的 judgment：
+  `{{"decision":"stop","top_k_chunk_ids":["C1"],"tiers":[{{"chunk_id":"C1","tier":"important","relevance":0.8,"answered_focuses":["focus_0"],"angle_tag":"funnel"}}],"focus_decisions":[{{"focus_id":"focus_0","status":"covered","gap_type":"none","reason":"..."}}]}}`。
 """
 
 EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪些 chunks 能回答它，然后选出综合 top_k。
 
 用户消息里会提供：
 - focuses_block: 检索维度列表
-- chunks_block: 按 focus 分组渲染的候选 chunks；每个 chunk 标注了 focuses=[...] 和 sq=...
+- chunks_block: 按 focus 分组渲染的候选 chunks；每个 chunk 标注了 chunk_ref=C1/C2/...、focuses=[...] 和 sq=...
 - source_top_k: top_k_chunk_ids 上限
 
 {EVAL_RUBRIC_BLOCK}
 
 ## 输出要求
-- top_k_chunk_ids 按相关度降序
+- top_k_chunk_ids 和 tiers[].chunk_id 只能使用 chunks_block 中的 chunk_ref（如 C1），不得输出 canonical chunk ID；按相关度降序。
 - answered_focuses 严格填写该 chunk 实际回答的 focus_id（部分回答不算）
+- 严格输出 JSON 对象，`tiers` 不得省略：每个被输出的 chunk 至少有
+  `{{"chunk_id":"C1","tier":"critical|important|noise","relevance":0.0,"answered_focuses":["focus_0"],"angle_tag":"..."}}`。
 """
 
 # ============================================================================
@@ -100,7 +107,7 @@ EVAL_ONLY_INSTRUCTION = f"""你是检索评估器。对每个 focus，评估哪�
 def build_feishu_plan_only_agent() -> Optional[LlmAgent]:
     return LlmAgent(
         name="feishu_plan_only",
-        model=_llm_contracts.MODEL,
+        model=_llm_contracts.build_llm_model(),
         instruction=PLAN_ONLY_INSTRUCTION,
         output_schema=PlanOnlyOutput,
         generate_content_config=AGENT_CFG_PLAN_ONLY,
@@ -110,7 +117,7 @@ def build_feishu_eval_only_agent(source_top_k: int) -> LlmAgent:
     # Schema cap 留 multi-focus 动态预算（base + EXTRA）；运行时由 effective_top_k 截断。
     return LlmAgent(
         name="feishu_eval_only",
-        model=_llm_contracts.MODEL,
+        model=_llm_contracts.build_llm_model(),
         instruction=EVAL_ONLY_INSTRUCTION,
         output_schema=build_eval_only_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA),
         generate_content_config=AGENT_CFG_EVAL_ONLY,
@@ -119,7 +126,7 @@ def build_feishu_eval_only_agent(source_top_k: int) -> LlmAgent:
 def build_feishu_plan_eval_agent(source_top_k: int) -> Optional[LlmAgent]:
     return LlmAgent(
         name="feishu_plan_eval",
-        model=_llm_contracts.MODEL,
+        model=_llm_contracts.build_llm_model(),
         instruction=PLAN_EVAL_INSTRUCTION,
         output_schema=build_plan_eval_model(source_top_k + MULTI_FOCUS_TOP_K_EXTRA, SubQueryItem),
         generate_content_config=AGENT_CFG_PLAN_EVAL,

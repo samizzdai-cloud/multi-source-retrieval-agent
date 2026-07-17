@@ -46,15 +46,15 @@ SOURCE_PROFILES: Dict[str, SourceProfile] = {
             "实时数据（分钟级）覆盖弱",
         ],
         sub_query_hints=[
-            "优先使用业务实体全称 + 维度词（如 'nubia DTC 渠道 销售数据'）",
+            "优先保留用户提供的实体全称、缩写和结果维度词，不得补充业务实体",
             "涉及表格时加上字段名（'转化率 月度'）可提升召回",
         ],
     ),
     "bailian": SourceProfile(
         source="bailian",
-        description="阿里云百炼知识库——经 rerank 的长文档片段，覆盖内部沉淀资料",
+        description="阿里云百炼知识库——内部沉淀资料的原始检索片段",
         strengths=[
-            "qwen3-rerank 精排过，排序稳定",
+            "保留检索 API 原始顺序，后续由 evidence evaluation 判断相关性",
             "跨文档语义检索，适合概念型 query",
             "tag 过滤支持（子业务领域 + 时效）",
         ],
@@ -69,7 +69,7 @@ SOURCE_PROFILES: Dict[str, SourceProfile] = {
     ),
     "google": SourceProfile(
         source="google",
-        description="Google Workspace——该环境沉淀某电竞消费电子品牌的硬件产品与营销业务内容，文件涵盖培训文档、上市时间表、问答话术及视觉设计资产，适合回答关于智能终端规格卖点、市场发布节奏、营销物料分布及电商设计规范等问题。",
+        description="Google Workspace——跨部门协作文档、表格、演示和邮件；按 Drive 原生标题/全文能力检索后读取原文件。",
         strengths=[
             "跨部门共享资料、团队协作文档（Docs/Sheets/Slides）",
             "外部供应商或代理商共享的物料",

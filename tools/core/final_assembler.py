@@ -261,7 +261,7 @@ def _make_llm_input(
                 "relevance": round(c.score or 0.0, 3),
                 "answered_focuses": list((c.metadata or {}).get("answered_focuses") or []),
                 "angle_tag": (c.metadata or {}).get("angle_tag") or "",
-                "content_preview": (c.content or "")[:preview_chars],
+                "content_preview": (c.preview_content or c.content or "")[:preview_chars],
             }
             for c in candidates
         ],

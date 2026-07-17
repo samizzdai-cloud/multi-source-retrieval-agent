@@ -1,0 +1,96 @@
+{
+  "source": "feishu",
+  "labeling_mode": "query-first evidence chain",
+  "benchmark_state": "draft_initial_labels",
+  "query_seed_source": {
+    "wiki_node": "OqFCwQoEZilxCfkNt9ccV86jnug",
+    "bitable": "HJzBbQQjvaf3cLsa9e4cigHCnRb",
+    "table": "tblTzVD0931tEWBL",
+    "records_read": 178
+  },
+  "rules": {
+    "every_user_query_must_equal_a_recorded_source_span": true,
+    "required_chunks_are_conjunctive": true,
+    "snippet_is_a_verification_anchor_not_full_evidence": true,
+    "cross_document_evidence_requires_matching_business_entity_and_period": true,
+    "missing_source_is_a_valid_outcome": true
+  },
+  "cases": [
+    {
+      "id": "real_q01",
+      "user_query": "想了解 CVR 低的话可以从哪些维度排查原因？",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 10, "source_span": "想了解 CVR 低的话可以从哪些维度排查原因？"},
+      "focus": "定位低转化的可验证漏斗环节",
+      "expected_chain": [
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_7", "role": "channel funnel", "snippet": "渠道组包含会话、加购率、结账率、购买率和购买金额"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_24", "role": "site funnel", "snippet": "店铺层包含会话、加购、结账和支付转化率"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_11", "role": "paid efficiency", "snippet": "广告总览包含 ROAS、花费、购买率和单次购买成本"}
+      ],
+      "chain_logic": "渠道流量→站点漏斗→投放效率，三者共同支持排查而非单一归因。",
+      "direct_round": {"query_intent": "direct_evidence", "expected_outcome": "sufficient_evidence", "required_chunk_ids": ["PbD8dNl0wooNiIxA9pRcszu6nHS_7", "PbD8dNl0wooNiIxA9pRcszu6nHS_24", "PbD8dNl0wooNiIxA9pRcszu6nHS_11"]},
+      "replan_expectation": {"decision": "none"}
+    },
+    {
+      "id": "real_q02",
+      "user_query": "结合新品的销售情况，判断6月整体销售GMV会到多少",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 43, "source_span": "结合新品的销售情况，判断6月整体销售GMV会到多少"},
+      "focus": "以新品表现、经营基线和行动约束形成预测输入",
+      "cross_document": true,
+      "expected_chain": [
+        {"chunk_id": "OvjXdowbkoFv05xIbJycL13PnSc_4", "role": "current baseline", "snippet": "净销量208台，净销售额178,687.72美元，客单价下滑9.5%", "evidence_status": "partial_not_sufficient"},
+        {"chunk_id": "OvjXdowbkoFv05xIbJycL13PnSc_1", "role": "SKU roles", "snippet": "Ultra S 是 Hero SKU，Pro S 为 Conversion SKU", "evidence_status": "partial_not_sufficient"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_3", "role": "inventory constraint", "snippet": "库存表包含近2周净销量、DOS和可用库存", "evidence_status": "partial_not_sufficient"}
+      ],
+      "chain_logic": "同一 Hypershell 新品周期的基线、SKU角色和库存可组成预测诊断链，但不能替代6月剩余日的原始预测输入。",
+      "direct_round": {"query_intent": "direct_evidence", "expected_outcome": "candidates_but_no_sufficient_evidence", "required_chunk_ids": ["OvjXdowbkoFv05xIbJycL13PnSc_4", "OvjXdowbkoFv05xIbJycL13PnSc_1", "PbD8dNl0wooNiIxA9pRcszu6nHS_3"], "must_not_answer_from_direct_evidence": true},
+      "replan_expectation": {"decision": "upstream_evidence_needed", "reason": "缺少日粒度新品销售、6月剩余日期的流量和预算。", "allowed_query_intents": ["raw_evidence", "structured_evidence"]}
+    },
+    {
+      "id": "real_q03",
+      "user_query": "输出6月hypershell完整销售预测（包括SKU和站点预测明细）流量预测，转化预测，以及对应国家的广告预算，参考数据@Google Ads 使用MCP Meta Ads 使用MCP Shopify 使用MCP Google Analytics",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 35, "source_span": "输出6月hypershell完整销售预测（包括SKU和站点预测明细）流量预测，转化预测，以及对应国家的广告预算，参考数据@Google Ads 使用MCP Meta Ads 使用MCP Shopify 使用MCP Google Analytics"},
+      "focus": "完整销售、流量、转化和国家广告预算预测",
+      "expected_chain": [
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_6", "role": "store-sales diagnostic", "snippet": "店铺维度包含净销量、净销售额、优惠、订单和客单价", "evidence_status": "partial_not_sufficient"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_9", "role": "country-traffic diagnostic", "snippet": "国家/区域维度包含会话、加购、结账、购买和购买金额", "evidence_status": "partial_not_sufficient"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_10", "role": "paid-allocation diagnostic", "snippet": "国家广告维度包含ROAS、收入、花费、展示、点击和购买", "evidence_status": "partial_not_sufficient"}
+      ],
+      "chain_logic": "现有周报只能提供诊断先验；完整预测依赖 Shopify、GA4、Google Ads、Meta Ads 的上游原始数据。",
+      "direct_round": {"query_intent": "direct_evidence", "expected_outcome": "candidates_but_no_sufficient_evidence", "required_chunk_ids": ["PbD8dNl0wooNiIxA9pRcszu6nHS_6", "PbD8dNl0wooNiIxA9pRcszu6nHS_9", "PbD8dNl0wooNiIxA9pRcszu6nHS_10"], "must_not_answer_from_direct_evidence": true},
+      "replan_expectation": {"decision": "upstream_evidence_needed", "reason": "当前文档没有6月全月、SKU/站点明细以及账户级实时输入。", "allowed_query_intents": ["raw_evidence", "structured_evidence"]}
+    },
+    {
+      "id": "real_q04",
+      "user_query": "根据活动设计一个联盟渠道的方案参考",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 49, "source_span": "根据活动设计一个联盟渠道的方案参考", "span_kind": "verbatim_prefix"},
+      "focus": "联盟渠道方案需要当前平台效率、头部联盟客和后续动作",
+      "expected_chain": [
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_16", "role": "platform efficiency", "snippet": "联盟平台表包含活跃联盟客、点击、订单、收入、佣金和ROAS"},
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_19", "role": "partner quality", "snippet": "联盟客明细包含平台、点击、订单、收入、佣金和ROAS"}
+      ],
+      "chain_logic": "同一业务和周期内的平台与联盟客表现可用于形成活动方案参考；不得拼接其他品牌/周期的执行动作。",
+      "direct_round": {"query_intent": "implementation_evidence", "expected_outcome": "sufficient_evidence", "required_chunk_ids": ["PbD8dNl0wooNiIxA9pRcszu6nHS_16", "PbD8dNl0wooNiIxA9pRcszu6nHS_19"]},
+      "replan_expectation": {"decision": "none"}
+    },
+    {
+      "id": "real_q05",
+      "user_query": "严格按照Direct (直接) / Search (搜索) / Google Ads (谷歌广告) / Meta Ads (Meta广告)/ Affiliate (联盟) / Email (邮件) / Social (社媒) / Other (其他)这个排列顺序输出新加坡 4.27-5.3的渠道流量数据, 注意查看下UTM数据, 假如UTM有归类数据, 如UTM:EDM, 56, 记得把56算在edm这个渠道上",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 37, "source_span": "严格按照Direct (直接) / Search (搜索) / Google Ads (谷歌广告) / Meta Ads (Meta广告)/ Affiliate (联盟) / Email (邮件) / Social (社媒) / Other (其他)这个排列顺序输出新加坡 4.27-5.3的渠道流量数据, 注意查看下UTM数据, 假如UTM有归类数据, 如UTM:EDM, 56, 记得把56算在edm这个渠道上"},
+      "focus": "新加坡指定周期的渠道流量和UTM归类",
+      "expected_chain": [],
+      "direct_round": {"query_intent": "direct_evidence", "expected_outcome": "candidates_but_no_sufficient_evidence", "must_not_answer_from_direct_evidence": true, "negative_assertion": "不得用其他国家或其他周期的汇总表伪造新加坡答案。"},
+      "replan_expectation": {"decision": "upstream_evidence_needed", "reason": "文档中没有新加坡4.27-5.3的GA4原始渠道和UTM归类数据。", "allowed_query_intents": ["raw_evidence", "structured_evidence"]}
+    },
+    {
+      "id": "real_q06",
+      "user_query": "分析一下 hotsale 第一天的销售情况",
+      "provenance": {"kind": "query_seed_bitable", "source_text_index": 42, "source_span": "分析一下 hotsale 第一天的销售情况"},
+      "focus": "活动首日销售表现",
+      "expected_chain": [
+        {"chunk_id": "PbD8dNl0wooNiIxA9pRcszu6nHS_1", "role": "weekly comparator", "snippet": "销售汇总提供净销量、净销售额、订单和客单价", "evidence_status": "context_only"}
+      ],
+      "direct_round": {"query_intent": "direct_evidence", "expected_outcome": "candidates_but_no_sufficient_evidence", "required_chunk_ids": ["PbD8dNl0wooNiIxA9pRcszu6nHS_1"], "must_not_answer_from_direct_evidence": true},
+      "replan_expectation": {"decision": "upstream_evidence_needed", "reason": "周报只能作为对照，缺少 hotsale 首日的日粒度销售和流量。", "allowed_query_intents": ["raw_evidence", "structured_evidence"]}
+    }
+  ]
+}

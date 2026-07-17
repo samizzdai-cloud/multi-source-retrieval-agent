@@ -1,7 +1,7 @@
 """Source-agent 层 query 扩展工具:从 sub_query + focus_text 生成多个变体。
 
 用于 dual-path 召回的 Path B:Path A 用原 sub_query,Path B 用这里生成的变体并行
-搜索,RRF 合并后送 rerank。
+搜索与 RRF 合并后的兼容扩展工具。
 
 设计原则:
   - 不调用任何外部 API(纯字符串变换 + 已有 kw_generalization 映射表)

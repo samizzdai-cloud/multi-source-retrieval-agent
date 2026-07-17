@@ -49,6 +49,7 @@ from tools.core.planner_runner import (
 from agents.source_agent_base import Focus, SourceAgent, SourceAgentResult, SubQuery
 from tools.core.eval_layer import build_eval_layer
 from tools.core.focus_board import FocusBoard
+from tools.core.gtm_profile import GTMProfileRepository, ProfileGovernanceAgent, build_shadow_report
 from tools.core.final_assembler import (
     assemble_final_chunks,
     render_final_payload,
@@ -61,26 +62,12 @@ logger = logging.getLogger(__name__)
 def _apply_runtime_config(sc: SourceConfig) -> None:
     """把显式 SourceConfig 注入运行时依赖，优先于环境变量。"""
     google_api_key = sc.get("google_api_key", "GOOGLE_API_KEY")
-    gemini_fallback_model = sc.get("gemini_fallback_model", "GEMINI_FALLBACK_MODEL")
-    dashscope_api_key = sc.get("dashscope_api_key", "DASHSCOPE_API_KEY")
     google_credentials_path = sc.get("google_credentials_path", "GOOGLE_CREDENTIALS_PATH")
     google_token_path = sc.get("google_token_path", "GOOGLE_TOKEN_PATH")
 
-    # ADK LlmAgent 当前通过底层 Google SDK 读取 GOOGLE_API_KEY；这里由 config 注入。
-    # 注：call_llm 的默认 LLM_MODEL 不再由 config 控制——planner / eval / source
-    # 内部 LLM 各自走专属字段（planner_model / eval_model）；这里只设置 api_key 与
-    # fallback_model。
+    # DeepSeek: google_api_key 可复用为 DEEPSEEK_API_KEY（兼容中转/统一 API key 场景）
     if google_api_key:
-        os.environ["GOOGLE_API_KEY"] = google_api_key
-        from tools.core.llm_client import configure_llm_client
-        configure_llm_client(
-            api_key=google_api_key,
-            fallback_model=gemini_fallback_model,
-        )
-
-    if dashscope_api_key:
-        from tools.core.rerank import configure_rerank_api_key
-        configure_rerank_api_key(dashscope_api_key)
+        os.environ.setdefault("DEEPSEEK_API_KEY", google_api_key)
 
     from tools.bailian.bailian_retrieve import configure_bailian_runtime
     configure_bailian_runtime(
@@ -161,6 +148,8 @@ def _prepare_plan(
     """
     gp_cfg = config.global_planner
     catalog = config.bailian_catalog
+    # Profile is intentionally a bounded query-candidate hint, never evidence.
+    profile_context = GTMProfileRepository().build_pack(query).prompt_block()
 
     # 路径 1：硬开关
     if gp_cfg.force_v1:
@@ -174,15 +163,15 @@ def _prepare_plan(
             enabled_sources=available_sources,
             cfg=gp_cfg,
             bailian_catalog=catalog,
-            session_context="",
+            session_context=profile_context,
         )
     except PlannerFailure as e:
         if gp_cfg.fallback_to_v1:
             logger.warning(
-                "global_planner v2 failed (%s) → fallback_to_v1",
+                "global_planner v2 failed (%s) → safe single-focus fallback",
                 e,
             )
-            return _normalize_v1_to_plan(query, available_sources, catalog)
+            return _safe_single_focus_plan(query, available_sources)
         # 不允许回退：抛出整盘失败，retrieve_agent 上层会做兜底（单 focus 广播）
         raise
 
@@ -198,13 +187,30 @@ def _prepare_plan(
                 "(rejected=%d) → fallback_to_v1",
                 normalized.rejected_count,
             )
-            return _normalize_v1_to_plan(query, available_sources, catalog)
+            return _safe_single_focus_plan(query, available_sources)
         logger.warning(
             "global_planner v2 produced 0 pre_planned sub_queries; fallback disabled, "
             "will rely on per-focus replan via plan_only_LLM"
         )
 
     return normalized
+
+
+def _safe_single_focus_plan(query: str, available_sources: List[str]) -> NormalizedPlan:
+    """Failure fallback that preserves user vocabulary and never invents entities."""
+    focus = Focus(focus_id="focus_0", text=query, targets=list(available_sources))
+    structured_markers = ("数据", "GMV", "CVR", "ROAS", "销量", "销售", "流量", "UTM", "库存", "预算")
+    query_type = "structured" if any(marker.casefold() in query.casefold() for marker in structured_markers) else "concept"
+    return NormalizedPlan(
+        focuses=[focus],
+        pre_planned_by_source={
+            source: [SubQuery(query=query, target_focus="focus_0", query_type=query_type,
+                              sub_query_id=f"{source}:focus_0:safe")]
+            for source in available_sources
+        },
+        replan_needed={source: [] for source in available_sources},
+        rejected_count=0,
+    )
 
 
 def _normalize_v1_to_plan(
@@ -358,6 +364,15 @@ def _log_observation(
 # ─────────────────────────────────────────────────────────────────────
 # SourceDispatcher
 # ─────────────────────────────────────────────────────────────────────
+def _timeout_result(name: str, agent: SourceAgent, timeout_s: float) -> SourceAgentResult:
+    """Preserve compact progress trace when cancellation ends a source run."""
+    trace = list(getattr(agent, "_trace_events", []) or [])
+    trace.append({"event": "timeout", "source": name, "timeout_s": timeout_s})
+    return SourceAgentResult(
+        source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s, retrieval_trace=trace,
+    )
+
+
 async def _dispatch_sources(
     sources: Dict[str, SourceAgent],
     focuses: List[Focus],
@@ -413,7 +428,7 @@ async def _dispatch_sources(
             )
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
-            return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
+            return _timeout_result(name, agent, timeout_s)
         except Exception as e:
             logger.exception("[%s] failed: %s", name, e)
             return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
@@ -444,6 +459,7 @@ class RetrieveAgent(BaseAgent):
     config: RetrieveConfig = RetrieveConfig()
     sources: Dict[str, SourceAgent] = {}      # source_name → SourceAgent
     source_config: SourceConfig = SourceConfig()
+    profile_governance: ProfileGovernanceAgent | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
@@ -524,6 +540,23 @@ class RetrieveAgent(BaseAgent):
             pre_planned_by_source=normalized.pre_planned_by_source,
             replan_needed=normalized.replan_needed,
         )
+        # Governance receives body-free trace events only.  Scheduling it after
+        # source dispatch keeps answer latency independent from profile learning.
+        if self.profile_governance is None:
+            self.profile_governance = ProfileGovernanceAgent()
+        governance_task = asyncio.create_task(self.profile_governance.observe(per_source))
+        def _log_governance_failure(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                # Invocation shutdown may cancel this non-critical shadow task.
+                # It must never surface as an unhandled callback exception.
+                return
+            except Exception as exc:
+                logger.warning("GTM profile governance shadow task failed: %s", exc)
+        governance_task.add_done_callback(_log_governance_failure)
+        shadow_trace = build_shadow_report(per_source)
+        logger.info("GTM profile shadow trace events=%s", shadow_trace["event_counts"])
         # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
         for fid in focus_board.unsatisfied_focus_ids():
             focus_board.mark_terminal(fid, status="noise_only")
@@ -603,7 +636,7 @@ class RetrieveAgent(BaseAgent):
             elapsed_ms, len(selected), len(merged), final_top_k,
         )
 
-        yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms)
+        yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms, retrieval_trace=shadow_trace)
 
     def _make_text_event(self, ctx: InvocationContext, text: str) -> Event:
         return Event(
@@ -616,7 +649,8 @@ class RetrieveAgent(BaseAgent):
             ),
         )
 
-    def _make_event(self, ctx: InvocationContext, payload: Dict, elapsed_ms: Optional[int] = None) -> Event:
+    def _make_event(self, ctx: InvocationContext, payload: Dict, elapsed_ms: Optional[int] = None,
+                    retrieval_trace: Optional[Dict] = None) -> Event:
         result_json = json.dumps(payload, ensure_ascii=False, default=str)
         chunks = payload.get("chunks") or []
         summary = (
@@ -632,7 +666,14 @@ class RetrieveAgent(BaseAgent):
                 role="model",
                 parts=[genai_types.Part(text=summary)],
             ),
-            actions=EventActions(state_delta={"retrieval_result": result_json}),
+            actions=EventActions(state_delta={
+                "retrieval_result": result_json,
+                # Body-free, evaluation/governance-only companion state.  It
+                # is deliberately outside retrieval_result so AnswerAgent sees
+                # the stable full-chunk contract unchanged.
+                **({"retrieval_trace": json.dumps(retrieval_trace, ensure_ascii=False, default=str)}
+                   if retrieval_trace is not None else {}),
+            }),
         )
 
 
@@ -655,6 +696,15 @@ def build_retrieve_agent(
     # 必须在下面 SourceAgent.__init__ 之前调用——LlmAgent 在 __init__ 时把 model 烘焙进实例。
     from tools.core import llm_contracts as _llm_contracts
     _llm_contracts.set_model(cfg.eval_model_override)
+
+    # 注入 DeepSeek thinking 配置 (flash 模型默认禁用 thinking)
+    eval_thinking = cfg.eval_thinking
+    if eval_thinking is not None:
+        _llm_contracts.set_thinking_config(eval_thinking.to_litellm_kwargs())
+    # else: 保持 _THINKING_CONFIG=None, build_llm_model() 返回普通字符串
+
+    # Patch ADK LiteLlm response_format: DeepSeek 只支持 json_object
+    _llm_contracts._ensure_response_format_patch()
 
     from agents.bailian.bailian_source_agent import BailianSourceAgent
     from agents.google.google_source_agent import GoogleSourceAgent
@@ -686,27 +736,8 @@ def build_retrieve_agent(
         elif src == "feishu":
             sources[src] = _build_feishu_source_agent(sa_cfg, sc, preset=cfg.preset)
         elif src == "google":
-            # 提前检查并获取 Google OAuth2 Token
-            try:
-                from google_workspace_tool.auth_utils import get_credentials
-                from tools.google.google_retrieve import _SCOPES
-                google_credentials_path = sc.get("google_credentials_path", "GOOGLE_CREDENTIALS_PATH")
-                google_token_path = sc.get("google_token_path", "GOOGLE_TOKEN_PATH")
-                if google_credentials_path:
-                    os.environ["GOOGLE_CREDENTIALS_PATH"] = google_credentials_path
-                if google_token_path:
-                    os.environ["GOOGLE_TOKEN_PATH"] = google_token_path
-                get_credentials(
-                    scopes=_SCOPES,
-                    cred_path=google_credentials_path or None,
-                    token_path=google_token_path or None,
-                )
-                logger.debug("Google credentials validated successfully.")
-            except Exception as e:
-                logger.error("Failed to initialize Google credentials: %s", e)
-                raise RuntimeError("Google Workspace auth failed. Please authorize in terminal.") from e
-
-            # Google Workspace 检索（Drive 全文搜索 + 分块读取）
+            # OAuth is lazy: agent construction and mock smoke must work with
+            # no credentials or Google auth extras installed.
             sources[src] = GoogleSourceAgent(cfg=sa_cfg)
         elif src == "notion":
             # Phase 4 骨架：底层 notion_retrieve 是 stub，调用会返回空

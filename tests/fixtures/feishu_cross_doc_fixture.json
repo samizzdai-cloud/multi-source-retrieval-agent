@@ -1,0 +1,21 @@
+{
+  "source": "feishu",
+  "purpose": "document snapshot and retrieval-contract metadata only; not a user-query benchmark",
+  "do_not_use_as_query_benchmark": true,
+  "snapshot_policy": "metadata only: document id, chunk id, heading, token count and content hash; no body text is committed",
+  "snapshot": [
+    {"document_id": "OvjXdowbkoFv05xIbJycL13PnSc", "chunks": 8, "tokens": 4584, "anchors": ["90 天行动路线图", "新品 GTM 策略框架", "执行摘要", "业务背景与数据概览"]},
+    {"document_id": "PbD8dNl0wooNiIxA9pRcszu6nHS", "chunks": 22, "tokens": 13821, "anchors": ["三、各领域分析 > 3.1销售分析", "三、各领域分析 > 3.2库存分析"]},
+    {"document_id": "KFCHdEo9doDGOQxg4O2ch0XVngx", "chunks": 27, "tokens": 16728, "anchors": ["Country Performance", "Meta Ads Performance", "Google Ads Performance", "Affiliate Performance", "Next step"]},
+    {"document_id": "Vjr5dFvTzo16dBxwHf5cTZg7nFe", "chunks": 19, "tokens": 9713, "anchors": ["Sales Overview", "Store Performance Overview", "Traffic Overview", "Country Performance"]}
+  ],
+  "read_states": [
+    {"document_id": "PbD8dNl0wooNiIxA9pRcszu6nHS", "resource_type": "embedded_sheet", "status": "read_timeout", "note": "document body chunks remain usable; do not treat this as source absence"}
+  ],
+  "required_behaviors": [
+    "preserve_native_api_order_before_bounded_io",
+    "allow_preview_to_full_chunk_rehydration",
+    "keep_read_timeout_distinct_from_document_absence",
+    "only form_cross_document_evidence_when_business_entity_and_period_match"
+  ]
+}

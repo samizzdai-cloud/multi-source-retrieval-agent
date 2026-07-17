@@ -6,7 +6,7 @@ from these chunks?"
 Dimensions:
   1. information_sufficiency (1-5) — overall completeness
   2. per_focus_coverage — covered / partial / missing per focus
-  3. gap_analysis — what's missing and why (plan / source / reranker blame)
+  3. gap_analysis — what's missing and why (plan / source / evidence blame)
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ _COVERAGE_PROMPT = """\
 ## Focus 列表（检索意图维度）
 {focuses_json}
 
-## 检索返回的 Chunks（已 rerank，按相关性排序）
+## 检索返回的 Chunks（保留 API 原始顺序）
 {chunks_text}
 
 ## 背景信息
@@ -57,7 +57,7 @@ _COVERAGE_PROMPT = """\
 对每个 missing 或 partial 的 focus，分析原因:
 - "plan_issue": 查询计划没有为该 focus 生成合适的 sub_query
 - "source_issue": 数据源可能不包含该信息
-- "reranker_issue": 信息可能被检索到但在 rerank 阶段被过滤
+- "evidence_issue": 信息可能被检索到但在证据评估阶段被过滤
 - "coverage_gap": 信息确实不在知识库中
 
 ## 输出格式（严格 JSON）
@@ -74,7 +74,7 @@ _COVERAGE_PROMPT = """\
   "gap_analysis": [
     {{
       "focus": "<受影响的 focus>",
-      "gap_type": "plan_issue" | "source_issue" | "reranker_issue" | "coverage_gap",
+      "gap_type": "plan_issue" | "source_issue" | "evidence_issue" | "coverage_gap",
       "description": "<具体说明缺什么、为什么缺>"
     }}
   ],

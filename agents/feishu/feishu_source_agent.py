@@ -3,9 +3,9 @@
 架构要点：
 - plan_only LLM 产出 sub_queries（query + query_type + time_filter）
 - _execute_batch 覆写基类：doc 和 table 独立流水线，互不等待
-  · doc: search → candidate rerank → doc_pool.submit（fire-and-forget）
+  · doc: search → bounded native candidates → doc_pool.submit（fire-and-forget）
   · table: search → structure prefetch → enriched prefilter → cache child select → table_pool.submit
-- 每个 sub_query 并行等待 doc + table chunks → 统一 qwen3-rerank → chunk_pool
+- 每个 sub_query 并行等待 doc + table chunks → token-aware evidence pool
 - eval_only LLM 最终打 tier + relevance
 """
 
@@ -24,15 +24,10 @@ from tools.feishu.feishu_retrieve import (
     search_and_read_feishu_tables,
     search_and_select_feishu_doc_candidates,
     search_and_select_feishu_table_candidates,
-    TABLE_CHILD_SELECT_TOP_K,
     _table_candidate_key,
 )
 from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
-from tools.core.rerank import (
-    build_focus_sub_query_question,
-    get_chunk_selection_config,
-    select_reranked_chunks,
-)
+from tools.core.chunk_preview import build_chunk_preview
 from tools.core.source_profiles import get_profile
 from tools.core.source_query_config import SOURCE_QUERY_RULES
 
@@ -137,88 +132,27 @@ def _unified_to_chunk_entry(
     }
     return ChunkEntry(
         id=cid, source="feishu", content=uc.text or "",
+        preview_content=build_chunk_preview(uc.text or "", merged_meta),
         metadata=merged_meta, score=uc.score,
         sub_query=sub_query, target_focuses={target_focus}, tier=None,
     )
 
 
-def _clone_uc_with_score(uc: UnifiedChunk, score: float, rank: int, mode: str) -> UnifiedChunk:
-    meta = dict(uc.metadata or {})
-    meta.setdefault("reader_score", float(uc.score or 0.0))
-    meta["chunk_rerank_score"] = float(score)
-    meta["chunk_rerank_rank"] = int(rank)
-    meta["selection_mode"] = mode
-    return UnifiedChunk(
-        text=uc.text, source_name=uc.source_name, source_url=uc.source_url,
-        source_tool=uc.source_tool, heading_path=uc.heading_path,
-        score=float(score), confidence_tier=uc.confidence_tier, metadata=meta,
-    )
-
-
-def _uc_to_rerank_payload(uc: UnifiedChunk) -> dict:
-    return {
-        "text": uc.text or "",
-        "source_name": uc.source_name or "",
-        "heading_path": uc.heading_path or "",
-    }
-
-
-def _fallback_select(uc_list: List[UnifiedChunk], top_n: int) -> List[UnifiedChunk]:
-    return sorted(uc_list, key=lambda x: float(x.score or 0.0), reverse=True)[:top_n]
-
-
-def _select_chunks_for_sub_query(
+def _preserve_api_order_chunks(
     query: str, focus_text: str, query_type: str,
     uc_list: List[UnifiedChunk], top_n: int,
 ) -> List[UnifiedChunk]:
     started = time.perf_counter()
     if not uc_list:
         return []
-    cfg = get_chunk_selection_config(query_type)
-    # [V17] chunk-rerank Question = focus_text + brand-only keywords:
-    # 实验 focus_only 显示 5 个 case 大幅提升(Doc3_Q1 37→74, Sheet1_Q1 33→88,
-    # Sheet1_Q2 ✗→94, Bitable1_Q2 ✗→25),但 Bitable1_Q1 失去 brand "Haivivi"
-    # 锚点 → ✓→✗ 退化。
-    # 折中:仍以 focus_text 为主信号,再从 sub_query 抽英文/数字 brand token
-    # (Haivivi/UGC/Z80/ROAS 等) 作补充,避免 brand anchor 丢失。
-    base_q = focus_text or query
-    brand_toks = re.findall(r"[A-Za-z][A-Za-z0-9_-]{1,}", query or "")
-    if brand_toks:
-        question = f"{base_q}\nKeywords: {' '.join(brand_toks[:3])}"
-    else:
-        question = base_q
-    payloads = [_uc_to_rerank_payload(uc) for uc in uc_list]
-    result = select_reranked_chunks(
-        query=question, chunks=payloads,
-        top_n=top_n, score_threshold=float(cfg["score_threshold"]),
-        min_keep=int(cfg["min_keep"]), instruct_template="qa",
+    # The bounded readers have already applied API/page budgets.  Preserve all
+    # resulting chunks for token-aware evidence evaluation; do not score or
+    # truncate them here.
+    logger.info(
+        "TIMING feishu.chunk_bucket mode=api_order query=%.24r input=%d selected=%d ms=%.1f",
+        query, len(uc_list), len(uc_list), _elapsed_ms(started),
     )
-    if result.get("status") != "success":
-        logger.warning("[feishu] chunk rerank failed: %s; fallback", result.get("message"))
-        selected = _fallback_select(uc_list, top_n)
-        logger.info("TIMING feishu.chunk_select mode=fallback query=%.24r input=%d selected=%d ms=%.1f",
-                     query, len(uc_list), len(selected), _elapsed_ms(started))
-        return selected
-    selected_items = result.get("selected_results") or []
-    if not selected_items:
-        selected = _fallback_select(uc_list, top_n)
-        logger.info("TIMING feishu.chunk_select mode=fallback_empty query=%.24r input=%d selected=%d ms=%.1f",
-                     query, len(uc_list), len(selected), _elapsed_ms(started))
-        return selected
-    selected: List[UnifiedChunk] = []
-    for item in selected_items:
-        idx = item.get("index")
-        if idx is None or idx < 0 or idx >= len(uc_list):
-            continue
-        selected.append(_clone_uc_with_score(
-            uc_list[idx], float(item.get("relevance_score", 0.0)),
-            int(item.get("rank", len(selected) + 1)), "rerank",
-        ))
-    if not selected:
-        selected = _fallback_select(uc_list, top_n)
-    logger.info("TIMING feishu.chunk_select mode=rerank query=%.24r input=%d selected=%d ms=%.1f",
-                 query, len(uc_list), len(selected), _elapsed_ms(started))
-    return selected
+    return list(uc_list)
 
 
 # ── sub_query 后处理（sanitize）────────────────────────────────────
@@ -250,50 +184,6 @@ def _classify_focus_mode(text: str) -> str:
     return "unknown"
 
 
-def _stabilize_query(sq: SubQuery, focus_text: str, mode: str) -> SubQuery:
-    """如果 LLM 产出的 query 过于泛化，用 focus 锚点词替换。
-
-    [V13] 已含英文 brand + >=3 token 的 query 视为足够丰富,直接保持原样;
-    避免对 "Haivivi 运营 计划" 这类 broad-but-meaningful query 错误重写,
-    让 Path B variants 在 dual-path 中独立承担 anchor 注入。
-    """
-    tokens = re.findall(r"[\w\u4e00-\u9fff]+", (sq.query or "").lower())
-    if not tokens:
-        return sq
-    has_english_brand = any(
-        re.fullmatch(r"[a-z][a-z0-9_-]+", t) for t in tokens
-    )
-    if has_english_brand and len(tokens) >= 3:
-        return sq
-    non_generic = [t for t in tokens if t not in _FEISHU_GENERIC_QUERY_TOKENS]
-    brand_only = all(bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", t or "")) for t in non_generic) if non_generic else True
-    has_generic = any(t in (sq.query or "").lower() for t in _FEISHU_GENERIC_QUERY_TOKENS if t)
-    if not (has_generic and brand_only):
-        return sq
-    # 从 focus 提取锚点词
-    anchors = []
-    for hint in sorted(set(list(_FEISHU_STRUCTURED_FOCUS_HINTS) + list(_FEISHU_CONCEPT_FOCUS_HINTS)), key=len, reverse=True):
-        if hint in (focus_text or "").lower() and hint not in (sq.query or "").lower():
-            anchors.append(hint)
-            if len(anchors) >= 3:
-                break
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9_-]*", focus_text or ""):
-        if token.lower() not in (sq.query or "").lower():
-            anchors.insert(0, token)
-    if not anchors:
-        return sq
-    kept = [t for t in tokens if t not in _FEISHU_GENERIC_QUERY_TOKENS][:2]
-    new_query = " ".join(dict.fromkeys(kept + anchors[:3])).strip()
-    if not new_query:
-        return sq
-    return SubQuery(
-        query=new_query, target_focus=sq.target_focus,
-        tags=list(sq.tags), indexes=list(sq.indexes),
-        time_filter=sq.time_filter, query_type=sq.query_type,
-        sub_query_id=sq.sub_query_id,
-    )
-
-
 def _sanitize_feishu_sub_queries(
     focuses: List[Focus], sub_queries: List[SubQuery],
 ) -> List[SubQuery]:
@@ -310,8 +200,16 @@ def _sanitize_feishu_sub_queries(
             continue
         mode = _classify_focus_mode(focus.text)
         effective_type = "concept" if mode == "concept" else "structured"
-        # 每个 focus 默认保留 1 条，最多 2 条
-        kept = items[:1]
+        # 一个 focus 可以有多条不同证据 intent 的并行 query。只做稳定去重，
+        # 不再用 source 层规则压掉 planner 已明确规划的 raw/implementation/timeline 证据面。
+        kept: List[SubQuery] = []
+        seen_queries: Set[tuple[str, str]] = set()
+        for sq in items:
+            key = (str(sq.query_type or "").strip().casefold(), str(sq.query or "").strip().casefold())
+            if not key[1] or key in seen_queries:
+                continue
+            seen_queries.add(key)
+            kept.append(sq)
         for sq in kept:
             sq.query_type = sq.query_type or effective_type
         logger.info(
@@ -319,12 +217,7 @@ def _sanitize_feishu_sub_queries(
             focus.focus_id, mode, len(items), len(kept),
             [sq.query_type for sq in kept], [sq.query for sq in kept],
         )
-        # 稳定化：用 focus 锚点词替换泛化 query
-        stabilized = [_stabilize_query(sq, focus.text, mode) for sq in kept]
-        if [sq.query for sq in stabilized] != [sq.query for sq in kept]:
-            logger.info("[feishu] plan query stabilized focus=%s before=%s after=%s",
-                        focus.focus_id, [sq.query for sq in kept], [sq.query for sq in stabilized])
-        sanitized.extend(stabilized)
+        sanitized.extend(kept)
     return sanitized
 
 
@@ -333,6 +226,31 @@ def _sanitize_feishu_sub_queries(
 
 def _candidate_doc_key(c: dict) -> str:
     return c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or ""
+
+
+def _candidate_order_key(candidate: dict) -> tuple:
+    """Stable bounded-I/O order: repeated API hits, then original API rank."""
+    return (
+        -int(candidate.get("cross_query_hit_count", 1) or 1),
+        int(candidate.get("best_api_rank", 10**9) or 10**9),
+        int(candidate.get("first_seen_order", 10**9) or 10**9),
+        str(candidate.get("title", "") or ""),
+    )
+
+
+def _merge_candidate_order(existing: dict, candidate: dict) -> None:
+    existing["cross_query_hit_count"] = (
+        int(existing.get("cross_query_hit_count", 1) or 1)
+        + int(candidate.get("cross_query_hit_count", 1) or 1)
+    )
+    existing["best_api_rank"] = min(
+        int(existing.get("best_api_rank", 10**9) or 10**9),
+        int(candidate.get("best_api_rank", 10**9) or 10**9),
+    )
+    existing["first_seen_order"] = min(
+        int(existing.get("first_seen_order", 10**9) or 10**9),
+        int(candidate.get("first_seen_order", 10**9) or 10**9),
+    )
 
 
 def _merge_doc_demands(batches: List[dict]) -> tuple:
@@ -347,11 +265,7 @@ def _merge_doc_demands(batches: List[dict]) -> tuple:
     for batch in batches:
         sq = batch["sq"]
         selected_ids: List[str] = []
-        sq_docs = sorted(
-            batch.get("doc_candidates") or [],
-            key=lambda c: (-float(c.get("candidate_rerank_score", 0) or 0),
-                           int(c.get("candidate_rerank_rank", 10**9) or 10**9)),
-        )
+        sq_docs = sorted(batch.get("doc_candidates") or [], key=_candidate_order_key)
         for rank_in_sq, c in enumerate(sq_docs):
             key = _candidate_doc_key(c)
             if not key:
@@ -365,17 +279,14 @@ def _merge_doc_demands(batches: List[dict]) -> tuple:
                 merged_by_doc[key] = dict(c)
             else:
                 existing = merged_by_doc[key]
-                existing["candidate_rerank_score"] = max(
-                    float(existing.get("candidate_rerank_score", 0) or 0),
-                    float(c.get("candidate_rerank_score", 0) or 0),
-                )
+                _merge_candidate_order(existing, c)
                 for lk in ("selected_focus_ids", "selected_sub_query_ids", "selected_feishu_urls", "selected_query_types"):
                     existing[lk] = sorted(set(existing.get(lk) or []) | set(c.get(lk) or []))
         doc_ids_by_sq[sq.sub_query_id] = selected_ids
 
     merged_list = sorted(
         merged_by_doc.values(),
-        key=lambda c: (-float(c.get("candidate_rerank_score", 0) or 0), c.get("title", "")),
+        key=_candidate_order_key,
     )
     # 把 sq_hit_count 和 top1 信号写回 merged_list，供 route_hint 决策使用
     top1_keys = set(top1_by_sq.values())
@@ -443,10 +354,7 @@ def _merge_table_demands(batches: List[dict]) -> tuple:
                 merged_by_parent[key] = dict(c)
             else:
                 existing = merged_by_parent[key]
-                existing["candidate_rerank_score"] = max(
-                    float(existing.get("candidate_rerank_score", 0) or 0),
-                    float(c.get("candidate_rerank_score", 0) or 0),
-                )
+                _merge_candidate_order(existing, c)
                 for lk in ("selected_focus_ids", "selected_sub_query_ids", "selected_feishu_urls",
                             "selected_query_types", "selected_sheet_ids", "selected_table_ids"):
                     existing[lk] = sorted(set(existing.get(lk) or []) | set(c.get(lk) or []))
@@ -454,7 +362,7 @@ def _merge_table_demands(batches: List[dict]) -> tuple:
         table_ids_by_sq[sq.sub_query_id] = selected_ids
     merged_list = sorted(
         merged_by_parent.values(),
-        key=lambda c: (-float(c.get("candidate_rerank_score", 0) or 0), c.get("title", "")),
+        key=_candidate_order_key,
     )
     return merged_list, table_ids_by_sq
 
@@ -471,7 +379,7 @@ def _build_table_parent_summary(parent: dict) -> str:
 def _enrich_parents_with_structure(
     parents: List[dict], table_pool: Optional[object],
 ) -> List[dict]:
-    """把 table_pool 缓存的子结构名称注入 parent summary，让 rerank 能看到子表。"""
+    """把 table_pool 缓存的子结构名称注入 parent summary，供预览评估使用。"""
     if table_pool is None:
         return parents
     enriched = []
@@ -505,7 +413,7 @@ def _select_children_from_cache(
     candidates: List[dict], *, table_pool: Optional[object],
     focus_id: str, sub_query_id: str, query_type: str,
 ) -> List[dict]:
-    """从结构缓存直接提取 selected_sheet_ids / selected_table_ids，省掉 child select rerank。"""
+    """从结构缓存直接提取 selected_sheet_ids / selected_table_ids。"""
     result = []
     for parent in candidates:
         doc_type = str(parent.get("doc_type", "") or "").upper()
@@ -525,7 +433,9 @@ def _select_children_from_cache(
             out["table_selected_child_count"] = 0
             result.append(out)
             continue
-        sel = children[:TABLE_CHILD_SELECT_TOP_K]
+        # v5 reads every child of a matched parent.  Table preview/full
+        # construction, not a child top-K, controls later LLM context.
+        sel = children
         out["table_selected_child_count"] = len(sel)
         if doc_type == "SHEET":
             out["selected_sheet_ids"] = _merge_unique_strs(list(out.get("selected_sheet_ids") or []),
@@ -551,7 +461,7 @@ def _trim_table_parents(batches: List[dict], target: int = 6, min_per_sq: int = 
     优先级（高→低）：
     1. 每个 structured sq 的头部 min_per_sq 张（保底）
     2. 多个 sq 共命中的 parent（multi-hit）
-    3. candidate_rerank_score 高的 parent
+    3. API 原始返回顺序靠前的 parent
     4. low_yield（structure 子表多但 selected 少）的 parent 降权排后
     """
     structured = [b for b in batches if b.get("query_type") == "structured" and b.get("table_candidates")]
@@ -561,8 +471,7 @@ def _trim_table_parents(batches: List[dict], target: int = 6, min_per_sq: int = 
     # Step 1: 每个 sq 保底 min_per_sq 张
     keep_ids: set = set()
     for batch in structured:
-        ordered = sorted(batch.get("table_candidates") or [],
-                         key=lambda c: (-float(c.get("candidate_rerank_score", 0) or 0), c.get("title", "")))
+        ordered = sorted(batch.get("table_candidates") or [], key=_candidate_order_key)
         for c in ordered[:min_per_sq]:
             key = _candidate_doc_key(c)
             if key:
@@ -592,7 +501,8 @@ def _trim_table_parents(batches: List[dict], target: int = 6, min_per_sq: int = 
         return (
             _is_low_yield(c),                                    # low_yield 排后
             -hit_count.get(key, 1),                              # multi-hit 优先
-            -float(c.get("candidate_rerank_score", 0) or 0),    # 高分优先
+            int(c.get("best_api_rank", 10**9) or 10**9),
+            int(c.get("first_seen_order", 10**9) or 10**9),
             c.get("title", ""),
         )
 
@@ -670,7 +580,7 @@ class FeishuSourceAgent(SourceAgent):
         base_rules = get_source_query_rules("feishu")
         return (
             base_rules
-            + "\n\n提醒：tags / indexes 必须留空 []；time_filter 仅相对时间用 "
+            + "\n\n提醒：time_filter 仅相对时间用 "
             + "\"last_N_days\"，季度/月份等具体时间点请并入 query 本身或留 null。"
             + "\n"
             + "额外规划约束：\n"
@@ -683,34 +593,23 @@ class FeishuSourceAgent(SourceAgent):
         sanitized = _sanitize_feishu_sub_queries(focuses, sub_queries)
         if len(sanitized) != len(sub_queries):
             logger.info("[feishu] plan sanitized total_sub_queries %d -> %d", len(sub_queries), len(sanitized))
-        enriched = self._enrich_sub_queries_with_variants(focuses, sanitized)
-        return enriched
+        # v5 fallback alternatives are derived only from the bounded profile pack;
+        # retrieval invokes them only after the primary API call returns zero.
+        from tools.core.gtm_profile import GTMProfileRepository
+        repo = GTMProfileRepository()
+        for sq in sanitized:
+            aliases, expressions = repo.build_pack(sq.query).fallback_variants(sq.query)
+            sq.variants = aliases + expressions
+            sq.variant_origins = {
+                **{variant: "alias" for variant in aliases},
+                **{variant: "expression" for variant in expressions},
+            }
+        return sanitized
 
     def _enrich_sub_queries_with_variants(
         self, focuses: List[Focus], sub_queries: List[SubQuery],
     ) -> List[SubQuery]:
-        """为每条 sub_query 生成 dual-path Path B 的变体,写入 sq.variants。
-
-        变体生成依赖 sub_query.query + focus.text。Path A 用原 query,Path B 用 variants
-        + RRF 合并,实现"宽召回 + title 锚定"双路。
-        """
-        if not sub_queries:
-            return sub_queries
-        from tools.core.query_expansion import build_query_variants
-        focus_lookup = {f.focus_id: f.text for f in focuses}
-        for sq in sub_queries:
-            focus_text = focus_lookup.get(sq.target_focus, "") or ""
-            try:
-                variants = build_query_variants(sq.query or "", focus_text)
-            except Exception as e:
-                logger.warning("[feishu] _enrich_sub_queries variant gen failed: %s", e)
-                variants = []
-            sq.variants = variants
-            if variants:
-                logger.info(
-                    "[feishu] plan variants focus=%s query=%r variants=%s",
-                    sq.target_focus, sq.query, variants,
-                )
+        """Legacy compatibility no-op; generic expansion is forbidden in v5."""
         return sub_queries
 
     # ── table ROI 日志 ────────────────────────────────────────
@@ -748,13 +647,12 @@ class FeishuSourceAgent(SourceAgent):
         )
         for r in rows:
             logger.debug(
-                "[feishu] table roi token=%s title=%r doc_type=%s score=%.3f rank=%d "
+                "[feishu] table roi token=%s title=%r doc_type=%s api_rank=%d "
                 "selected_child_count=%d structure_child_count=%d child_ratio=%.3f "
                 "read_ms=%.1f read_chunks=%d submit_selected=%s submit_skipped=%s final_selected=%s "
                 "focus_ids=%s sub_query_ids=%s",
                 str(r.get("token", ""))[:16], r.get("title", ""), r.get("doc_type", ""),
-                float(r.get("candidate_rerank_score", 0) or 0),
-                int(r.get("candidate_rerank_rank", 10**9) or 10**9),
+                int(r.get("best_api_rank", 10**9) or 10**9),
                 int(r.get("selected_child_count", 0) or 0),
                 int(r.get("structure_child_count", 0) or 0),
                 float(r.get("selected_child_ratio", 0) or 0),
@@ -805,7 +703,7 @@ class FeishuSourceAgent(SourceAgent):
 
     # ── 批处理路径：doc/table 完全并行流水线 ─────────────────
     async def _execute_batch(
-        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry],
+        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
     ) -> None:
         batch_started = time.perf_counter()
         await self._ensure_user_identity(sub_queries)
@@ -813,10 +711,15 @@ class FeishuSourceAgent(SourceAgent):
             raise RuntimeError("FeishuSourceAgent requires doc_pool; ensure FEISHU_UAT is configured")
 
         doc_pool_timeout = max(8.0, self.cfg.source_timeout_s * 0.8)
-        # 单 doc 超时：慢 doc 不阻塞整批。lite 在 _execute_batch_lite 里硬编码 6.0s；
-        # balanced/deep_dive 在此统一派生，与 source_timeout_s 解耦（防止极端慢 doc 拖尾）。
-        _per_doc_timeout_map = {"lite": 6.0, "balanced": 8.0, "deep_dive": 12.0}
-        per_doc_timeout = _per_doc_timeout_map.get(self._preset, 8.0)
+        # 单 doc 超时必须小于 source 总预算，但不能短到把已命中的 Block API
+        # 文档（实测 16s）在完整 chunk 化前丢弃。lite 继续优先时延；其他 preset
+        # 使用 source budget 的受限比例，保留后续 eval 的时间。
+        if self._preset == "lite":
+            per_doc_timeout = 6.0
+        elif self._preset == "deep_dive":
+            per_doc_timeout = min(25.0, max(16.0, self.cfg.source_timeout_s * 0.45))
+        else:
+            per_doc_timeout = min(18.0, max(12.0, self.cfg.source_timeout_s * 0.35))
 
         # ── lite 模式：极简 MCP-only 路径（无 table）────────
         if self._preset == "lite":
@@ -826,7 +729,7 @@ class FeishuSourceAgent(SourceAgent):
         # ── Step 1: doc / table 解耦双 track 并行 ────────────
         # 旧实现：_prepare_one 在 asyncio.gather(doc_task, table_task) 内等齐两者；
         # 所有 sq 的 prepare_one 又被外层 gather 等齐；结果是 doc submit 必须等到最慢的
-        # table search + structure fetch + child rerank 全跑完（实测多压 1.5~3s）。
+        # table search + structure fetch + child read 全跑完（实测多压 1.5~3s）。
         # 新实现：doc track 走快路径——doc 候选一就绪立即 submit 到 doc_pool 触发 read；
         # table track 独立跑（仍需 cross-sq trim 所以 sq 之间需聚合），与 doc 不互等。
 
@@ -861,7 +764,7 @@ class FeishuSourceAgent(SourceAgent):
                     from feishu_read_tool.search import search_feishu_mcp_pure
                     raw_result = await self._to_thread(
                         search_feishu_mcp_pure,
-                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter,
+                        query=sq.query, count=4, uat=self._uat, time_filter=sq.time_filter,
                         owner_ids=owner_ids, sort_rule="EDIT_TIME",
                     )
                     doc_cands = raw_result.get("items", [])
@@ -869,8 +772,9 @@ class FeishuSourceAgent(SourceAgent):
                         cand["selected_focus_ids"] = [sq.target_focus]
                         cand["selected_sub_query_ids"] = [sq.sub_query_id]
                         cand["selected_query_types"] = [qt]
-                        cand["candidate_rerank_score"] = max(0.0, 1.0 - (rank - 1) * 0.05)
-                        cand["candidate_rerank_rank"] = rank
+                        cand["cross_query_hit_count"] = 1
+                        cand["best_api_rank"] = rank
+                        cand["first_seen_order"] = rank
                         cand["route_hint"] = "mcp"
                 except Exception as e:
                     logger.warning("[feishu] personal_recent search failed for %r: %s", sq.query, e)
@@ -878,12 +782,36 @@ class FeishuSourceAgent(SourceAgent):
             else:
                 try:
                     doc_cands = await search_and_select_feishu_doc_candidates(
-                        sq.query, token=self._uat, time_filter=sq.time_filter, page_size=14,
+                        sq.query, token=self._uat, time_filter=sq.time_filter, page_size=4,
                         query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
                         sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
                         executor=self._executor,
-                        variants=list(sq.variants or []),
                     )
+                    if not doc_cands and sq.variants:
+                        fallback_queries = list(dict.fromkeys(sq.variants))[:2]
+                        self._trace_events.extend({
+                            "event": "query", "source": self.source, "focus": sq.target_focus,
+                            "query_id": sq.sub_query_id, "query_type": sq.query_type,
+                            "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
+                            "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                        } for fallback_query in fallback_queries)
+                        fallback_results = await asyncio.gather(*[
+                            search_and_select_feishu_doc_candidates(
+                                fallback_query, token=self._uat, time_filter=sq.time_filter, page_size=4,
+                                query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                                sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
+                                executor=self._executor,
+                            ) for fallback_query in fallback_queries
+                        ])
+                        for fallback_query, group in zip(fallback_queries, fallback_results):
+                            self._trace_events.append({
+                                "event": "profile_fallback", "source": self.source,
+                                "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                                "query_type": qt, "fallback_origin": "profile",
+                                "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "primary_candidate_count": 0, "fallback_candidate_count": len(group),
+                            })
+                        doc_cands = [candidate for group in fallback_results for candidate in group]
                 except Exception as e:
                     logger.warning("[feishu] doc search failed for %r: %s", sq.query, e)
                     doc_cands = []
@@ -892,7 +820,7 @@ class FeishuSourceAgent(SourceAgent):
             return {"sq": sq, "query_type": qt, "focus_text": focus_text,
                     "doc_candidates": doc_cands}
 
-        # ── Table track：每 sq 独立跑 search + structure + rerank ──
+        # ── Table track：每 sq 独立跑 search + structure + read ──
         async def _prepare_table_one(sq: SubQuery) -> dict:
             t0 = time.perf_counter()
             qt, focus_text, _ = sq_ctx[sq.sub_query_id]
@@ -900,14 +828,40 @@ class FeishuSourceAgent(SourceAgent):
                 return {"sq": sq, "table_candidates": []}
             try:
                 table_cands = await search_and_select_feishu_table_candidates(
-                    sq.query, token=self._uat, page_size=14,
+                    sq.query, token=self._uat, page_size=3,
                     query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
                     sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
-                    direct_limit=3 if self._preset in ("lite", "balanced") else 6,
-                    wiki_limit=3 if self._preset in ("lite", "balanced") else 6,
+                    direct_limit=3,
+                    wiki_limit=3,
                     executor=self._executor,
-                    variants=list(sq.variants or []),
                 )
+                if not table_cands and sq.variants:
+                    fallback_queries = list(dict.fromkeys(sq.variants))[:2]
+                    self._trace_events.extend({
+                        "event": "query", "source": self.source, "focus": sq.target_focus,
+                        "query_id": sq.sub_query_id, "query_type": sq.query_type,
+                        "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
+                        "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                    } for fallback_query in fallback_queries)
+                    fallback_results = await asyncio.gather(*[
+                        search_and_select_feishu_table_candidates(
+                            fallback_query, token=self._uat, page_size=3,
+                            query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                            sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
+                            direct_limit=3,
+                            wiki_limit=3,
+                            executor=self._executor,
+                        ) for fallback_query in fallback_queries
+                    ])
+                    for fallback_query, group in zip(fallback_queries, fallback_results):
+                        self._trace_events.append({
+                            "event": "profile_fallback", "source": self.source,
+                            "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                            "query_type": qt, "fallback_origin": "profile",
+                            "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                            "primary_candidate_count": 0, "fallback_candidate_count": len(group),
+                        })
+                    table_cands = [candidate for group in fallback_results for candidate in group]
             except Exception as e:
                 logger.warning("[feishu] table search failed for %r: %s", sq.query, e)
                 table_cands = []
@@ -918,6 +872,16 @@ class FeishuSourceAgent(SourceAgent):
         # ── Doc track 跑完即 submit；与 table track 并发 ────────
         async def _doc_track() -> Tuple[List[dict], List[dict], Dict[str, List[str]]]:
             doc_prepared = await asyncio.gather(*[_prepare_doc_one(sq) for sq in sub_queries])
+            for prepared in doc_prepared:
+                sq = prepared["sq"]
+                for rank, candidate in enumerate(prepared.get("doc_candidates") or [], 1):
+                    self._trace_events.append({
+                        "event": "candidate", "source": self.source,
+                        "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                        "query_type": sq.query_type, "api_rank": int(candidate.get("best_api_rank") or rank),
+                        "document": str(candidate.get("title") or candidate.get("name") or ""),
+                        "document_type": str(candidate.get("doc_type") or candidate.get("type") or ""),
+                    })
             early_doc_list, doc_ids_by_sq = _merge_doc_demands(doc_prepared)
             if early_doc_list and self._doc_pool is not None:
                 _assign_doc_route_hints(early_doc_list, min_block=2)
@@ -934,6 +898,16 @@ class FeishuSourceAgent(SourceAgent):
         async def _table_track() -> Tuple[List[dict], List[dict], Dict[str, List[str]]]:
             table_prepared = await asyncio.gather(*[_prepare_table_one(sq) for sq in sub_queries])
             _trim_table_parents(table_prepared, target=6, min_per_sq=2)
+            for prepared in table_prepared:
+                sq = prepared["sq"]
+                for rank, candidate in enumerate(prepared.get("table_candidates") or [], 1):
+                    self._trace_events.append({
+                        "event": "candidate", "source": self.source,
+                        "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                        "query_type": sq.query_type, "api_rank": int(candidate.get("best_api_rank") or rank),
+                        "document": str(candidate.get("title") or candidate.get("name") or ""),
+                        "document_type": str(candidate.get("doc_type") or candidate.get("type") or ""),
+                    })
             table_list, table_ids_by_sq = _merge_table_demands(table_prepared)
             return table_prepared, table_list, table_ids_by_sq
 
@@ -1018,7 +992,7 @@ class FeishuSourceAgent(SourceAgent):
                         meta["selected_sub_query_ids"] = list(cand.get("selected_sub_query_ids") or [])
                         meta["selected_feishu_urls"] = list(cand.get("selected_feishu_urls") or [])
                         meta["selected_query_types"] = list(cand.get("selected_query_types") or [])
-                        meta["candidate_rerank_score"] = float(cand.get("candidate_rerank_score", 0) or 0)
+                        meta["api_rank"] = int(cand.get("best_api_rank", 10**9) or 10**9)
                         meta["candidate_source"] = cand.get("_source", "")
                         meta["candidate_sources"] = list(cand.get("_sources") or [])
                         meta["read_query"] = rq
@@ -1069,7 +1043,7 @@ class FeishuSourceAgent(SourceAgent):
         logger.debug("TIMING feishu.batch_prepare docs=%d tables=%d ms=%.1f",
                      len(early_doc_list), len(table_list), _elapsed_ms(prepare_started))
 
-        # ── Step 4: 并行等待 doc + table → chunk rerank ──────
+        # ── Step 4: 并行等待 doc + table → evidence pool ─────
         async def _execute_one(batch: dict) -> List[ChunkEntry]:
             started = time.perf_counter()
             sq = batch["sq"]
@@ -1147,39 +1121,35 @@ class FeishuSourceAgent(SourceAgent):
 
             doc_chunks, table_chunks = await asyncio.gather(_wait_doc(), _wait_table())
 
-            # doc / table 各自独立做 post-read content rerank（仿 Google type bucket）。
-            # 分桶 rerank 避免 table 噪声压制 doc 信号；两个 rerank 调用并发跑（to_thread）
-            # 而非串行，避免 +500ms 尾延迟。
-            table_top_n = int(getattr(self.cfg, "feishu_table_chunk_rerank_top_n", 0) or 0)
+            # Both pools already obey API/read budgets.  Keep every resulting
+            # chunk in API order; preview evaluation, not a secondary selector,
+            # decides evidence relevance.
 
-            async def _rerank_doc() -> List[UnifiedChunk]:
+            async def _collect_doc_chunks() -> List[UnifiedChunk]:
                 if not doc_chunks:
                     return []
                 selected = await self._to_thread(
-                    _select_chunks_for_sub_query,
+                    _preserve_api_order_chunks,
                     query=sq.query, focus_text=batch["focus_text"],
-                    query_type=qt, uc_list=doc_chunks, top_n=self.cfg.sub_query_top_n,
+                    query_type=qt, uc_list=doc_chunks, top_n=len(doc_chunks),
                 )
                 logger.info("TIMING feishu.chunk_select_doc sub_query_id=%s raw=%d selected=%d",
                              sq.sub_query_id, len(doc_chunks), len(selected))
                 return selected
 
-            async def _rerank_table() -> List[UnifiedChunk]:
+            async def _collect_table_chunks() -> List[UnifiedChunk]:
                 if not table_chunks:
                     return []
-                if table_top_n <= 0:
-                    # 兼容：未配置时沿用旧行为（全量保留，跳过 rerank）
-                    return list(table_chunks)
                 selected = await self._to_thread(
-                    _select_chunks_for_sub_query,
+                    _preserve_api_order_chunks,
                     query=sq.query, focus_text=batch["focus_text"],
-                    query_type=qt, uc_list=table_chunks, top_n=table_top_n,
+                    query_type=qt, uc_list=table_chunks, top_n=len(table_chunks),
                 )
-                logger.info("TIMING feishu.chunk_select_table sub_query_id=%s raw=%d selected=%d top_n=%d",
-                             sq.sub_query_id, len(table_chunks), len(selected), table_top_n)
+                logger.info("TIMING feishu.chunk_select_table sub_query_id=%s raw=%d selected=%d",
+                             sq.sub_query_id, len(table_chunks), len(selected))
                 return selected
 
-            doc_selected, table_selected = await asyncio.gather(_rerank_doc(), _rerank_table())
+            doc_selected, table_selected = await asyncio.gather(_collect_doc_chunks(), _collect_table_chunks())
 
             uc_list = doc_selected + table_selected
             if not uc_list:
@@ -1193,12 +1163,14 @@ class FeishuSourceAgent(SourceAgent):
             for c in chunks:
                 entry = ChunkEntry(
                     id=c.id, source=c.source, content=c.content,
+                    preview_content=c.preview_content,
                     metadata=dict(c.metadata), score=c.score,
                     sub_query=c.sub_query or sq.query,
                     target_focuses=set(c.target_focuses) | {sq.target_focus}, tier=c.tier,
                 )
                 existing = chunk_pool.get(entry.id)
                 chunk_pool[entry.id] = existing.merge(entry) if existing else entry
+                await self._offer_chunk_for_context_eval(entry, chunk_pool)
         logger.info("TIMING feishu.batch_total sub_queries=%d chunk_pool=%d ms=%.1f",
                      len(sub_queries), len(chunk_pool), _elapsed_ms(batch_started))
 
@@ -1218,8 +1190,8 @@ class FeishuSourceAgent(SourceAgent):
                     "id": token,
                     "title": cand.get("title", ""),
                     "doc_type": cand.get("doc_type", ""),
-                    "candidate_rerank_score": float(cand.get("candidate_rerank_score", 0) or 0),
-                    "candidate_rerank_rank": int(cand.get("candidate_rerank_rank", 10**9) or 10**9),
+                    "best_api_rank": int(cand.get("best_api_rank", 10**9) or 10**9),
+                    "first_seen_order": int(cand.get("first_seen_order", 10**9) or 10**9),
                     "selected_focus_ids": list(cand.get("selected_focus_ids") or []),
                     "selected_sub_query_ids": list(cand.get("selected_sub_query_ids") or []),
                     "selected_query_types": list(cand.get("selected_query_types") or []),
@@ -1241,12 +1213,12 @@ class FeishuSourceAgent(SourceAgent):
         batch_started: float,
     ) -> None:
         """lite 模式：每个 sq 独立搜索 doc，跨 sq 去重后取前 8 篇，
-        全部强制 MCP 路由，无 candidate rerank，无 table 流水线。
+        全部强制 MCP 路由，无候选选择器，无 table 流水线。
         """
         await self._ensure_user_identity(sub_queries)
         _LITE_DOC_CAP = 8  # 跨 sq 去重后最多提交的 doc 数
 
-        # Step 1: 并行搜索 doc（直接取搜索结果，不做 candidate rerank）
+        # Step 1: 并行搜索 doc（直接取搜索 API 原顺序）
         async def _search_docs_lite(sq: SubQuery) -> dict:
             started = time.perf_counter()
             qt = sq.query_type or self._default_query_type
@@ -1266,39 +1238,50 @@ class FeishuSourceAgent(SourceAgent):
                     from feishu_read_tool.search import search_feishu_mcp_pure
                     raw_result = await self._to_thread(
                         search_feishu_mcp_pure,
-                        query=sq.query, count=10, uat=self._uat, time_filter=sq.time_filter, 
+                        query=sq.query, count=4, uat=self._uat, time_filter=sq.time_filter,
                         owner_ids=owner_ids, sort_rule="EDIT_TIME"
                     )
                     raw = raw_result.get("items", [])
                 else:
                     from feishu_read_tool.search import search_feishu_docs
                     result = await self._to_thread(
-                        search_feishu_docs, query=sq.query, count=20,
+                        search_feishu_docs, query=sq.query, count=4,
                         uat=self._uat, time_filter=sq.time_filter, owner_ids=owner_ids
                     )
                     raw = result.get("items", [])
-                    # 零结果重试
-                    if not raw:
-                        simplified = None
-                        try:
-                            from tools.feishu.feishu_retrieve import _simplify_feishu_query
-                            simplified = _simplify_feishu_query(sq.query)
-                        except Exception:
-                            pass
-                        if simplified:
-                            r2 = await self._to_thread(
-                                search_feishu_docs, query=simplified, count=20, uat=self._uat,
-                                owner_ids=owner_ids
-                            )
-                            raw = r2.get("items", [])
+                    if not raw and sq.variants:
+                        fallback_queries = list(dict.fromkeys(sq.variants))[:2]
+                        self._trace_events.extend({
+                            "event": "query", "source": self.source, "focus": sq.target_focus,
+                            "query_id": sq.sub_query_id, "query_type": sq.query_type,
+                            "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
+                            "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                        } for fallback_query in fallback_queries)
+                        fallback_results = await asyncio.gather(*[
+                            self._to_thread(
+                                search_feishu_docs, query=fallback_query, count=4,
+                                uat=self._uat, time_filter=sq.time_filter, owner_ids=owner_ids,
+                            ) for fallback_query in fallback_queries
+                        ])
+                        for fallback_query, result in zip(fallback_queries, fallback_results):
+                            self._trace_events.append({
+                                "event": "profile_fallback", "source": self.source,
+                                "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                                "query_type": qt, "fallback_origin": "profile",
+                                "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "primary_candidate_count": 0,
+                                "fallback_candidate_count": len(result.get("items", [])),
+                            })
+                        raw = [candidate for result in fallback_results for candidate in result.get("items", [])]
                             
                 # 直接用搜索结果，注入 lineage 字段
                 for rank, c in enumerate(raw, start=1):
                     c["selected_focus_ids"] = [sq.target_focus]
                     c["selected_sub_query_ids"] = [sq.sub_query_id]
                     c["selected_query_types"] = [qt]
-                    c["candidate_rerank_score"] = max(0.0, 1.0 - (rank - 1) * 0.05)
-                    c["candidate_rerank_rank"] = rank
+                    c["cross_query_hit_count"] = 1
+                    c["best_api_rank"] = rank
+                    c["first_seen_order"] = rank
                 doc_cands = raw
             except Exception as e:
                 logger.warning("[feishu][lite] doc search failed for %r: %s", sq.query, e)
@@ -1347,7 +1330,7 @@ class FeishuSourceAgent(SourceAgent):
         logger.debug("TIMING feishu.lite.batch_prepare docs=%d tables=0 ms=%.1f",
                      len(doc_list), _elapsed_ms(prepare_started))
 
-        # Step 3: 等待 doc chunks → doc-only rerank → chunk_pool
+        # Step 3: 等待 doc chunks → chunk_pool
         async def _execute_one_lite(batch: dict) -> List[ChunkEntry]:
             started = time.perf_counter()
             sq = batch["sq"]
@@ -1359,7 +1342,7 @@ class FeishuSourceAgent(SourceAgent):
             if not d_ids:
                 return []
             try:
-                # Lite path: per-doc 6s 上限，慢 doc 不阻塞批次；其他文档继续 chunking & rerank
+                # Lite path: per-doc 6s 上限，慢 doc 不阻塞批次；其他文档继续 chunking
                 doc_chunks = await self._doc_pool.wait_and_collect(
                     d_ids, total_timeout=doc_pool_timeout, per_doc_timeout=6.0,
                 )
@@ -1370,7 +1353,7 @@ class FeishuSourceAgent(SourceAgent):
                 doc_chunks = []
             if not doc_chunks:
                 return []
-            selected = _select_chunks_for_sub_query(
+            selected = _preserve_api_order_chunks(
                 query=sq.query, focus_text=batch["focus_text"],
                 query_type=qt, uc_list=doc_chunks, top_n=self.cfg.sub_query_top_n,
             )
@@ -1389,5 +1372,6 @@ class FeishuSourceAgent(SourceAgent):
                 )
                 existing = chunk_pool.get(entry.id)
                 chunk_pool[entry.id] = existing.merge(entry) if existing else entry
+                await self._offer_chunk_for_context_eval(entry, chunk_pool)
         logger.info("TIMING feishu.lite.batch_total sub_queries=%d chunk_pool=%d ms=%.1f",
                      len(sub_queries), len(chunk_pool), _elapsed_ms(batch_started))

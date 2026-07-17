@@ -50,38 +50,28 @@ from dotenv import load_dotenv
 from feishu_read_tool.search import search_feishu_docs, search_feishu_tables
 from feishu_read_tool.pipeline_models import ChunkContentType
 from tools.core.models import UnifiedChunk
-from tools.core.rerank import (
-    build_focus_sub_query_question,
-    get_doc_candidate_selection_config,
-    select_search_candidates,
-)
+from tools.core.bucket_selector import native_candidate_budget
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 FEISHU_UAT = os.getenv("FEISHU_UAT", "")
-TABLE_SEARCH_ROUTE_TOP_K = 6          # balanced/deep_dive 每路召回上限(单路 / Path A 现状)
-TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # lite 每路召回上限(单路 / Path A 现状)
-TABLE_CHILD_SELECT_TOP_K = 2          # 每个 parent 最多保留的 child 数
-TABLE_CHILD_SELECT_GLOBAL_TOP_K = 10  # 跨所有 parent 的全局 child rerank 上限
-TABLE_CHILD_SCORE_THRESHOLD = 0.18
-TABLE_CHILD_MIN_KEEP = 1
-
-# Dual-path table 召回: Path A/B 不对称配置
-# Path A (原 query): 收缩到 2 per route → 6 candidates max → 资源主要节省点
-# Path B (变体 + RRF): 保留 3 per route → 6 candidates per variant,RRF 后 cap 3
-# 总进入 Step 2 (structure fetch) 的 unique parents ≈ 5-7,与单路 6 持平
-TABLE_PATH_A_ROUTE_TOP_K = 3               # Path A 每路每个 route 的 cap (回退到 3)
-TABLE_PATH_A_ROUTE_TOP_K_LITE = 2          # lite Path A cap
-TABLE_PATH_B_ROUTE_TOP_K = 3               # Path B 每路每个 route 的 cap (保持)
-TABLE_PATH_B_ROUTE_TOP_K_LITE = 2          # lite Path B cap
-TABLE_PATH_B_RRF_CAP = 3                   # Path B RRF 合并后输出 cap (非 lite)
-TABLE_PATH_B_RRF_CAP_LITE = 2              # Path B RRF 合并后输出 cap (lite)
+TABLE_SEARCH_ROUTE_TOP_K = 3          # each Direct/Wiki table route request budget
+TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # search budget is preset-independent
+# Native-order table route budget.  Context is governed by preview/full
+# evaluation after I/O, never by a child/candidate selector.
+TABLE_NATIVE_ROUTE_TOP_K = 3                # 每个原生 API route 的 bounded-I/O cap
+TABLE_NATIVE_ROUTE_TOP_K_LITE = 3           # search budget is preset-independent
 
 # Time-filter widening: planner sets time_filter from user's date intent (e.g. "1月15日"
 # → ">2026-01-15"). But edit_time often doesn't reflect content time — narrow cutoff
 # excludes valid docs. Widen left boundary, then narrow via date-anchor content filter.
 TIME_FILTER_LEFT_BUFFER_DAYS = 90
+
+# These Bitable applications are operational inputs to the retrieval system,
+# not customer/business knowledge. They must never become answer evidence.
+# This is a source-scope boundary, not a relevance score or post-search selector.
+NON_EVIDENCE_BITABLE_TITLES = frozenset({"query_seed", "kb bailian"})
 
 
 def _elapsed_ms(start: float) -> float:
@@ -90,7 +80,7 @@ def _elapsed_ms(start: float) -> float:
 
 # ── 日期锚点抽取与候选预过滤 ─────────────────────────────────────────────────────
 # 用户 query 中的日期(如 "2026年1月15日" / "1月15日到21日")会被 planner 蒸馏掉，
-# 进入 rerank 时只剩通用关键词("Nubia 销售")。但目标文档的 title/summary 经常含日期
+# 仅保留通用关键词("Nubia 销售")时，目标文档的 title/summary 经常含日期
 # (如 "NUBIA 业务总结报告 (2026-01-15 ~ 2026-01-21)")，可以用作内容预过滤信号。
 
 _DATE_PATTERNS = [
@@ -138,90 +128,6 @@ def _candidate_text_for_anchor_match(cand: dict) -> str:
         str(cand.get("summary") or cand.get("snippet") or ""),
     ]
     return " ".join(parts).lower()
-
-
-# ── 双路召回:query 变体生成 + RRF 合并 ────────────────────────────────────────
-# Path A 用原 sub_query (单条 + 0 结果 fallback);
-# Path B 用 user-anchored 变体并行 fan-out + RRF 合并。
-# 两路独立 fetch,合并后统一过 time_filter + date_prefilter + rerank。
-
-# 高信息量名词:从 focus_text 抽 user 真实说的词,补回 sub_query 末尾
-_USER_ANCHOR_PATTERNS = [
-    re.compile(r"[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*"),       # 英文专有名 e.g. "X Ultra", "Paid Media"
-    re.compile(r"[A-Z]{2,}[0-9]*"),                              # 缩写 e.g. "UGC", "EDM", "ROAS"
-    re.compile(r"[A-Z][0-9]+(?:\s+[A-Za-z]+)*"),                  # 型号 e.g. "Z80 Ultra", "Z70"
-    re.compile(r"\d{4}-\d{1,2}-\d{1,2}"),                        # 日期 e.g. "2026-01-15"
-    re.compile(r"\d{1,2}月\d{1,2}日"),                            # 中文日期
-]
-
-_GENERIC_NOUNS_TO_DROP = {
-    "运营", "销售", "营销", "市场", "计划", "策略", "管理", "业务",
-    "项目", "工作", "内容", "合作", "情况", "方案", "进度", "表现",
-    "数据", "报告", "总结", "复盘", "动态", "情况",
-}
-
-
-def _extract_user_anchors(focus_text: str, max_anchors: int = 3) -> List[str]:
-    """从 focus_text 抽取高信息量的 user 原词:专有名、缩写、型号、日期。"""
-    if not focus_text:
-        return []
-    anchors: List[str] = []
-    for pat in _USER_ANCHOR_PATTERNS:
-        for m in pat.findall(focus_text):
-            m = m.strip()
-            if m and m.lower() not in {a.lower() for a in anchors}:
-                anchors.append(m)
-                if len(anchors) >= max_anchors:
-                    return anchors
-    return anchors
-
-
-def _build_query_variants(sub_query: str, focus_text: str) -> List[str]:
-    """Path B 变体生成。返回 1-2 条"与原 sub_query 不同"的搜索 query。
-
-    策略:
-      V1. user-anchored: 原 sub_query + 从 focus_text 抽的高信息量名词
-      V2. brand-only:   只保留 sub_query 中的品牌/英文词,做宽召回兜底
-    """
-    variants: List[str] = []
-    seen = {sub_query.strip().lower()}
-
-    # V1: 加 user 锚点
-    anchors = _extract_user_anchors(focus_text)
-    if anchors:
-        v1 = f"{sub_query.strip()} {' '.join(anchors)}".strip()
-        if v1.lower() not in seen:
-            variants.append(v1)
-            seen.add(v1.lower())
-
-    # V2: 品牌-only(从原 sub_query 抽英文专有名)
-    brand_tokens = re.findall(r"[A-Za-z][A-Za-z0-9_-]+", sub_query)
-    if brand_tokens:
-        v2 = " ".join(brand_tokens[:2])
-        if v2.lower() not in seen and v2.lower() != sub_query.strip().lower():
-            variants.append(v2)
-            seen.add(v2.lower())
-
-    return variants
-
-
-def _rrf_merge(result_lists: List[List[dict]], k: int = 60) -> List[dict]:
-    """Reciprocal Rank Fusion: 多组排名结果合并,重复出现的 doc 累加分数。
-
-    返回按融合分数降序的去重列表。
-    """
-    scores: Dict[str, float] = {}
-    cand_by_key: Dict[str, dict] = {}
-    for results in result_lists:
-        for rank_idx, cand in enumerate(results):
-            key = cand.get("id") or cand.get("document_id") or cand.get("doc_id") or cand.get("url") or ""
-            if not key:
-                continue
-            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank_idx + 1)
-            if key not in cand_by_key:
-                cand_by_key[key] = cand
-    ordered_keys = sorted(scores.keys(), key=lambda x: -scores[x])
-    return [cand_by_key[k] for k in ordered_keys]
 
 
 def _dedupe_candidates(*lists: List[dict]) -> List[dict]:
@@ -272,102 +178,6 @@ def _filter_candidates_by_date_anchors(
 
 
 # ── 预检策略：快速判断搜索结果是否值得深度读取 ──────────────────────────────────
-
-# ── 零返回重试策略：简化 query + 品牌名大小写泛化 ────────────────────────────
-
-# 已知品牌名（用于大小写泛化）— 与 source_query_config.BRAND_ROUTING 保持同步
-_KNOWN_BRANDS = {
-    "nubia": ["nubia", "Nubia", "NUBIA"],
-    "redmagic": ["REDMAGIC", "Redmagic", "redmagic", "RedMagic"],
-    "hypershell": ["Hypershell", "hypershell", "HYPERSHELL", "HyperShell"],
-    "nothing": ["Nothing", "nothing", "NOTHING"],
-}
-
-
-def _try_brand_case_variant(query: str) -> Optional[str]:
-    """尝试品牌名大小写变体，用于零返回时重试。
-
-    检测 query 中的品牌名，返回不同大小写变体。
-    例如：'NUBIA 运营' → 'nubia 运营' 或 'Nubia 运营'
-
-    Returns:
-        大小写变体的 query，或 None 表示无法生成变体
-    """
-    query_lower = query.lower()
-
-    for brand_key, variants in _KNOWN_BRANDS.items():
-        if brand_key in query_lower:
-            # 找到当前使用的变体
-            current_variant = None
-            for v in variants:
-                if v in query:
-                    current_variant = v
-                    break
-
-            if current_variant:
-                # 尝试其他变体（优先小写，次优首字母大写）
-                for v in variants:
-                    if v != current_variant:
-                        new_query = query.replace(current_variant, v)
-                        logger.debug(
-                            "_try_brand_case_variant: '%s' → '%s' (brand case)",
-                            query, new_query
-                        )
-                        return new_query
-
-    return None
-
-
-def _simplify_feishu_query(query: str) -> Optional[str]:
-    """简化飞书搜索 query，用于零返回时重试。
-
-    [P2.7] 策略优先级：
-    1. 如果 query 有 3+ 词，保留品牌名 + 第 2 关键词 + 文档类型提示
-    2. 如果包含中文国家名，去掉国家名，加文档类型词
-    3. 否则返回 None（不重试）
-    """
-    words = query.strip().split()
-    if len(words) < 2:
-        return None
-
-    # [P2.7] 检测品牌名（保留为锚点）
-    brand_word = None
-    for w in words:
-        if w.lower() in {"nubia", "hypershell", "redmagic", "nothing"}:
-            brand_word = w
-            break
-
-    # [P3-A] 策略1：3+ 词 → 保留品牌 + 最泛化的动作词
-    _BROAD_WORDS = {"销售", "运营", "策略", "营销", "推广", "市场", "合作", "进度", "表现", "计划"}
-    if len(words) >= 3:
-        if brand_word:
-            # 找第一个泛化动作词
-            action = next((w for w in words if w in _BROAD_WORDS and w != brand_word), None)
-            if action:
-                simplified = f"{brand_word} {action}"
-            else:
-                other = [w for w in words if w != brand_word]
-                simplified = f"{brand_word} {other[0]}"
-        else:
-            simplified = " ".join(words[:2])
-        logger.debug("_simplify_feishu_query: '%s' → '%s' (brand+action)", query, simplified)
-        return simplified
-
-    # 策略2：去掉中文国家名
-    country_words = {"美国", "日本", "中国", "韩国", "德国", "英国", "法国", "澳大利亚", "加拿大"}
-    filtered = [w for w in words if w not in country_words]
-    if len(filtered) < len(words) and filtered:
-        simplified = " ".join(filtered)
-        logger.debug("_simplify_feishu_query: '%s' → '%s' (remove country)", query, simplified)
-        return simplified
-
-    # [P3-A] 策略3：品牌名单独搜索（最后兜底）
-    if brand_word and len(words) == 2:
-        logger.debug("_simplify_feishu_query: '%s' → '%s' (brand only)", query, brand_word)
-        return brand_word
-
-    return None
-
 
 # ── doc_type 归类 ─────────────────────────────────────────────────────────────
 _DOCX_TYPES = {"DOCX", "DOC", "docx", "doc"}
@@ -438,8 +248,8 @@ def _annotate_selected_candidate(
     *,
     focus_id: str,
     sub_query_id: str,
-    score: float,
-    rank: int,
+    score: float = 0.0,
+    rank: int = 1,
 ) -> dict:
     out = dict(candidate)
     url = out.get("url", "")
@@ -455,8 +265,9 @@ def _annotate_selected_candidate(
         list(out.get("selected_feishu_urls") or []),
         [url] if url else [],
     )
-    out["candidate_rerank_score"] = score
-    out["candidate_rerank_rank"] = rank
+    out["cross_query_hit_count"] = max(1, int(out.get("cross_query_hit_count", 0) or 0))
+    out["best_api_rank"] = min(int(out.get("best_api_rank", rank) or rank), rank)
+    out["first_seen_order"] = int(out.get("first_seen_order", rank) or rank)
     return out
 
 
@@ -477,13 +288,9 @@ def _merge_candidate_lineage(base: dict, extra: dict) -> dict:
     merged["selected_query_types"] = sorted(
         set(base.get("selected_query_types") or []) | set(extra.get("selected_query_types") or [])
     )
-    merged["candidate_rerank_score"] = max(
-        float(base.get("candidate_rerank_score", 0.0) or 0.0),
-        float(extra.get("candidate_rerank_score", 0.0) or 0.0),
-    )
-    rank_a = int(base.get("candidate_rerank_rank", 10**9) or 10**9)
-    rank_b = int(extra.get("candidate_rerank_rank", 10**9) or 10**9)
-    merged["candidate_rerank_rank"] = min(rank_a, rank_b)
+    merged["cross_query_hit_count"] = int(base.get("cross_query_hit_count", 1) or 1) + int(extra.get("cross_query_hit_count", 1) or 1)
+    merged["best_api_rank"] = min(int(base.get("best_api_rank", 10**9) or 10**9), int(extra.get("best_api_rank", 10**9) or 10**9))
+    merged["first_seen_order"] = min(int(base.get("first_seen_order", 10**9) or 10**9), int(extra.get("first_seen_order", 10**9) or 10**9))
     return merged
 
 
@@ -495,6 +302,12 @@ def _normalize_table_candidate(candidate: dict, *, source: str) -> dict:
         [source],
     )
     return normalized
+
+
+def _is_non_evidence_table_candidate(candidate: dict) -> bool:
+    """Return true only for explicitly registered system-only table apps."""
+    title = str(candidate.get("title") or candidate.get("name") or "").strip().casefold()
+    return title in NON_EVIDENCE_BITABLE_TITLES
 
 
 def _table_candidate_key(candidate: dict) -> str:
@@ -526,12 +339,14 @@ def _dedupe_table_candidates(
 
     direct_items = [
         _normalize_table_candidate(item, source="direct")
-        for item in items[:direct_count][:direct_limit]
-    ]
+        for item in items[:direct_count]
+        if not _is_non_evidence_table_candidate(item)
+    ][:direct_limit]
     wiki_items = [
         _normalize_table_candidate(item, source="wiki")
-        for item in items[direct_count : direct_count + wiki_count][:wiki_limit]
-    ]
+        for item in items[direct_count : direct_count + wiki_count]
+        if not _is_non_evidence_table_candidate(item)
+    ][:wiki_limit]
 
     merged_by_key: Dict[str, dict] = {}
     ordered_keys: List[str] = []
@@ -684,8 +499,7 @@ def _fallback_select_doc_candidates(
     sub_query_id: str,
 ) -> List[dict]:
     query_type = _normalize_query_type(query_type)
-    cfg = get_doc_candidate_selection_config(query_type)
-    top_k = int(cfg["top_k"])
+    top_k = native_candidate_budget(query_type)
     ranked_with_score = sorted(
         [(_build_doc_candidate_bm25(query, c), c) for c in candidates],
         key=lambda pair: pair[0],
@@ -718,7 +532,7 @@ def _select_doc_candidates_for_sub_query(
         return []
 
     # Date-anchor content pre-filter: when user query has date intent, narrow
-    # candidates to those whose title/summary contains the date before rerank.
+    # candidates to those whose title/summary contains the date before reading.
     # No-op if no date detected or zero candidates match (preserves recall).
     candidates = _filter_candidates_by_date_anchors(
         candidates, focus_text=focus_text, sub_query=sub_query, sub_query_id=sub_query_id,
@@ -726,12 +540,9 @@ def _select_doc_candidates_for_sub_query(
     if not candidates:
         return []
 
-    query_type = _normalize_query_type(query_type)
-    cfg = get_doc_candidate_selection_config(query_type)
-    top_k = int(cfg["top_k"])
-    score_threshold = float(cfg["score_threshold"])
-    min_keep = int(cfg["min_keep"])
-    question = build_focus_sub_query_question(focus_text or sub_query, sub_query)
+    # Preserve API order.  The only selection at this stage is the existing
+    # bounded-I/O cap, never a local or model relevance score.
+    top_k = native_candidate_budget(_normalize_query_type(query_type))
 
     if len(candidates) == 1:
         return [
@@ -739,79 +550,26 @@ def _select_doc_candidates_for_sub_query(
                 candidates[0],
                 focus_id=focus_id,
                 sub_query_id=sub_query_id,
-                score=1.0,
                 rank=1,
             )
         ]
 
-    # 候选 ≤ top_k → 全要：跳过 rerank API（省 300-500ms），按 search 原序赋分。
-    # rerank 仅当候选数 > top_k 才有筛选价值；候选已经少于配额时 rerank 只是排序，
-    # 而下游 chunk-level rerank/eval 会重新打分，doc 顺序对最终结果影响弱。
+    # 候选 ≤ top_k → 全要，按搜索 API 原始顺序保留。
     if len(candidates) <= top_k:
         return [
             _annotate_selected_candidate(
                 cand, focus_id=focus_id, sub_query_id=sub_query_id,
-                score=max(0.0, 1.0 - rank_idx * 0.05),
                 rank=rank_idx + 1,
             )
             for rank_idx, cand in enumerate(candidates)
         ]
 
-    result = select_search_candidates(
-        query=question,
-        candidates=candidates,
-        top_n=top_k,
-        score_threshold=score_threshold,
-        min_keep=min_keep,
-        instruct_template="qa",
-    )
-    if result["status"] != "success":
-        logger.warning(
-            "feishu_retrieve: rerank doc selection failed for sub_query_id=%s, fallback to local ranking: %s",
-            sub_query_id, result.get("message"),
+    return [
+        _annotate_selected_candidate(
+            candidate, focus_id=focus_id, sub_query_id=sub_query_id, rank=rank,
         )
-        return _fallback_select_doc_candidates(
-            candidates,
-            query=question,
-            query_type=query_type,
-            focus_id=focus_id,
-            sub_query_id=sub_query_id,
-        )
-
-    selected = []
-    for item in result["selected_results"]:
-        selected.append(
-            _annotate_selected_candidate(
-                item["candidate"],
-                focus_id=focus_id,
-                sub_query_id=sub_query_id,
-                score=float(item["relevance_score"]),
-                rank=int(item["rank"]),
-            )
-        )
-    if not selected:
-        logger.warning(
-            "feishu_retrieve: rerank doc selection returned 0 selected candidates for sub_query_id=%s, fallback to local ranking",
-            sub_query_id,
-        )
-        return _fallback_select_doc_candidates(
-            candidates,
-            query=question,
-            query_type=query_type,
-            focus_id=focus_id,
-            sub_query_id=sub_query_id,
-        )
-    logger.debug(
-        "feishu_retrieve: doc candidate selection sub_query_id=%s query_type=%s raw=%d selected=%d threshold=%.2f min_keep=%d top_k=%d",
-        sub_query_id or "unknown",
-        query_type,
-        len(candidates),
-        len(selected),
-        score_threshold,
-        min_keep,
-        top_k,
-    )
-    return selected
+        for rank, candidate in enumerate(candidates[:top_k], start=1)
+    ]
 
 
 async def search_and_select_feishu_doc_candidates(
@@ -819,107 +577,44 @@ async def search_and_select_feishu_doc_candidates(
     *,
     token: str,
     time_filter: Optional[str] = None,
-    page_size: int = 20,
+    page_size: int = 4,
     query_type: str = "structured",
     focus_id: str = "",
     focus_text: str = "",
     sub_query_id: str = "",
     owner_ids: Optional[List[str]] = None,
     executor: Optional[concurrent.futures.Executor] = None,
-    variants: Optional[List[str]] = None,
 ) -> List[dict]:
     """执行 Feishu doc 搜索并返回当前 sub_query 选中的候选文档。
 
-    搜索策略（按顺序，前一步有结果就不继续）：
-    1. 原 query 直接搜索
-    2. 零结果 → _simplify_feishu_query 简化重试
-    3. 仍零结果 → _try_brand_case_variant 品牌变体 fallback
+    搜索策略：严格执行原始 API query。零候选 fallback 由 SourceAgent
+    单独调度 profile-derived alias/expression query，不能在这里改写原 query。
 
     ``executor``: 源专属线程池；None 时走 asyncio 默认（向后兼容）。
     """
     started = time.perf_counter()
     query_type = _normalize_query_type(query_type)
 
-    # ── Path A: 原 query + 0 结果 fallback 链 ──
-    async def _path_a() -> List[dict]:
-        try:
-            r = await _exec_to_thread(
-                executor, search_feishu_docs,
-                query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
-            )
-            cands = r.get("items", [])
-            if not cands:
-                simplified = _simplify_feishu_query(query)
-                if simplified:
-                    logger.debug("feishu_retrieve: PathA ZERO, retry simplified '%s'", simplified)
-                    r = await _exec_to_thread(
-                        executor, search_feishu_docs,
-                        query=simplified, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
-                    )
-                    cands = r.get("items", [])
-            if not cands:
-                variant = _try_brand_case_variant(query)
-                if variant:
-                    logger.debug("feishu_retrieve: PathA still ZERO, try brand variant '%s'", variant)
-                    r = await _exec_to_thread(
-                        executor, search_feishu_docs,
-                        query=variant, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
-                    )
-                    cands = r.get("items", [])
-            return cands
-        except Exception as e:
-            logger.warning("feishu_retrieve PathA failed: %s", e)
-            return []
-
-    # ── Path B: 多变体并行 + RRF 合并 ──
-    # 变体来源优先级:1) 调用方传入的 variants (source_agent 在 _enrich_sub_queries 中生成);
-    # 2) 回退到本地 _build_query_variants (向后兼容,无 enrich 时仍能工作)
-    # Path B page_size 减半: 变体是探索性召回,不需要 path A 同等深度,
-    # 减半可降低 wiki/mcp API 调用开销 ~30-40%,RRF 合并后仍有足够候选送 rerank。
-    path_b_page_size = max(5, page_size // 2)
-    async def _path_b() -> List[dict]:
-        path_b_variants = list(variants) if variants else _build_query_variants(query, focus_text or query)
-        if not path_b_variants:
-            return []
-        logger.debug(
-            "feishu_retrieve: PathB sub_query_id=%s page_size=%d variants=%s",
-            sub_query_id or "unknown", path_b_page_size, path_b_variants,
+    try:
+        result = await _exec_to_thread(
+            executor, search_feishu_docs,
+            query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
         )
-        try:
-            # Path B 跳过 MCP: Path A 已经覆盖 MCP,Path B 只需 Wiki 补充长尾召回。
-            # 省 ~0.5-1s API RTT,避免 MCP 重复调用。
-            results = await asyncio.gather(*[
-                _exec_to_thread(
-                    executor, search_feishu_docs,
-                    query=v, count=path_b_page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
-                    skip_mcp=True,
-                )
-                for v in path_b_variants
-            ], return_exceptions=True)
-            valid = [r.get("items", []) if isinstance(r, dict) else [] for r in results]
-            merged = _rrf_merge(valid)
-            return merged
-        except Exception as e:
-            logger.warning("feishu_retrieve PathB failed: %s", e)
-            return []
+        doc_candidates = list(result.get("items", []) or [])
+    except Exception as exc:
+        logger.warning("feishu_retrieve primary doc search failed: %s", exc)
+        doc_candidates = []
 
-    raw_a, raw_b = await asyncio.gather(_path_a(), _path_b())
-
-    # 记录两路独立召回情况
     logger.info(
-        "feishu_retrieve: dual_path sub_query_id=%s pathA=%d pathB=%d",
-        sub_query_id or "unknown", len(raw_a), len(raw_b),
+        "feishu_retrieve: native_primary sub_query_id=%s candidates=%d",
+        sub_query_id or "unknown", len(doc_candidates),
     )
-
-    if not raw_a and not raw_b:
+    if not doc_candidates:
         logger.info(
             "TIMING feishu.doc_candidate_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
             sub_query_id or "unknown", _elapsed_ms(started),
         )
         return []
-
-    # 合并去重(A 顺序优先)。time_filter 应用于合并后的池子,避免 2x metadata fetch。
-    doc_candidates = _dedupe_candidates(raw_a, raw_b)
 
     # Time post-filtering for non-MCP doc candidates.
     if time_filter:
@@ -987,44 +682,14 @@ async def search_and_select_feishu_doc_candidates(
         )
         return []
 
-    # Lite 模式无 rerank: 按 path A=2 / path B=3 平分,去重后保留 ≤5 个 doc 进入读取阶段
-    preset = (os.getenv("RAG_PRESET", "balanced") or "balanced").strip().lower()
-    if preset == "lite":
-        # 用 doc_id 标记每个候选属于哪一路(在 time_filter 之后仍保留 raw_a/raw_b 顺序)
-        survived_ids = set()
-        for c in doc_candidates:
-            cid = c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or ""
-            if cid:
-                survived_ids.add(cid)
-        a_filtered_ordered = [c for c in raw_a
-                              if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") in survived_ids]
-        b_filtered_ordered = [c for c in raw_b
-                              if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") in survived_ids]
-
-        a_pick = a_filtered_ordered[:2]
-        a_pick_ids = {c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "" for c in a_pick}
-        b_pick = [c for c in b_filtered_ordered
-                  if (c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or "") not in a_pick_ids][:3]
-
-        selected = []
-        for rank_idx, cand in enumerate(a_pick + b_pick):
-            selected.append(_annotate_selected_candidate(
-                cand, focus_id=focus_id, sub_query_id=sub_query_id,
-                score=max(0.0, 1.0 - rank_idx * 0.05), rank=rank_idx + 1,
-            ))
-        logger.debug(
-            "feishu_retrieve: lite_split sub_query_id=%s pathA=%d pathB=%d selected=%d",
-            sub_query_id or "unknown", len(a_pick), len(b_pick), len(selected),
-        )
-    else:
-        selected = _select_doc_candidates_for_sub_query(
-            doc_candidates,
-            sub_query=query,
-            focus_id=focus_id,
-            focus_text=focus_text or query,
-            sub_query_id=sub_query_id,
-            query_type=query_type,
-        )
+    selected = _select_doc_candidates_for_sub_query(
+        doc_candidates,
+        sub_query=query,
+        focus_id=focus_id,
+        focus_text=focus_text or query,
+        sub_query_id=sub_query_id,
+        query_type=query_type,
+    )
     for candidate in selected:
         candidate["selected_query_types"] = sorted(
             set(candidate.get("selected_query_types") or []) | {query_type}
@@ -1043,7 +708,7 @@ async def search_and_select_feishu_table_candidates(
     query: str,
     *,
     token: str,
-    page_size: int = 20,
+    page_size: int = 3,
     query_type: str = "structured",
     focus_id: str = "",
     focus_text: str = "",
@@ -1053,17 +718,13 @@ async def search_and_select_feishu_table_candidates(
     wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     owner_ids: Optional[List[str]] = None,
     executor: Optional[concurrent.futures.Executor] = None,
-    variants: Optional[List[str]] = None,
 ) -> List[dict]:
-    """执行 Feishu table 搜索，全局 child rerank，返回已选中子表的父文件候选。
+    """执行 Feishu table 搜索，按原始 API 顺序读取命中 parent 的全部子表。
 
     流程：
-    1. search → _dedupe_table_candidates（按 direct_limit/wiki_limit 截断）
-    2. 并发 structure prefetch（所有 parent）
-    3. 全局 child rerank：把所有 parent 的 children 合并，一次 rerank 选 top
-       TABLE_CHILD_SELECT_GLOBAL_TOP_K 个 child，再按 parent 分组，每个 parent
-       最多保留 TABLE_CHILD_SELECT_TOP_K 个 child（按分数截断多余的）
-    4. 返回有 selected children 的 parent 列表
+    1. 原 query 搜索并按 API 结果顺序去重
+    2. 在既有 page/route budget 内读取命中 parent 的全部子表结构
+    3. 返回 parent，表格 preview/full 构建负责后续上下文控制
 
     ``executor``: 源专属线程池；None 时走 asyncio 默认。
     """
@@ -1072,64 +733,26 @@ async def search_and_select_feishu_table_candidates(
     if query_type != "structured":
         return []
 
-    # Dual-path table 召回(Path A/B 不对称):
-    # - Path A 收缩到 2/route → 6 raw → 减少 structure fetch 数量(主要省时点)
-    # - Path B 保持 3/route → 通过 variants 扩宽召回
     preset = (os.getenv("RAG_PRESET", "balanced") or "balanced").strip().lower()
     is_lite = preset == "lite"
-    path_a_direct = TABLE_PATH_A_ROUTE_TOP_K_LITE if is_lite else TABLE_PATH_A_ROUTE_TOP_K
-    path_a_wiki = path_a_direct
-    path_b_direct = TABLE_PATH_B_ROUTE_TOP_K_LITE if is_lite else TABLE_PATH_B_ROUTE_TOP_K
-    path_b_wiki = path_b_direct
-    path_b_cap = TABLE_PATH_B_RRF_CAP_LITE if is_lite else TABLE_PATH_B_RRF_CAP
-
-    # ── Path A: 原 query 单路调用 search_feishu_tables (收缩 2/route) ──
-    async def _path_a() -> List[dict]:
-        try:
-            r = await _exec_to_thread(
-                executor, search_feishu_tables,
-                query=query, count=page_size, uat=token, owner_ids=owner_ids,
-            )
-            return _dedupe_table_candidates(
-                r, direct_limit=path_a_direct, wiki_limit=path_a_wiki,
-            )
-        except Exception as e:
-            logger.warning("feishu_retrieve table PathA failed: %s", e)
-            return []
-
-    # ── Path B: 多变体并行 search,RRF 合并 (保留 3/route) ──
-    async def _path_b() -> List[dict]:
-        b_variants = list(variants or [])
-        if not b_variants:
-            return []
-        try:
-            results = await asyncio.gather(*[
-                _exec_to_thread(
-                    executor, search_feishu_tables,
-                    query=v, count=page_size, uat=token, owner_ids=owner_ids,
-                )
-                for v in b_variants
-            ], return_exceptions=True)
-            per_variant_lists: List[List[dict]] = []
-            for r in results:
-                if isinstance(r, dict):
-                    deduped = _dedupe_table_candidates(
-                        r, direct_limit=path_b_direct, wiki_limit=path_b_wiki,
-                    )
-                    per_variant_lists.append(deduped)
-            merged = _rrf_merge(per_variant_lists)
-            return merged[:path_b_cap]
-        except Exception as e:
-            logger.warning("feishu_retrieve table PathB failed: %s", e)
-            return []
-
-    raw_a, raw_b = await asyncio.gather(_path_a(), _path_b())
+    default_route_limit = TABLE_NATIVE_ROUTE_TOP_K_LITE if is_lite else TABLE_NATIVE_ROUTE_TOP_K
+    route_limit = min(default_route_limit, max(1, int(direct_limit or default_route_limit)),
+                      max(1, int(wiki_limit or default_route_limit)))
+    try:
+        raw_tables = await _exec_to_thread(
+            executor, search_feishu_tables,
+            query=query, count=page_size, uat=token, owner_ids=owner_ids,
+        )
+        parent_candidates = _dedupe_table_candidates(
+            raw_tables, direct_limit=route_limit, wiki_limit=route_limit,
+        )
+    except Exception as exc:
+        logger.warning("feishu_retrieve primary table search failed: %s", exc)
+        parent_candidates = []
     logger.info(
-        "feishu_retrieve: table dual_path sub_query_id=%s variants=%s pathA=%d pathB=%d",
-        sub_query_id or "unknown", list(variants or [])[:3], len(raw_a), len(raw_b),
+        "feishu_retrieve: table_native_primary sub_query_id=%s parents=%d",
+        sub_query_id or "unknown", len(parent_candidates),
     )
-
-    parent_candidates = _dedupe_candidates(raw_a, raw_b)
     if not parent_candidates:
         logger.info(
             "TIMING feishu.table_parent_select sub_query_id=%s raw=0 selected=0 ms=%.1f",
@@ -1152,7 +775,6 @@ async def search_and_select_feishu_table_candidates(
     fetch_results = await asyncio.gather(*[_fetch_one(p) for p in parent_candidates])
 
     # ── Step 2: 构建全局 child candidates（含 parent 归属）──
-    question = build_focus_sub_query_question(focus_text or query, query)
     all_child_candidates: List[dict] = []
     parent_by_child_id: Dict[str, dict] = {}   # child_id → parent
     children_by_parent: Dict[str, List[dict]] = {}  # parent_id → raw children
@@ -1179,42 +801,10 @@ async def search_and_select_feishu_table_candidates(
         )
         return []
 
-    # ── Step 3: 全局 child rerank ─────────────────────────────
-    global_top_k = TABLE_CHILD_SELECT_GLOBAL_TOP_K
-    per_parent_cap = TABLE_CHILD_SELECT_TOP_K
-
-    if len(all_child_candidates) <= global_top_k:
-        selected_child_cands = all_child_candidates
-        selected_child_scores: Dict[str, float] = {
-            cc["id"]: _default_table_parent_score(cc.get("_parent_rank", 1))
-            for cc in all_child_candidates
-        }
-    else:
-        rerank_result = select_search_candidates(
-            query=question,
-            candidates=all_child_candidates,
-            top_n=global_top_k,
-            score_threshold=TABLE_CHILD_SCORE_THRESHOLD,
-            min_keep=TABLE_CHILD_MIN_KEEP,
-            instruct_template="qa",
-        )
-        if rerank_result.get("status") == "success":
-            selected_child_cands = list(rerank_result.get("selected_candidates") or [])
-            selected_child_scores = {
-                item["candidate"]["id"]: float(item.get("relevance_score", 0.0) or 0.0)
-                for item in (rerank_result.get("selected_results") or [])
-                if item.get("candidate", {}).get("id")
-            }
-        else:
-            logger.warning(
-                "feishu_retrieve: global child rerank failed sub_query_id=%s: %s",
-                sub_query_id or "unknown", rerank_result.get("message"),
-            )
-            selected_child_cands = all_child_candidates[:global_top_k]
-            selected_child_scores = {
-                cc["id"]: _default_table_parent_score(cc.get("_parent_rank", 1))
-                for cc in selected_child_cands
-            }
+    # ── Step 3: 全局 child 原始顺序合并 ───────────────────────
+    # Preserve structural/API order. A matched parent contributes every child
+    # to its bounded read; table preview construction controls LLM context.
+    selected_child_cands = all_child_candidates
 
     # ── Step 4: 按 parent 分组，每个 parent 最多 per_parent_cap 个 child ──
     # 按分数降序，超出 cap 的截断
@@ -1226,8 +816,7 @@ async def search_and_select_feishu_table_candidates(
         parent_id = parent.get("id", "")
         if parent_id not in children_selected_by_parent:
             children_selected_by_parent[parent_id] = []
-        if len(children_selected_by_parent[parent_id]) < per_parent_cap:
-            children_selected_by_parent[parent_id].append(cc)
+        children_selected_by_parent[parent_id].append(cc)
 
     # ── Step 5: 组装 annotated parent 列表 ───────────────────
     selected: List[dict] = []
@@ -1246,16 +835,10 @@ async def search_and_select_feishu_table_candidates(
             child_title_field = "selected_table_titles"
 
         # parent score = 最高 child score
-        best_score = max(
-            (selected_child_scores.get(cc["id"], 0.0) for cc in sel_children),
-            default=_default_table_parent_score(parent_rank),
-        )
-
         annotated = _annotate_selected_candidate(
             parent,
             focus_id=focus_id,
             sub_query_id=sub_query_id,
-            score=best_score,
             rank=parent_rank,
         )
         annotated["selected_query_types"] = sorted(
@@ -1278,8 +861,9 @@ async def search_and_select_feishu_table_candidates(
 
     selected.sort(
         key=lambda c: (
-            -float(c.get("candidate_rerank_score", 0.0) or 0.0),
-            int(c.get("candidate_rerank_rank", 10**9) or 10**9),
+            -int(c.get("cross_query_hit_count", 1) or 1),
+            int(c.get("best_api_rank", 10**9) or 10**9),
+            int(c.get("first_seen_order", 10**9) or 10**9),
             str(c.get("title", "") or ""),
         )
     )
@@ -1304,7 +888,9 @@ def _build_candidate_meta_lookup(candidates: List[dict]) -> Dict[str, Dict[str, 
             "selected_sub_query_ids": list(candidate.get("selected_sub_query_ids") or []),
             "selected_feishu_urls": list(candidate.get("selected_feishu_urls") or []),
             "selected_query_types": list(candidate.get("selected_query_types") or []),
-            "candidate_rerank_score": candidate.get("candidate_rerank_score", 0.0),
+            "cross_query_hit_count": candidate.get("cross_query_hit_count", 1),
+            "best_api_rank": candidate.get("best_api_rank", 10**9),
+            "first_seen_order": candidate.get("first_seen_order", 10**9),
         }
         key = _candidate_key(candidate)
         if key:
@@ -1412,7 +998,7 @@ async def feishu_retrieve(
                           None 时沿用 DocPool 默认值（12.0s）。由 SourceAgent
                           从 SourceAgentConfig.source_timeout_s 派生传入。
         focus_id:      当前 sub_query 对应的 focus_id（doc 候选选择层透传）
-        focus_text:    当前 sub_query 对应的 focus 文本（rerank question 用）
+        focus_text:    当前 sub_query 对应的 focus 文本（预览评估用）
         sub_query_id:  当前运行时 sub_query 标识（light lineage 用）
 
     Returns:

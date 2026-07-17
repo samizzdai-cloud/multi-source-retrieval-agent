@@ -302,6 +302,41 @@ def _section_to_markdown(
         return "\n".join(lines)
 
 
+def _section_preview(section_rows: List[list], header_idx: Optional[int], max_cols: int = 20) -> str:
+    """Deterministic compact view for evaluation; does not alter full content."""
+    if header_idx is None:
+        return _section_to_markdown(section_rows[:6], header_idx, max_cols)
+    desc_rows = section_rows[:header_idx]
+    header_row = section_rows[header_idx]
+    data_rows = section_rows[header_idx + 1:]
+    sample = data_rows[:3]
+    if len(data_rows) > 4:
+        sample = sample + [data_rows[-1]]
+    parts = [
+        " | ".join(str(c).strip() for c in row if c is not None and str(c).strip())
+        for row in desc_rows[:2]
+    ]
+    parts = [part for part in parts if part]
+    parts.append(_rows_to_markdown(header_row, sample, max_cols))
+    if len(data_rows) > len(sample):
+        parts.append(f"[preview: {len(data_rows)} data rows]")
+    return "\n".join(parts)
+
+
+def _refine_sections(rows: List[list], coarse_sections: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """Refine blank-row sections without changing the Sheet reader's outer routing."""
+    from feishu_read_tool.table_handler import segment_rows_into_sections
+
+    refined: List[Tuple[int, int]] = []
+    for coarse_start, coarse_end in coarse_sections:
+        for item in segment_rows_into_sections(rows[coarse_start:coarse_end + 1]):
+            start = coarse_start + int(item["start"])
+            end = coarse_start + int(item["end"]) - 1
+            if start <= end:
+                refined.append((start, end))
+    return refined or coarse_sections
+
+
 # ── LLM 行筛选（>30 行 section）──────────────────────────────────────────────
 
 def _bm25_filter_rows(
@@ -609,6 +644,7 @@ def _read_single_tab(
 
     # Step 3: Merge cell 填充
     _fill_merge_cells(rows, merges, row_offset=0)
+    sections = _refine_sections(rows, sections)
 
     # Step 4: 每个 section → chunk
     max_col = _effective_max_col(rows)
@@ -637,7 +673,7 @@ def _read_single_tab(
 
         is_bm25_filtered = False
         # 输出
-        if header_idx is not None and len(section_rows) - header_idx - 1 > BM25_FILTER_THRESHOLD_ROWS:
+        if False and header_idx is not None and len(section_rows) - header_idx - 1 > BM25_FILTER_THRESHOLD_ROWS:
             # [P2.5] >30 行数据 → BM25 筛选（替代 LLM，<5ms vs 2-3s）
             header_row = section_rows[header_idx]
             data_rows = section_rows[header_idx + 1:]
@@ -658,6 +694,7 @@ def _read_single_tab(
         else:
             md = _section_to_markdown(section_rows, header_idx, max_col)
 
+        preview = _section_preview(section_rows, header_idx, max_col)
         if not md.strip():
             continue
 
@@ -692,6 +729,12 @@ def _read_single_tab(
             score=chunk_score,
             metadata={
                 "doc_type": "SHEET",
+                "content_type": "table",
+                "parent_id": spreadsheet_token,
+                "child_id": sheet_id,
+                "range": {"row_start": section_start, "row_end": section_end},
+                "content_mode": "full",
+                "table_preview": preview,
                 "tab": tab_title,
                 "sheet_id": sheet_id,
                 "section_id": f"{spreadsheet_token}_{sheet_id}_s{sec_idx}",
@@ -699,7 +742,7 @@ def _read_single_tab(
                 "row_end": section_end,
                 "table_rows": len(section_rows) - (1 if header_idx is not None else 0),
                 "header_coverage": round(cov_score, 3),
-                "is_llm_filtered": is_bm25_filtered,  # [P2.5] now BM25, not LLM
+                "is_llm_filtered": is_bm25_filtered,  # False: full section is retained
             },        ))
 
     return chunks

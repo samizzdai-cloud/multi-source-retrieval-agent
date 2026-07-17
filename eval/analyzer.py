@@ -6,7 +6,7 @@ Surfaces insights that aggregate metrics hide:
   - focus theme patterns
   - source contribution analysis
   - early-stop effectiveness
-  - reranker funnel loss
+  - evidence funnel loss
   - timing outliers
 """
 
@@ -143,10 +143,10 @@ def analyze_experiment(
             notes.append(f"Lowest coverage queries (≤2/5): ids={','.join(ids)} — prioritize investigation")
 
     # ── Funnel analysis ──────────────────────────────────────────────────
-    funnel_rates = [t.get("rerank", {}).get("funnel_rate", 1.0) for t in valid_traces]
+    funnel_rates = [t.get("evidence", {}).get("funnel_rate", 1.0) for t in valid_traces]
     if funnel_rates:
         mean_funnel = statistics.mean(funnel_rates)
-        notes.append(f"Reranker funnel: mean={mean_funnel:.1%} of raw chunks survive to final output")
+        notes.append(f"Evidence funnel: mean={mean_funnel:.1%} of raw chunks survive to final output")
 
     return {
         "notes": notes,
@@ -188,7 +188,7 @@ def _timing_stats(traces):
 
 
 def _chunk_stats(traces):
-    finals = [t.get("rerank", {}).get("final_chunk_count", 0) for t in traces]
+    finals = [t.get("evidence", {}).get("final_chunk_count", 0) for t in traces]
     raws = [t.get("retrieval", {}).get("raw_chunk_count", 0) for t in traces]
     if not finals:
         return {}

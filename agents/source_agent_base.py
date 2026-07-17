@@ -20,6 +20,7 @@ import asyncio
 import concurrent.futures
 import contextvars
 import functools
+import hashlib
 import json
 import logging
 import time
@@ -33,13 +34,19 @@ from google.adk.runners import InMemoryRunner
 from google.genai import types as genai_types
 
 from tools.core.llm_contracts import (
+    AGENT_CFG_EVAL_ONLY,
+    EVAL_RUBRIC_BLOCK,
+    build_llm_model,
+    build_partial_eval_model,
     effective_source_top_k,
     enforce_loop_bounds,
     needs_eval,
     tiers_list_to_map,
     validate_plan_eval_output,
 )
+from tools.core.context_budget import ContextBudget, estimate_chunk_tokens, prompt_preview_text, split_chunks
 from tools.core.models import ChunkEntry, SourceAgentConfig
+from tools.core.rerank import RerankError, RerankSettings, rerank_items, select_ranked_ids
 from tools.core.source_profiles import SourceProfile
 
 
@@ -83,9 +90,65 @@ class SubQuery:
     google_order_by: Optional[str] = None
     author_filter: Optional[str] = None
     sub_query_id: str = ""
-    # Path-B 变体: 由 source-agent 在 _enrich_sub_queries 中填充,供 dual-path 召回使用。
-    # 为空时下游回退到单路径(向后兼容)。
+    # 只由 fallback controller 填充的派生查询；不再用于默认 dual-path。
     variants: List[str] = field(default_factory=list)
+    # Bounded Profile fallback provenance for trace governance only.
+    variant_origins: Dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ChunkRefRegistry:
+    """Request-local LLM references; canonical IDs never enter an eval prompt."""
+    ref_to_id: Dict[str, str]
+    id_to_ref: Dict[str, str]
+
+    @classmethod
+    def build(cls, chunks: List[ChunkEntry]) -> "ChunkRefRegistry":
+        ref_to_id = {f"C{index}": chunk.id for index, chunk in enumerate(chunks, 1)}
+        return cls(ref_to_id=ref_to_id, id_to_ref={value: key for key, value in ref_to_id.items()})
+
+    def resolve_eval_output(self, payload: Dict[str, Any]) -> tuple[Dict[str, Any], int]:
+        """Resolve only request-local refs or an exact known canonical ID.
+
+        ``C1`` is the normal prompt contract.  Some JSON-mode providers still
+        echo a canonical ID inferred from their constrained output; accepting
+        it *only when it is exactly a member of this request's pool* prevents
+        a formatting quirk from discarding valid evidence, while fabricated
+        IDs remain rejected.
+        """
+        def resolve(value: object) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            return self.ref_to_id.get(value) or (value if value in self.id_to_ref else None)
+
+        out = dict(payload or {})
+        malformed = 0
+        raw_top = out.get("top_k_chunk_ids") or []
+        top_ids: List[str] = []
+        for value in raw_top:
+            ref = value.get("chunk_id") if isinstance(value, dict) else value
+            canonical = resolve(ref)
+            if canonical:
+                top_ids.append(canonical)
+            else:
+                malformed += 1
+        tiers: List[Dict[str, Any]] = []
+        raw_tiers = out.get("tiers") or []
+        if not isinstance(raw_tiers, list):
+            raw_tiers, malformed = [], malformed + 1
+        for row in raw_tiers:
+            if not isinstance(row, dict):
+                malformed += 1
+                continue
+            ref = row.get("chunk_id")
+            canonical = resolve(ref)
+            if not canonical:
+                malformed += 1
+                continue
+            tiers.append({**row, "chunk_id": canonical})
+        out["top_k_chunk_ids"] = top_ids
+        out["tiers"] = tiers
+        return out, malformed
 
 
 @dataclass
@@ -95,6 +158,7 @@ class SourceAgentResult:
     top_chunks: List[ChunkEntry]              # 已打 tier，按重要度排序
     loops_used: int
     elapsed_s: float
+    retrieval_trace: List[dict] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -205,6 +269,7 @@ def _chunks_block(
     chunks: List[ChunkEntry],
     max_chars: int = 300,
     focuses: Optional[List["Focus"]] = None,
+    refs: Optional[ChunkRefRegistry] = None,
 ) -> str:
     """渲染候选 chunks 列表供 LLM 评估。
 
@@ -217,17 +282,9 @@ def _chunks_block(
     if not chunks:
         return "(empty)"
 
-    _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:", "Excel:")
-
-    def _is_table_chunk(c: ChunkEntry) -> bool:
-        content = c.content or ""
-        return any(m in content for m in _TABLE_MARKERS)
-
     def _render_one(c: ChunkEntry) -> str:
-        effective_max = 2000 if _is_table_chunk(c) else max_chars
-        snippet = (c.content or "").replace("\n", " ").strip()
-        if len(snippet) > effective_max:
-            snippet = snippet[:effective_max] + "..."
+        # Keep the rendered prompt body aligned with ContextBudget.
+        snippet = prompt_preview_text(c)
         meta = c.metadata or {}
         route = meta.get("route") or meta.get("route_hint") or ""
         source_label = meta.get("source_name") or ""
@@ -247,7 +304,7 @@ def _chunks_block(
         extra += f" | heading={heading[:40]}" if heading else ""
         extra += f" | sq={sq_display}" if sq_display else ""
         return (
-            f"- id={c.id} | focuses={sorted(c.target_focuses)} "
+            f"- chunk_ref={refs.id_to_ref.get(c.id, c.id) if refs else c.id} | focuses={sorted(c.target_focuses)} "
             f"| score={c.score}{extra} | {snippet}"
         )
 
@@ -304,6 +361,7 @@ def _build_plan_only_prompt(
         else _sub_query_budget(len(focuses), source_top_k)
     )
     parts = [
+        "required_response_format: JSON object",
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"source_profile_block:\n{profile.to_prompt_block()}",
         f"current_date: {date.today().isoformat()}",
@@ -316,13 +374,28 @@ def _build_plan_only_prompt(
 
 
 def _build_eval_only_prompt(
-    focuses: List[Focus], chunks: List[ChunkEntry], source_top_k: int,
+    focuses: List[Focus], chunks: List[ChunkEntry], source_top_k: int, refs: Optional[ChunkRefRegistry] = None,
 ) -> str:
     return (
+        "required_response_format: JSON object\n\n"
+        "Reference contract: every top_k_chunk_ids item and every tiers[].chunk_id must be "
+        "the chunk_ref (C1, C2, ...) printed in chunks_block. Never output a canonical chunk ID.\n\n"
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
         f"current_date: {date.today().isoformat()}\n\n"
-        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}\n\n"
+        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
         f"source_top_k: {source_top_k}"
+    )
+
+
+def _build_partial_eval_prompt(focuses: List[Focus], chunks: List[ChunkEntry], batch_id: str) -> str:
+    return (
+        f"required_response_format: JSON object\n"
+        f"batch_id: {batch_id}\n"
+        f"focuses_block:\n{_focuses_block(focuses)}\n\n"
+        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
+        "Judge every supplied chunk. A chunk is noise only when it is unrelated to every focus; "
+        "do not mark a complementary cross-document evidence chunk as noise merely because it is incomplete alone.\n\n"
+        + EVAL_RUBRIC_BLOCK
     )
 
 
@@ -358,6 +431,8 @@ def _build_plan_eval_prompt(
     max_loops: int,
     source_top_k: int,
     focus_status: Optional[Dict[str, Dict[str, Any]]] = None,
+    partial_ledgers: Optional[List[Dict[str, Any]]] = None,
+    refs: Optional[ChunkRefRegistry] = None,
 ) -> str:
     """构建 plan_eval 用户消息。
 
@@ -365,9 +440,12 @@ def _build_plan_eval_prompt(
     看到"是否已被别源覆盖"与"哪些源贡献过"，**不**暴露 quota 计数。
     """
     parts = [
+        "required_response_format: JSON object",
+        "Reference contract: every top_k_chunk_ids item and every tiers[].chunk_id must be the "
+        "chunk_ref (C1, C2, ...) printed in chunks_block. Never output a canonical chunk ID.",
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"current_date: {date.today().isoformat()}",
-        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses)}",
+        f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}",
         f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}",
         f"source_top_k: {source_top_k}",
     ]
@@ -377,7 +455,37 @@ def _build_plan_eval_prompt(
             "focus_status (跨源覆盖状态；status=satisfied 的 focus 不要再 replan):\n"
             + json.dumps(slim_status, ensure_ascii=False)
         )
+    if partial_ledgers:
+        parts.append("partial_eval_evidence_ledgers (batch-local; combine before judging a gap):\n"
+                     + json.dumps(partial_ledgers, ensure_ascii=False))
     return "\n\n".join(parts)
+
+
+def _tiered_top_ids(
+    tiers_map: Dict[str, Dict[str, Any]],
+    chunk_pool: Dict[str, ChunkEntry],
+    limit: int,
+) -> List[str]:
+    """Safely finalize a stop decision when its IDs were omitted.
+
+    This only consumes the model's existing ``critical``/``important``
+    judgments. It never promotes an unjudged or noise chunk, and stable pool
+    order is the final tie-breaker, preserving native retrieval order.
+    """
+    tier_order = {"critical": 0, "important": 1}
+    ranked: List[tuple[int, float, int, str]] = []
+    for order, chunk_id in enumerate(chunk_pool):
+        judgment = tiers_map.get(chunk_id) or {}
+        tier = judgment.get("tier")
+        if tier not in tier_order:
+            continue
+        try:
+            relevance = float(judgment.get("relevance", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            relevance = 0.0
+        ranked.append((tier_order[tier], -relevance, order, chunk_id))
+    ranked.sort()
+    return [chunk_id for _, _, _, chunk_id in ranked[:limit]]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -416,6 +524,12 @@ class SourceAgent:
         self.plan_only = self._build_plan_only_agent()
         self.eval_only = self._build_eval_only_agent()
         self.plan_eval = self._build_plan_eval_agent()
+        self.partial_eval = self._build_partial_eval_agent()
+        self._partial_ledgers: List[Dict[str, Any]] = []
+        self._partial_pending_tasks: List[asyncio.Task[Dict[str, Any]]] = []
+        self._partial_buffer_ids: List[str] = []
+        self._partial_buffer_tokens: int = 0
+        self._partial_submitted_ids: set[str] = set()
         self._execute_fn = execute_fn
         # 运行时注入：execute_sub_query 通过 target_focus 回查对应 Focus 对象
         self._current_focus_lookup: Dict[str, Focus] = {}
@@ -461,6 +575,16 @@ class SourceAgent:
         """构造用于多轮中间评估的 LLM Agent，子类按需覆写。"""
         return None
 
+    def _build_partial_eval_agent(self) -> LlmAgent:
+        return LlmAgent(
+            name=f"{self.source}_partial_eval",
+            model=build_llm_model(),
+            instruction=("You are a retrieval evidence evaluator. "
+                         "Return a judgment for every supplied chunk and compact per-focus ledgers.\n\n"
+                         + EVAL_RUBRIC_BLOCK),
+            output_schema=build_partial_eval_model(),
+            generate_content_config=AGENT_CFG_EVAL_ONLY,
+        )
     async def execute_sub_query(
         self, sub_query: str, target_focus: str,
     ) -> List[ChunkEntry]:
@@ -600,7 +724,13 @@ class SourceAgent:
             return []
 
         sub_queries = self._assign_sub_query_ids(sub_queries)
-        return self._post_process_sub_queries(focuses, sub_queries)
+        sub_queries = self._post_process_sub_queries(focuses, sub_queries)
+        self._trace_events.extend({
+            "event": "query", "source": self.source, "focus": sq.target_focus,
+            "query_id": sq.sub_query_id, "query_type": sq.query_type,
+            "api_query": sq.query,
+        } for sq in sub_queries)
+        return sub_queries
 
     # ── 公开入口 ──────────────────────────────────────────────
     async def run(
@@ -622,6 +752,12 @@ class SourceAgent:
         # 注入 focus 回查表，供 execute_sub_query 读 focus 的完整字段（time_hint/entity_hint 等）
         self._current_focus_lookup = {f.focus_id: f for f in focuses}
         self._sub_query_seq = 0
+        self._partial_ledgers = []
+        self._partial_pending_tasks = []
+        self._partial_buffer_ids = []
+        self._partial_buffer_tokens = 0
+        self._partial_submitted_ids = set()
+        self._trace_events = []
         # Multi-focus 动态 effective top_k：本源被路由到 N 个 focus 时，扩容到 base+(N-1)*2，
         # 保证 eval_only / plan_eval 有足够预算给每个 focus 留至少 1 个名额。
         self._effective_source_top_k = effective_source_top_k(self.cfg.source_top_k, len(focuses))
@@ -657,6 +793,21 @@ class SourceAgent:
             len(result.top_chunks), elapsed,
         )
         result.elapsed_s = elapsed
+        # A compact, body-free trace is handed to asynchronous profile
+        # governance by the orchestrator.  Chunks contribute IDs, headings and
+        # tiers only; evidence text remains in the answer path.
+        result.retrieval_trace = list(self._trace_events) + [
+            {
+                "source": self.source,
+                "chunk_id": chunk.id,
+                "tier": chunk.tier,
+                "focuses": sorted(chunk.target_focuses),
+                "heading": str(chunk.metadata.get("heading_path", "")),
+                "range": str(chunk.metadata.get("range", "")),
+                "document": str(chunk.metadata.get("source_name", chunk.metadata.get("title", ""))),
+            }
+            for chunk in result.top_chunks
+        ]
         return result
 
     # ── 单 loop 路径：plan(pre_planned + replan / 老 LLM) → execute → eval_only ─
@@ -682,7 +833,9 @@ class SourceAgent:
         logger.info("[%s] plan produced %d sub_queries", self.source, len(sub_queries))
 
         # B. execute（并发跑所有 sub_query）
-        await self._execute_batch(sub_queries, chunk_pool)
+        await self._execute_batch(sub_queries, chunk_pool, loop_n=1)
+        await self._rerank_new_chunks(focuses, chunk_pool, loop_n=1)
+        await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=1)
 
         if not chunk_pool:
             logger.warning("[%s] execute produced 0 chunks, skip eval_only", self.source)
@@ -726,6 +879,8 @@ class SourceAgent:
             return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
         logger.info("[%s] loop=1 plan produced %d sub_queries", self.source, len(sub_queries))
         await self._execute_batch(sub_queries, chunk_pool)
+        await self._rerank_new_chunks(focuses, chunk_pool, loop_n=1)
+        await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=1)
 
         loop_n = 1
 
@@ -751,17 +906,65 @@ class SourceAgent:
                     )
                     break
 
+            registry = ChunkRefRegistry.build(list(chunk_pool.values()))
             pe_prompt = _build_plan_eval_prompt(
                 focuses, list(chunk_pool.values()),
                 loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
                 source_top_k=self._effective_source_top_k,
                 focus_status=focus_status,
+                partial_ledgers=self._partial_ledgers,
+                refs=registry,
             )
-            pe_out = await _run_llm_agent(self.plan_eval, pe_prompt)
+            try:
+                pe_out = await _run_llm_agent(self.plan_eval, pe_prompt)
+            except Exception as exc:
+                # A plan-eval outage must not discard already-read evidence.
+                # Final eval_only retains the active pool and leaves a compact
+                # failure marker for the benchmark/profile governance trace.
+                logger.warning("[%s] loop=%d plan_eval failed; fall back to eval_only: %s",
+                               self.source, loop_n, exc)
+                self._trace_events.append({
+                    "event": "plan_eval_error", "source": self.source,
+                    "loop": loop_n, "error_type": type(exc).__name__,
+                })
+                break
+            pe_out, malformed_refs = registry.resolve_eval_output(pe_out)
+            if malformed_refs:
+                self._trace_events.append({"event": "eval_contract_error", "source": self.source,
+                                           "loop": loop_n, "malformed_chunk_refs": malformed_refs})
+                logger.warning("[%s] loop=%d rejected %d malformed LLM chunk refs", self.source, loop_n, malformed_refs)
             pe_out = validate_plan_eval_output(pe_out)
+
+            judgments = tiers_list_to_map(pe_out.get("tiers"))
+            # Explicit noise without focus coverage is trace-only.  It can be
+            # pruned before a *continue* replan, but must remain addressable
+            # until a same-turn stop response has consumed its top_k contract.
+            # Otherwise valid IDs become false "hallucinations" after we pop
+            # them from chunk_pool.
+            prunable_noise_ids = [
+                cid for cid, judgment in judgments.items()
+                if judgment.get("tier") == "noise"
+                and not judgment.get("answered_focuses")
+                and cid in chunk_pool
+            ]
 
             raw_decision = pe_out.get("decision", "stop")
             decision = enforce_loop_bounds(raw_decision, loop_n, min_loops, max_loops)
+            removed: List[str] = []
+            if decision == "continue":
+                for cid in prunable_noise_ids:
+                    chunk_pool.pop(cid, None)
+                removed = prunable_noise_ids
+                if removed:
+                    logger.info("[%s] loop=%d removed %d explicit noise chunks before replan",
+                                self.source, loop_n, len(removed))
+            self._trace_events.append({
+                "event": "plan_eval", "source": self.source, "loop": loop_n,
+                "decision": decision, "raw_decision": raw_decision,
+                "replan_query_count": len(pe_out.get("replan_queries") or []),
+                "active_chunk_count": len(chunk_pool), "removed_noise_count": len(removed),
+                "focus_decisions": list(pe_out.get("focus_decisions") or []),
+            })
             logger.info(
                 "[%s] loop=%d plan_eval raw=%s enforced=%s",
                 self.source, loop_n, raw_decision, decision,
@@ -796,13 +999,73 @@ class SourceAgent:
                     logger.warning("[%s] loop=%d continue with empty replan → stop", self.source, loop_n)
                     break
                 logger.info("[%s] loop=%d replan %d sub_queries", self.source, loop_n, len(replan))
-                await self._execute_batch(replan, chunk_pool)
+                self._trace_events.extend({
+                    "event": "query", "source": self.source, "loop": loop_n,
+                    "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                    "query_type": sq.query_type, "api_query": sq.query,
+                    "replan": True,
+                } for sq in replan)
+                await self._execute_batch(replan, chunk_pool, loop_n=loop_n)
+                await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
+                await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
                 continue
 
             # decision == "stop" → 尝试直接用 plan_eval 的 top_k
             top_ids: List[str] = pe_out.get("top_k_chunk_ids") or []
             tiers_map: Dict[str, Dict] = tiers_list_to_map(pe_out.get("tiers"))
+            # Preserve every completed plan-eval judgment in the trace even if
+            # the provider omitted final IDs. Profile governance needs this to
+            # distinguish an evaluated evidence gap from a timeout.
+            self._trace_events.extend({
+                "event": "judgment", "source": self.source, "loop": loop_n,
+                "chunk_id": chunk_id, "tier": judgment.get("tier"),
+                "answered_focuses": list(judgment.get("answered_focuses") or []),
+            } for chunk_id, judgment in tiers_map.items())
+            # ``top_k`` can contain noise as an evaluation footprint.  Never
+            # let it reach user-facing assembly, and record the exclusion
+            # instead of deleting it first and later calling it hallucinated.
+            selected_noise_ids = [
+                item.get("chunk_id") if isinstance(item, dict) else item
+                for item in top_ids
+                if (item.get("chunk_id") if isinstance(item, dict) else item) in prunable_noise_ids
+            ]
+            if selected_noise_ids:
+                self._trace_events.append({
+                    "event": "selected_noise_excluded", "source": self.source,
+                    "loop": loop_n, "chunk_ids": selected_noise_ids,
+                })
+                logger.info("[%s] loop=%d excluded %d selected noise chunks from final output",
+                            self.source, loop_n, len(selected_noise_ids))
+                top_ids = [
+                    item for item in top_ids
+                    if (item.get("chunk_id") if isinstance(item, dict) else item) not in prunable_noise_ids
+                ]
+            if not top_ids:
+                top_ids = _tiered_top_ids(tiers_map, chunk_pool, self._effective_source_top_k)
+                if top_ids:
+                    logger.info(
+                        "[%s] loop=%d plan_eval omitted top_k; finalized %d existing judgments",
+                        self.source, loop_n, len(top_ids),
+                    )
             if top_ids:
+                normalized_top_ids = [item.get("chunk_id") if isinstance(item, dict) else item for item in top_ids]
+                missing_judgments = [
+                    chunk_id for chunk_id in normalized_top_ids
+                    if isinstance(chunk_id, str) and chunk_id in chunk_pool and chunk_id not in tiers_map
+                ]
+                # A stop without a tier for every selected chunk violates the
+                # preview/full contract.  Do not leak unjudged chunks into the
+                # answer path; eval_only is the safe bounded fallback.
+                if missing_judgments:
+                    logger.warning(
+                        "[%s] loop=%d plan_eval stop omitted %d selected chunk judgments; fallback eval_only",
+                        self.source, loop_n, len(missing_judgments),
+                    )
+                    self._trace_events.append({
+                        "event": "plan_eval_contract_error", "source": self.source,
+                        "loop": loop_n, "missing_selected_judgments": len(missing_judgments),
+                    })
+                    break
                 top_chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
                 self._log_per_focus_tier_distribution(focuses, top_chunks)
                 return SourceAgentResult(self.source, top_chunks, loops_used=loop_n, elapsed_s=0.0)
@@ -821,13 +1084,37 @@ class SourceAgent:
         self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
     ) -> List[ChunkEntry]:
         started = time.perf_counter()
+        registry = ChunkRefRegistry.build(list(chunk_pool.values()))
         eval_prompt = _build_eval_only_prompt(
-            focuses, list(chunk_pool.values()), self._effective_source_top_k,
+            focuses, list(chunk_pool.values()), self._effective_source_top_k, refs=registry,
         )
         eval_out = await _run_llm_agent(self.eval_only, eval_prompt)
+        eval_out, malformed_refs = registry.resolve_eval_output(eval_out)
+        if malformed_refs:
+            self._trace_events.append({"event": "eval_contract_error", "source": self.source,
+                                       "malformed_chunk_refs": malformed_refs})
+            logger.warning("[%s] eval_only rejected %d malformed LLM chunk refs", self.source, malformed_refs)
         top_ids: List[str] = eval_out.get("top_k_chunk_ids", [])
         tiers_map: Dict[str, Dict] = tiers_list_to_map(eval_out.get("tiers"))
+        self._trace_events.extend({
+            "event": "judgment", "source": self.source, "chunk_id": chunk_id,
+            "tier": judgment.get("tier"),
+            "answered_focuses": list(judgment.get("answered_focuses") or []),
+        } for chunk_id, judgment in tiers_map.items())
         chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
+        # Eval-only may deliberately put a weak focus's best noise candidate
+        # in top_k as an evaluation footprint.  The footprint already exists
+        # in ``judgment`` trace events; it must not become user-facing context
+        # or reach cross-source global eval.
+        selected_noise = [chunk.id for chunk in chunks if chunk.tier == "noise"]
+        if selected_noise:
+            self._trace_events.append({
+                "event": "selected_noise_excluded", "source": self.source,
+                "phase": "eval_only", "chunk_ids": selected_noise,
+            })
+            logger.info("[%s] eval_only excluded %d selected noise chunks from final output",
+                        self.source, len(selected_noise))
+            chunks = [chunk for chunk in chunks if chunk.tier != "noise"]
         # 不在 source 层做"per-focus 保底升级"——EVAL_RUBRIC_BLOCK 的多 focus
         # 全面评估守卫已让 LLM 客观地覆盖每个 focus；最终 tier 维持 LLM 判断，
         # 早停 / quota 仅在 FocusBoard 调度层使用，不修改输出。
@@ -842,6 +1129,175 @@ class SourceAgent:
             (time.perf_counter() - started) * 1000.0,
         )
         return chunks
+
+    async def _rerank_new_chunks(
+        self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int,
+    ) -> None:
+        """Compress newly-read evidence before partial eval, eval_only, or plan_eval.
+
+        Scores are only compared within a focus and modality.  Retained chunks
+        are marked, so a later replan loop never repeatedly thins prior evidence.
+        """
+        if not self.cfg.rerank_enabled or not chunk_pool:
+            return
+        pending = [c for c in chunk_pool.values() if not (c.metadata or {}).get("rerank_processed")]
+        focus_text = {f.focus_id: f.text for f in focuses}
+        groups: Dict[tuple[str, str], List[ChunkEntry]] = {}
+        for chunk in pending:
+            for focus_id in set(chunk.target_focuses) & set(focus_text):
+                groups.setdefault((focus_id, self._rerank_group(chunk)), []).append(chunk)
+        if not groups:
+            return
+        try:
+            env_settings = RerankSettings.from_env()
+            settings = RerankSettings(
+                api_key=env_settings.api_key, workspace_id=env_settings.workspace_id,
+                model=env_settings.model, timeout_s=self.cfg.rerank_timeout_s,
+                instruct=env_settings.instruct, endpoint=env_settings.endpoint,
+            )
+            keep_ids: set[str] = set()
+            group_events: List[Dict[str, Any]] = []
+            for (focus_id, modality), chunks in groups.items():
+                ranked = await asyncio.to_thread(
+                    rerank_items, focus_text[focus_id],
+                    [(c.id, self._rerank_text(c)) for c in chunks], settings=settings,
+                )
+                selected = select_ranked_ids(
+                    ranked, keep_ratio=self.cfg.rerank_keep_ratio,
+                    score_threshold=self.cfg.rerank_score_threshold,
+                )
+                keep_ids.update(selected)
+                scores = {item.item_id: item.relevance_score for item in ranked}
+                for chunk in chunks:
+                    per_focus_scores = dict(chunk.metadata.get("rerank_scores") or {})
+                    per_focus_scores[focus_id] = scores.get(chunk.id)
+                    chunk.metadata["rerank_scores"] = per_focus_scores
+                    chunk.metadata["rerank_group"] = modality
+                group_events.append({"focus": focus_id, "group": modality,
+                                     "input": len(chunks), "retained": len(selected)})
+        except RerankError as exc:
+            self._trace_events.append({"event": "rerank_error", "source": self.source,
+                                       "loop": loop_n, "error_type": type(exc).__name__})
+            logger.warning("[%s] rerank failed; retaining original pool: %s", self.source, exc)
+            return
+        removed = [chunk.id for chunk in pending if chunk.id not in keep_ids]
+        for chunk in pending:
+            chunk.metadata["rerank_processed"] = True
+        for chunk_id in removed:
+            chunk_pool.pop(chunk_id, None)
+        self._trace_events.extend({
+            "event": "rerank_decision", "source": self.source, "loop": loop_n,
+            "chunk_id": chunk.id, "group": chunk.metadata.get("rerank_group", "document"),
+            "scores": dict(chunk.metadata.get("rerank_scores") or {}), "retained": chunk.id in keep_ids,
+            "focuses": sorted(chunk.target_focuses),
+        } for chunk in pending)
+        self._trace_events.append({"event": "rerank", "source": self.source, "loop": loop_n,
+                                   "groups": group_events, "removed_count": len(removed),
+                                   "retained_count": len(pending) - len(removed)})
+        logger.info("[%s] loop=%d post-io rerank groups=%d input=%d removed=%d", self.source,
+                    loop_n, len(groups), len(pending), len(removed))
+
+    @staticmethod
+    def _rerank_group(chunk: ChunkEntry) -> str:
+        meta = chunk.metadata or {}
+        explicit = str(meta.get("rerank_group") or meta.get("content_type") or meta.get("doc_type") or "").lower()
+        if explicit in {"table", "sheet", "bitable", "spreadsheet", "excel", "csv"} or "table" in explicit:
+            return "table"
+        if str(meta.get("source_tool") or "").lower() in {"sheet", "excel", "csv"}:
+            return "table"
+        if any(x in chunk.id.lower() for x in (":sheet:", ":table:")):
+            return "table"
+        return "document"
+
+    def _rerank_text(self, chunk: ChunkEntry) -> str:
+        return prompt_preview_text(chunk)[:max(256, int(self.cfg.rerank_max_document_chars))]
+
+    async def _partial_eval_if_needed(
+        self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int,
+    ) -> None:
+        """Evaluate oversized pools in stable batches before global eval/plan_eval.
+
+        This method never chooses final top-K or replan.  It removes only
+        explicitly judged, focus-free noise and carries compact ledgers forward.
+        Source-specific I/O can later call the same method while reads are still
+        in flight; the current base hook guarantees correct semantics first.
+        """
+        await self._drain_partial_evals(chunk_pool)
+        # Chunks submitted during I/O are already represented by their pending
+        # judgments.  Only unsent chunks need a synchronous safeguard here.
+        unsent = [c for cid, c in chunk_pool.items() if cid not in self._partial_submitted_ids]
+        batches = split_chunks(unsent, ContextBudget())
+        # Once streaming has already split the pool, evaluate the trailing
+        # buffer too so global plan_eval never receives a mixed 600k+ tail.
+        if len(batches) <= 1 and not self._partial_submitted_ids:
+            return
+        logger.info("[%s] loop=%d partial-eval batches=%d chunks=%d", self.source, loop_n,
+                    len(batches), len(unsent))
+
+        async def _one(index: int, batch: List[ChunkEntry]) -> Dict[str, Any]:
+            prompt = _build_partial_eval_prompt(focuses, batch, f"{self.source}:loop{loop_n}:batch{index}")
+            return await _run_llm_agent(self.partial_eval, prompt)
+
+        outputs = await asyncio.gather(*[_one(i, batch) for i, batch in enumerate(batches, 1)])
+        removed: set[str] = set()
+        for output in outputs:
+            for cid, judgment in tiers_list_to_map(output.get("tiers")).items():
+                if judgment.get("tier") == "noise" and not judgment.get("answered_focuses"):
+                    removed.add(cid)
+            for ledger in output.get("focus_ledger") or []:
+                self._partial_ledgers.append(dict(ledger))
+        for cid in removed:
+            chunk_pool.pop(cid, None)
+        logger.info("[%s] loop=%d partial-eval removed_noise=%d retained=%d", self.source,
+                    loop_n, len(removed), len(chunk_pool))
+
+    async def _offer_chunk_for_context_eval(
+        self, entry: ChunkEntry, chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
+    ) -> None:
+        """Non-blocking I/O hook.  Freeze a batch once its prompt budget fills."""
+        self._trace_events.append({
+            "event": "read", "source": self.source, "chunk_id": entry.id,
+            "focuses": sorted(entry.target_focuses),
+            "document": str(entry.metadata.get("source_name", entry.metadata.get("title", ""))),
+            "heading": str(entry.metadata.get("heading_path", "")),
+            "range": str(entry.metadata.get("range", "")),
+            "content_sha256": hashlib.sha256(entry.content.encode("utf-8")).hexdigest(),
+            "content_chars": len(entry.content),
+        })
+        # Streaming partial-eval would otherwise see the pre-rerank pool.
+        if self.cfg.rerank_enabled:
+            return
+        if entry.id in self._partial_submitted_ids or entry.id in self._partial_buffer_ids:
+            return
+        self._partial_buffer_ids.append(entry.id)
+        self._partial_buffer_tokens += estimate_chunk_tokens(entry)
+        if self._partial_buffer_tokens < ContextBudget().flush_threshold:
+            return
+        ids = list(self._partial_buffer_ids)
+        batch = [chunk_pool[cid] for cid in ids if cid in chunk_pool]
+        self._partial_buffer_ids, self._partial_buffer_tokens = [], 0
+        self._partial_submitted_ids.update(c.id for c in batch)
+        batch_id = f"{self.source}:loop{loop_n}:stream{len(self._partial_pending_tasks)+1}"
+
+        async def _evaluate() -> Dict[str, Any]:
+            return await _run_llm_agent(self.partial_eval, _build_partial_eval_prompt(focuses=list(self._current_focus_lookup.values()), chunks=batch, batch_id=batch_id))
+
+        self._partial_pending_tasks.append(asyncio.create_task(_evaluate(), name=batch_id))
+        logger.info("[%s] scheduled partial-eval %s chunks=%d", self.source, batch_id, len(batch))
+
+    async def _drain_partial_evals(self, chunk_pool: Dict[str, ChunkEntry]) -> None:
+        if not self._partial_pending_tasks:
+            return
+        tasks, self._partial_pending_tasks = self._partial_pending_tasks, []
+        outputs = await asyncio.gather(*tasks, return_exceptions=True)
+        for output in outputs:
+            if isinstance(output, Exception):
+                logger.warning("[%s] partial-eval task failed: %s", self.source, output)
+                continue
+            for cid, judgment in tiers_list_to_map(output.get("tiers")).items():
+                if judgment.get("tier") == "noise" and not judgment.get("answered_focuses"):
+                    chunk_pool.pop(cid, None)
+            self._partial_ledgers.extend(dict(x) for x in (output.get("focus_ledger") or []))
 
     def _post_process_top_chunks(
         self,
@@ -917,7 +1373,14 @@ class SourceAgent:
         """
         allowed_focus_ids = set(self._current_focus_lookup.keys())
         out: List[ChunkEntry] = []
-        for cid in top_ids[: self._effective_source_top_k]:
+        for raw_id in top_ids[: self._effective_source_top_k]:
+            # Provider/schema variants sometimes return {"chunk_id": "..."}
+            # despite the string contract. Normalize, then enforce the pool
+            # whitelist instead of allowing an unhashable value to abort source output.
+            cid = raw_id.get("chunk_id") if isinstance(raw_id, dict) else raw_id
+            if not isinstance(cid, str) or not cid:
+                logger.warning("[%s] malformed top_k chunk id rejected: %r", self.source, raw_id)
+                continue
             entry = chunk_pool.get(cid)
             if entry is None:
                 # 幻觉 chunk_id：LLM 编了个不存在的 id
@@ -962,7 +1425,7 @@ class SourceAgent:
 
     # ── 并发执行 sub_queries ──────────────────────────────────
     async def _execute_batch(
-        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry],
+        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
     ) -> None:
         # P5: 提交前 gate —— focus_board 已 SATISFIED 的 target_focus 直接跳过 I/O
         board = getattr(self, "_focus_board", None)
@@ -1024,6 +1487,17 @@ class SourceAgent:
 
         batches = await asyncio.gather(*[_one(sq) for sq in sub_queries])
         for sq, chunks in zip(sub_queries, batches):
+            self._trace_events.append({
+                "event": "candidate", "source": self.source, "loop": loop_n,
+                "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                "query_type": sq.query_type, "api_query": sq.query,
+                "candidate_count": len(chunks),
+                "candidates": [
+                    {"chunk_id": c.id, "title": str(c.metadata.get("source_name", c.metadata.get("title", ""))),
+                     "type": str(c.metadata.get("resource_type", c.metadata.get("type", ""))), "api_rank": index}
+                    for index, c in enumerate(chunks, 1)
+                ],
+            })
             for c in chunks:
                 # 保证 target_focus / sub_query 标记正确
                 entry = ChunkEntry(
@@ -1038,6 +1512,7 @@ class SourceAgent:
                 )
                 existing = chunk_pool.get(entry.id)
                 chunk_pool[entry.id] = existing.merge(entry) if existing else entry
+                await self._offer_chunk_for_context_eval(entry, chunk_pool, loop_n=loop_n)
 
     # ── 静态引用（Phase 2 用） ──────────────────────────────────
     @staticmethod

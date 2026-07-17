@@ -274,6 +274,7 @@ async def run_case(case: Dict[str, Any], preset: str, retrieve_only: bool = Fals
         "expected": case.get("expected", {}),
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "raw_payload": None,
+        "retrieval_trace": None,
         "rag_answer": "",
         "e2e_elapsed_s": None,
         "error": None,
@@ -303,6 +304,12 @@ async def run_case(case: Dict[str, Any], preset: str, retrieve_only: bool = Fals
                         record["raw_payload"] = json.loads(raw)
                     except Exception as e:
                         logger.warning("[%s/%s] payload parse error: %s", test_id, preset, e)
+                trace = event.actions.state_delta.get("retrieval_trace")
+                if trace:
+                    try:
+                        record["retrieval_trace"] = json.loads(trace)
+                    except Exception as e:
+                        logger.warning("[%s/%s] trace parse error: %s", test_id, preset, e)
     except Exception as e:
         record["error"] = str(e)
         logger.exception("[%s/%s] run failed: %s", test_id, preset, e)
@@ -394,6 +401,8 @@ def _parse_args():
                    help="Skip answer_agent, only run retrieve_agent (faster, no rag_answer)")
     p.add_argument("--cache-dir", default=None,
                    help="Override cache directory (default: eval/cache_feishu/)")
+    p.add_argument("--source-timeout", type=float, default=None,
+                   help="Override Feishu SourceAgent timeout in seconds for this run only")
     return p.parse_args()
 
 
@@ -402,5 +411,9 @@ if __name__ == "__main__":
     presets = [s.strip() for s in args.presets.split(",") if s.strip()]
     case_ids = [s.strip() for s in args.cases.split(",")] if args.cases else None
     cache_dir = Path(args.cache_dir) if args.cache_dir else CACHE_DIR
+    if args.source_timeout is not None:
+        if args.source_timeout <= 0:
+            raise SystemExit("--source-timeout must be positive")
+        os.environ["RAG_FEISHU_SOURCE_TIMEOUT_S"] = str(args.source_timeout)
     asyncio.run(main(Path(args.cases_file), presets, case_ids, args.resume,
                      args.retrieve_only, cache_dir))

@@ -1,5 +1,7 @@
 """统一数据模型 — 多源检索 Agent 的核心类型定义"""
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set
@@ -22,7 +24,6 @@ class SourceConfig:
     bailian_access_key_secret: str = ""   # 阿里云 AccessKey Secret
     bailian_index_map: str = ""           # "nubia:idx_a,hypershell:idx_b"
     bailian_index_id: str = ""            # 旧版单库 fallback
-    dashscope_api_key: str = ""           # text-embedding-v4
     google_api_key: str = ""              # Gemini / ADK 使用的 Google API Key
     gemini_fallback_model: str = ""       # 传统 llm_client 失败时 fallback 模型
     google_credentials_path: str = ""      # OAuth2 client credentials.json；空时走 GOOGLE_CREDENTIALS_PATH 或默认路径
@@ -72,17 +73,19 @@ class AgentConfig:
     bailian_index_map: str = ""           # "nubia:idx_a,hypershell:idx_b"
     bailian_index_id: str = ""            # 旧版单库 fallback
 
-    # ── LLM / Rerank 凭证 ─────────────────────────────────────
+    # ── LLM 凭证 ──────────────────────────────────────────────
     google_api_key: str = ""              # Gemini / ADK 共用 Google API Key
     gemini_fallback_model: str = ""       # 老 llm_client fallback 模型，可留空
-    dashscope_api_key: str = ""           # Qwen rerank API key
 
     # ── Planner / Eval 模型分离接口 ────────────────────────────
     # 两类模型可独立配置；留空都用 dataclass 默认值
-    #   planner_model:  global_planner v2.2 LLM，默认 gemini-3.5-flash
-    #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 lite
-    planner_model: str = ""               # 空 → GlobalPlannerConfig.model 默认（3.5-flash）
-    eval_model: str = ""                  # 空 → RetrieveConfig.MODEL 默认（lite-preview）
+    #   planner_model:  global_planner v2.2 LLM，默认 deepseek/deepseek-v4-pro
+    #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 deepseek/deepseek-v4-flash
+    planner_model: str = ""               # 空 → GlobalPlannerConfig.model 默认
+    eval_model: str = ""                  # 空 → RetrieveConfig.MODEL 默认
+    # DeepSeek thinking 模式配置；空则使用预设 (planner=THINKING_PRO, eval=THINKING_FLASH)
+    planner_thinking: Optional[ThinkingConfig] = None
+    eval_thinking: Optional[ThinkingConfig] = None
 
     # ── Google OAuth 文件路径 ─────────────────────────────────
     google_credentials_path: str = ""      # Google OAuth2 client credentials.json
@@ -95,6 +98,8 @@ class AgentConfig:
         分离的两类模型按需注入 RetrieveConfig：
           - planner_model → RetrieveConfig.global_planner.model
           - eval_model    → RetrieveConfig.eval_model_override
+          - planner_thinking → RetrieveConfig.global_planner.thinking_config
+          - eval_thinking    → RetrieveConfig.eval_thinking
         留空时各自走 dataclass 默认值。
         """
         rc = RetrieveConfig(
@@ -102,9 +107,13 @@ class AgentConfig:
             enabled_sources=list(self.sources),
         )
         if self.planner_model:
-            rc.global_planner = GlobalPlannerConfig(model=self.planner_model)  # type: ignore[arg-type]
+            rc.global_planner.model = self.planner_model
         if self.eval_model:
             rc.eval_model_override = self.eval_model
+        if self.planner_thinking is not None:
+            rc.global_planner.thinking_config = self.planner_thinking
+        if self.eval_thinking is not None:
+            rc.eval_thinking = self.eval_thinking
         return rc
 
     def to_source_config(self) -> "SourceConfig":
@@ -120,7 +129,6 @@ class AgentConfig:
             bailian_index_id=self.bailian_index_id,
             google_credentials_path=self.google_credentials_path,
             google_token_path=self.google_token_path,
-            dashscope_api_key=self.dashscope_api_key,
             google_api_key=self.google_api_key,
             gemini_fallback_model=self.gemini_fallback_model,
             load_from_env=self.load_from_env,
@@ -155,7 +163,7 @@ class UnifiedChunk:
     source_tool: str = ""              # "feishu" | "bailian" | "google" | "notion"
     heading_path: str = ""             # 章节路径
     score: float = 0.0                 # 归一化 0.0-1.0（tool 内部负责归一化）
-    confidence_tier: str = ""          # reranker 填充: "critical" | "important" | "noise"
+    confidence_tier: str = ""          # 评估层填充: "critical" | "important" | "noise"
     metadata: Dict = field(default_factory=dict)
 
 
@@ -229,22 +237,55 @@ class GlobalPlan:
 
 
 @dataclass
+class ThinkingConfig:
+    """DeepSeek / Gemini thinking 模式配置。
+
+    - ``enabled``: True=启用思考链, False=禁用, None=按模型自动推断
+    - ``effort``: 思考强度，仅对支持 reasoning_effort 的模型生效
+      (deepseek-reasoner / deepseek-v4-pro 等)
+      "high" = 深度思考, "max" = 最大思考预算; None = 模型默认
+    - ``budget_tokens``: Gemini thinking_budget 兼容字段（DeepSeek 忽略）
+    """
+    enabled: Optional[bool] = None       # None → 自动推断
+    effort: Optional[str] = None          # "high" | "max" | None
+    budget_tokens: Optional[int] = None   # Gemini 兼容
+
+    def to_litellm_kwargs(self) -> dict:
+        """转为 DeepSeek OpenAI-compatible completion 参数。
+
+        DeepSeek requires ``thinking`` inside ``extra_body``; reasoning effort
+        is a top-level OpenAI-style parameter.  Do not use Anthropic's
+        ``output_config`` shape here.
+        """
+        kwargs: dict = {}
+        if self.enabled is not None:
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled" if self.enabled else "disabled"},
+            }
+        if self.enabled and self.effort:
+            kwargs["reasoning_effort"] = self.effort
+        return kwargs
+
+
+# ── 预设 thinking 配置 ──────────────────────────────────────────
+THINKING_PRO = ThinkingConfig(enabled=True, effort="high")     # global_planner
+THINKING_FLASH = ThinkingConfig(enabled=False)                  # source agents
+
+
+@dataclass
 class GlobalPlannerConfig:
     """Global planner（v2.2）行为配置。模型在此切换，不走 env。
 
-    - ``model``: 默认 ``gemini-3.5-flash``（GenerateContent + response_schema 路径）。
-      历史选项 ``gemini-3-flash-preview`` / ``gemini-3.1-flash-lite`` 仍受支持。
-      eval_layer / plan_only LLM 仍走 lite，由 ``RetrieveConfig.eval_model_override``
-      / ``LLM_MODEL`` 单独控制，不受此字段影响。
-    - ``fallback_to_v1``: 整盘失败（LLM 异常 / JSON 错 / 0 focus / 所有 focus 都
-      被 validator reject）时是否回落到老 query_planner + 各源 plan_only_LLM 路径。
-    - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2，直接走老路径。
+    - ``model``: 默认 ``deepseek/deepseek-v4-pro``（通过 ADK LiteLlm）。
+      历史 Gemini 选项 ``gemini-3.5-flash`` / ``gemini-3-flash-preview`` /
+      ``gemini-3.1-flash-lite`` 仍受支持。
+    - ``thinking_config``: 结构化 planner 默认关闭 thinking。部分 DeepSeek
+      thinking 响应会先输出推理文本，破坏严格 JSON contract；需要时可显式注入。
+    - ``fallback_to_v1``: 整盘失败时是否回落到老 query_planner + 各源 plan_only_LLM。
+    - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2。
     """
-    model: Literal[
-        "gemini-3.1-flash-lite",
-        "gemini-3-flash-preview",
-        "gemini-3.5-flash",
-    ] = "gemini-3.5-flash"
+    model: str = "deepseek/deepseek-v4-pro"
+    thinking_config: Optional[ThinkingConfig] = field(default_factory=lambda: THINKING_FLASH)
     timeout_s: float = 15.0
     max_focuses: int = 6
     fallback_to_v1: bool = True
@@ -301,6 +342,9 @@ class ChunkEntry:
     id: str
     source: str                              # SourceTag 值，保留 str 以便扩展
     content: str
+    # ``content`` 永远是可交付给 AnswerAgent 的完整 chunk；LLM 评估只读取
+    # ``preview_content``。保留默认值以兼容旧 reader / 外部调用。
+    preview_content: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     score: Optional[float] = None
     sub_query: str = ""
@@ -342,6 +386,7 @@ class ChunkEntry:
             id=self.id,
             source=self.source,
             content=self.content or other.content,
+            preview_content=self.preview_content or other.preview_content,
             metadata=merged_meta,
             score=best_score,
             sub_query=self.sub_query or other.sub_query,
@@ -357,6 +402,7 @@ class ChunkEntry:
             id=self.id,
             source=self.source,
             content=self.content,
+            preview_content=self.preview_content,
             metadata=dict(self.metadata),
             score=self.score,
             sub_query=self.sub_query,
@@ -370,6 +416,7 @@ class ChunkEntry:
             "id": self.id,
             "source": self.source,
             "content": self.content,
+            "preview_content": self.preview_content,
             "metadata": self.metadata,
             "score": self.score,
             "sub_query": self.sub_query,
@@ -386,6 +433,12 @@ class SourceAgentConfig:
     ``max_loops > 1`` 启用 plan_eval loop，``enforce_loop_bounds`` 保证 min/max 硬约束。
     """
     source_top_k: int = 5                  # 本源最终产出 chunks 上限
+    # Post-I/O evidence compression. It remains opt-in per source.
+    rerank_enabled: bool = False
+    rerank_keep_ratio: float = 0.8
+    rerank_score_threshold: Optional[float] = None
+    rerank_timeout_s: float = 20.0
+    rerank_max_document_chars: int = 6000
     min_loops: int = 1
     max_loops: int = 1
     source_timeout_s: float = 25.0         # SourceAgent 整体软超时
@@ -395,8 +448,6 @@ class SourceAgentConfig:
     google_enable_gmail: bool = True        # 默认开启 Gmail 检索
     google_enable_gmail_attachments: bool = False # balanced/deep_dive 在 preset 中覆盖开启
     google_enable_sheet_search: bool = True  # 是否开启 Google Sheets 搜索（实验可关闭）
-    google_enable_sheet_filter: bool = True  # 是否开启 Google Sheets qwen rerank 过滤
-    google_enable_excel_filter: bool = True  # 是否开启 Excel/CSV qwen rerank 过滤
     google_enable_fulltext_search: bool = True # 是否开启 Drive 全文检索（若为 False，则仅查 name）
     google_enable_native_slide_size_gate: bool = False
     google_enable_type_pools: bool = False
@@ -413,8 +464,6 @@ class SourceAgentConfig:
     google_enable_file_content_cache: bool = True           # 跨 query 文件级 LRU 缓存
     google_file_content_cache_ttl_s: float = 300.0          # 缓存 TTL（5 分钟）
     google_file_content_cache_max_files: int = 64           # 缓存最大条目数
-    google_enable_cross_sq_pre_filter: bool = False         # chunk_pool 后不再默认二次 Qwen；预算在 G-2 前完成
-    google_cross_sq_pre_filter_threshold: int = 10          # chunk_pool > 此阈值才触发（默认 source_top_k * 2）
     # eval_only LLM 输入硬上限（独立于 source_top_k）。当 cross_sq_pre_filter 计算
     # target_n = max(source_top_k*2, source_top_k+2) 后，再与本字段 min 取小值。
     # None / 0 表示不额外限制（沿用旧 target_n 行为）。
@@ -439,34 +488,22 @@ class SourceAgentConfig:
     google_dedup_native_vs_nonnative: bool = True
     google_doc_chunk_cap: int = 60
     google_slide_chunk_cap: int = 40
-    google_file_emergency_rerank_threshold: int = 200
-    google_file_emergency_rerank_top_n: int = 4
-    google_type_bucket_rerank_threshold: int = 25
-    google_type_bucket_rerank_top_n: int = 7       # doc / slide / sheet 统一上限
-    google_type_bucket_rerank_top_n_gmail: int = 4 # gmail 单独上限（信噪比低，收紧）
     google_type_pool_sheet_workers: int = 4
     google_type_pool_doc_workers: int = 3
     google_type_pool_slide_workers: int = 3
     google_type_pool_gmail_workers: int = 2
     google_type_pool_nonnative_workers: int = 4  # 合并 pptx/word/excel/csv/txt 下载并发
     google_gmail_attachment_max_files: int = 3
-    # ── Feishu table chunk rerank（post-read，仿 Google type bucket）──
-    # 0 表示不启用 table chunk rerank（lite 默认不读 table 也走 0）。
-    # >0 时：read 完表格后，对 table chunks 做 _select_chunks_for_sub_query 内容 rerank，
-    # 与 doc chunks 分桶独立，避免 table 噪声压制 doc 信号；min_keep / threshold
-    # 复用 get_chunk_selection_config(query_type)。
-    feishu_table_chunk_rerank_top_n: int = 0
     # per-type 搜索召回数量（按 preset 可定制）
     google_doc_search_per_sq: int = 12    # 每个 sub_query Doc 搜索召回数
     google_slide_search_per_sq: int = 12  # 每个 sub_query Slide 搜索召回数
     google_sheet_search_per_sq: int = 5   # 每个 sub_query Sheet 搜索召回数
-    # per-type 候选数量（rerank 后保留，必须 ≤ 搜索召回数）
+    # per-type 读取候选数量（必须 ≤ 搜索召回数）
     google_doc_candidates_per_sq: int = 12    # 每个 sub_query Doc 必读候选数
     google_slide_candidates_per_sq: int = 12  # 每个 sub_query Slide 必读候选数
     google_sheet_candidates_per_sq: int = 5   # 每个 sub_query Sheet 必读候选数（收紧）
     # Gmail 候选数量
     google_max_gmail_threads_per_subquery: int = 10  # Gmail 搜索默认返回 thread 数
-    google_gmail_rerank_top_n: int = 3               # snippet rerank 后保留 thread 数
 
     # ── 时间符合性（P1）─────────────────────────────────────────────
     # eval LLM 在判 tier 时会读这两个字段：若 chunk 文档/邮件时间在窗外 → 降一级；
@@ -513,15 +550,22 @@ class RetrieveConfig:
     # 用同一对象做 indexes symbolic 校验。
     bailian_catalog: Optional[BailianIndexCatalog] = None
 
-    # eval_layer / LLM rerank 模型覆盖；留空时用 ``MODEL`` ClassVar 默认（lite）。
+    # eval_layer / LLM 模型覆盖；留空时用 ``MODEL`` ClassVar 默认（lite）。
     # 由外部 AgentConfig.eval_model 透传，不读 env。
     eval_model_override: str = ""
+
+    # eval 侧 thinking 配置（source agent plan_only / eval_only / plan_eval）。
+    # None → 使用 THINKING_FLASH（禁用 thinking）；外部 AgentConfig.eval_thinking 透传。
+    eval_thinking: Optional[ThinkingConfig] = None
 
     # ── 内部常量（不作为构造参数；调整请改源码或 preset 表）──
     EVAL_LAYER_TOP_K: ClassVar[int] = 12
     EVAL_LAYER_LLM_TIMEOUT_S: ClassVar[float] = 15.0
     EVAL_LAYER_LLM_MAX_INPUT: ClassVar[int] = 22
-    MODEL: ClassVar[str] = "gemini-3.1-flash-lite-preview"
+    # All planner/evaluation stages use the configured DeepSeek path by
+    # default.  Google Workspace retrieval itself remains API/mock based and
+    # must not require Vertex credentials.
+    MODEL: ClassVar[str] = "deepseek/deepseek-v4-flash"
 
     # 兼容旧调用：保留小写别名属性，但只读
     @property
@@ -553,16 +597,14 @@ class RetrieveConfig:
                               "google_enable_gmail_attachments": False,
                               # 候选/检索数量收紧
                               "google_doc_search_per_sq": 8, "google_slide_search_per_sq": 8,
-                              # doc rerank 候选 +1（4→5），适度放开 doc/docx/txt 召回。
+                              # doc 读取候选 +1（4→5），适度放开 doc/docx/txt 召回。
                               "google_doc_candidates_per_sq": 5, "google_slide_candidates_per_sq": 3,
                               "google_sheet_candidates_per_sq": 3,
                               "google_max_gmail_threads_per_subquery": 2,
-                              "google_gmail_rerank_top_n": 2,
                               # 复用 balanced 的所有优化开关
                               "google_enable_native_slide_size_gate": True,
                               "google_enable_type_pools": True,
                               "google_enable_gmail_isolation": True,
-                              "google_enable_cross_sq_pre_filter": False,
                               # lite：sheet + PPTX 全关；保留 doc nonnative（docx/txt 较快）。
                               # 配合 doc_candidates_per_sq +1（4→5）补足召回深度。
                               "google_nonnative_search_query_types": {
@@ -581,10 +623,10 @@ class RetrieveConfig:
                       "final_top_k_per_focus": 4,
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
-                          # 给 table chunks 接上 post-read 内容 rerank（仿 Google type bucket）。
-                          # 与 doc chunks 分桶独立 rerank，避免 table 噪声压制 doc 信号。
-                          "feishu": {"feishu_table_chunk_rerank_top_n": 6},
-                          "google": {"google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
+                          "feishu": {"rerank_enabled": True},
+                          # table chunks 在读取后进入独立预览评估，避免表格噪声压制文档信号。
+                          "google": {"rerank_enabled": True,
+                                     "google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
                                      "google_per_file_timeout_s": 9.0,
                                      # PPTX 是 balanced 主要尾延迟（avg 3.8s, p95 8s, avg 27MB）。
                                      # 5s 下载超时让大 PPTX 提前失败，不影响小文件解析。
@@ -604,7 +646,7 @@ class RetrieveConfig:
                                      "google_enable_type_pools": True,
                                      "google_enable_gmail_isolation": True,
                                      "google_doc_search_per_sq": 10, "google_slide_search_per_sq": 10,
-                                     # doc rerank 候选 +1（5→6），PPTX 已禁后把预算转给 doc 召回。
+                                     # doc 读取候选 +1（5→6），PPTX 已禁后把预算转给 doc 召回。
                                      "google_doc_candidates_per_sq": 6, "google_slide_candidates_per_sq": 4,
                                      # sheet tab-level cap=3：实验证明 2 没省 wall-clock（sheet read
                                      # 已并行，4 workers 吞得下 -28% per-read），但 important 召回 -1。
@@ -616,16 +658,14 @@ class RetrieveConfig:
                                      # balanced 下 4-5 个 slide 文件常见。
                                      "google_type_pool_slide_workers": 5,
                                      # Budget is handled before chunk_pool:
-                                     # type-pool emergency rerank + per-sq mixed rerank.
+                                     # 每个 sub-query 的混合读取预算。
                                      "sub_query_top_n": 10,
-                                     "google_enable_cross_sq_pre_filter": False,
                                      # eval_only 输入限制（google_eval_input_max_chunks）实验：
                                      # 8 vs default 10 实测 critical 平均 -1.6，Q4 全 0C，
                                      # eval LLM 看不到第 9-10 名候选时漏掉关键 chunk。回滚到 None
                                      # （沿用 source_top_k*2=10）。如未来发现 eval RTT 是主瓶颈
                                      # 可单独打开。
                                      "google_max_gmail_threads_per_subquery": 3,
-                                     "google_gmail_rerank_top_n": 3,
                                      "google_type_pool_nonnative_workers": 5, 
                                      },
                       }},
@@ -635,10 +675,11 @@ class RetrieveConfig:
                       "final_top_k_per_focus": 5,
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0,
-                                      # deep_dive 给 table chunk rerank 更宽松（8 vs balanced 6）。
-                                      "feishu_table_chunk_rerank_top_n": 8},
+                                      "rerank_enabled": True,
+                                      # deep_dive 给 table chunk 更宽松的读取预算（8 vs balanced 6）。
+                          },
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
-                          "google": {
+                          "google": {"rerank_enabled": True,
                               # 单轮（覆盖 LOOSE 的 max_loops=2，eval_layer 仍兜底）
                               "max_loops": 1,
                               # Timeout：balanced + 1s
@@ -671,7 +712,6 @@ class RetrieveConfig:
                               "google_enable_gmail_isolation": True,
                               "google_doc_search_per_sq": 16, "google_slide_search_per_sq": 15,
                               "google_doc_candidates_per_sq": 9, "google_slide_candidates_per_sq": 9,
-                              "google_type_bucket_rerank_top_n": 9,
                               "sub_query_top_n": 14,
                           },
                       }},
@@ -701,6 +741,9 @@ class RetrieveConfig:
     @property
     def eval_layer_effective_mode(self) -> EvalLayerMode:
         """eval_layer 模式：完全由 preset 推导。"""
+        override = os.getenv("RAG_EVAL_LAYER_MODE", "").strip().lower()
+        if override in {"rule", "llm_tool"}:
+            return override  # type: ignore[return-value]
         return self._PRESET_DEFAULTS.get(self.preset, {}).get("eval_layer_mode", "rule")  # type: ignore[return-value]
 
     def config_for(self, source: str) -> SourceAgentConfig:
@@ -737,10 +780,11 @@ class RetrieveConfig:
         for f in (
             "source_top_k", "min_loops", "max_loops",
             "source_timeout_s", "sub_query_top_n",
+            "rerank_enabled", "rerank_keep_ratio", "rerank_score_threshold",
+            "rerank_timeout_s", "rerank_max_document_chars",
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_search",
-            "google_enable_sheet_filter", "google_enable_excel_filter",
             "google_enable_fulltext_search", "google_enable_native_slide_size_gate",
             "google_enable_type_pools",
             "google_enable_gmail_isolation", "google_order_by_mode",
@@ -753,9 +797,6 @@ class RetrieveConfig:
             "google_sheet_prefilter_close_delta",
             "google_sheet_files_per_sq_structured", "google_sheet_files_per_sq_concept",
             "google_nonnative_search_query_types", "google_dedup_native_vs_nonnative",
-            "google_file_emergency_rerank_threshold", "google_file_emergency_rerank_top_n",
-            "google_type_bucket_rerank_threshold", "google_type_bucket_rerank_top_n",
-            "google_type_bucket_rerank_top_n_gmail",
             "google_type_pool_sheet_workers", "google_type_pool_doc_workers",
             "google_type_pool_slide_workers", "google_type_pool_gmail_workers",
             "google_type_pool_nonnative_workers",
@@ -763,8 +804,7 @@ class RetrieveConfig:
             "google_gmail_attachment_max_files",
             "google_doc_search_per_sq", "google_slide_search_per_sq", "google_sheet_search_per_sq",
             "google_doc_candidates_per_sq", "google_slide_candidates_per_sq", "google_sheet_candidates_per_sq",
-            "google_max_gmail_threads_per_subquery", "google_gmail_rerank_top_n",
-            "feishu_table_chunk_rerank_top_n",
+            "google_max_gmail_threads_per_subquery",
         ):
             if getattr(override, f) != getattr(defaults, f):
                 diff[f] = getattr(override, f)

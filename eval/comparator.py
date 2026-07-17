@@ -135,7 +135,7 @@ def _diff_query(
     t_b = tb.get("timing", {})
     diff["timing_delta"] = {
         k: t_b.get(k, 0) - t_a.get(k, 0)
-        for k in ("plan_ms", "retrieve_ms", "rerank_ms", "total_ms")
+        for k in ("plan_ms", "retrieve_ms", "evidence_ms", "total_ms")
     }
 
     # ── Plan diff ────────────────────────────────────────────────────────
@@ -153,8 +153,8 @@ def _diff_query(
     }
 
     # ── Chunk volume diff ────────────────────────────────────────────────
-    r_a = ta.get("rerank", {})
-    r_b = tb.get("rerank", {})
+    r_a = ta.get("evidence", {})
+    r_b = tb.get("evidence", {})
     diff["volume_diff"] = {
         "final_chunks_delta": r_b.get("final_chunk_count", 0) - r_a.get("final_chunk_count", 0),
         "raw_chunks_a": ta.get("retrieval", {}).get("raw_chunk_count", 0),

@@ -1,8 +1,8 @@
 """chunk_scorer.py — BM25 评分模块
 
-主链已由 qwen3-rerank 统一做 doc 评分；
+主链在读取后统一进行 evidence evaluation；
 但在 table path 中 (sheet_reader / bitable_reader)，仍使用 bm25_score 做
-行级/记录级粗筛和 chunk score（table chunks 不做 qwen3-rerank）。
+行级/记录级粗筛和 chunk score（table chunks 不做模型筛选）。
 """
 
 import logging

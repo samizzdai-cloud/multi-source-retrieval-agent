@@ -33,7 +33,7 @@ _CHUNK_GRADE_PROMPT = """\
 ## Focus 列表
 {focuses_json}
 
-## Chunks（已按 rerank 排序）
+## Chunks（保留检索 API 原始顺序）
 {chunks_json}
 
 ## 评分标准（每个 chunk × 每个 focus）

@@ -3,7 +3,7 @@
 借鉴 Feishu table_pool 的跨 sub_query 合并读取模式：
 1. 批量获取多个 spreadsheet 的元数据（含 merges + gridProperties）
 2. 缓存到 _meta_cache，避免重复 API 调用
-3. 支持 per-sub_query qwen rerank 选 sheets
+3. 按 Spreadsheet 元数据原始顺序读取 sheets
 4. 合并跨 sq 的相同 spreadsheet 读取需求
 """
 
@@ -246,71 +246,14 @@ class SheetPool:
     def is_reading(self, file_id: str) -> bool:
         return file_id in self._reading
 
-    # ── Sheet 筛选（qwen rerank）────────────────────────────────────────
+    # ── Native sheet order ──────────────────────────────────────────────
 
-    def select_sheets_for_sub_query(
-        self,
-        file_id: str,
-        query: str,
-        focus_text: str,
-        top_n: int = 4,
-        score_threshold: float = 0.18,
-        min_keep: int = 1,
-        skip_rerank_if_few: bool = True,
-    ) -> List[str]:
-        """对单个 spreadsheet 的 sheets 做 qwen rerank，返回选中的 sheet titles。
-
-        Args:
-            file_id: Spreadsheet ID
-            query: sub_query 文本
-            focus_text: focus 文本
-            top_n: 最多返回几个 sheet
-            score_threshold: rerank 分数阈值
-            min_keep: 最少保留几个
-
-        Returns:
-            选中的 sheet title 列表
-        """
+    def native_sheet_titles(self, file_id: str) -> List[str]:
+        """Return every tab in the Sheets API order for a matched workbook."""
         meta = self._meta_cache.get(file_id)
         if not meta or not meta.sheets:
             return []
-
-        sheets = meta.sheets
-        # 如果 sheet 数量 ≤ top_n，直接全量返回，跳过 rerank
-        if skip_rerank_if_few and len(sheets) <= top_n:
-            return [s.get("title", "") for s in sheets]
-
-        try:
-            from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-        except ImportError:
-            return [s.get("title", "") for s in sheets[:top_n]]
-
-        candidates = []
-        for s in sheets:
-            grid = s.get("gridProperties", {})
-            summary = f"Rows: {grid.get('rowCount', 0)} | Cols: {grid.get('columnCount', 0)}"
-            candidates.append({
-                "id": str(s.get("sheetId", "")),
-                "title": f"{meta.title} / {s.get('title', '')}",
-                "summary": summary,
-                "_sheet_title": s.get("title", ""),
-            })
-
-        question = build_focus_sub_query_question(focus_text, query)
-        rerank_result = select_search_candidates(
-            query=question,
-            candidates=candidates,
-            top_n=top_n,
-            score_threshold=score_threshold,
-            min_keep=min_keep,
-            instruct_template="qa",
-        )
-
-        if rerank_result.get("status") == "success":
-            selected = list(rerank_result.get("selected_candidates") or [])
-            return [c.get("_sheet_title", "") for c in selected if c.get("_sheet_title")]
-        else:
-            return [c.get("_sheet_title", "") for c in candidates[:top_n]]
+        return [s.get("title", "") for s in meta.sheets if s.get("title")]
 
     # ── 跨 sub_query 合并 ───────────────────────────────────────────────
 

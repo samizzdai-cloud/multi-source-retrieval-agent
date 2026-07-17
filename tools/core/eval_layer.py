@@ -215,13 +215,15 @@ def build_rule_eval_layer(params: Optional[RuleEvalParams] = None) -> EvalLayer:
 _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:")
 
 
-def _render_chunk_for_eval(c: ChunkEntry, base_max: int = 300) -> str:
+def _render_chunk_for_eval(c: ChunkEntry, base_max: int = 300, *, chunk_ref: str | None = None) -> str:
     """与 source_agent_base._chunks_block 保持一致的单 chunk 渲染。
 
     - 表格 chunk 使用 500 字宽窗口（同 _chunks_block）
     - 输出 chunk_id（非 id alias）供 schema 对齐 TierAssignment.chunk_id
     """
-    content = c.content or ""
+    # Cross-source evaluation follows the same contract as source eval: inspect
+    # the evaluation view, while final assembly hydrates ``content`` by ID.
+    content = c.preview_content or c.content or ""
     is_table = any(m in content for m in _TABLE_MARKERS)
     limit = 500 if is_table else base_max
     snippet = content.replace("\n", " ").strip()
@@ -237,7 +239,7 @@ def _render_chunk_for_eval(c: ChunkEntry, base_max: int = 300) -> str:
     sq = (c.sub_query or "")[:40]
 
     parts = [
-        f"chunk_id={c.id}",
+        f"chunk_ref={chunk_ref or c.id}",
         f"source={c.source}",
         f"tier={c.tier or 'none'}",
         f"relevance={c.score or 0:.3f}",
@@ -263,6 +265,7 @@ def _build_llm_eval_layer_prompt(
     chunks: List[ChunkEntry],
     focuses: List[object],
     top_k: int,
+    chunk_refs: Dict[str, str] | None = None,
 ) -> str:
     """构建 LlmEvalLayer 的 LLM prompt。
 
@@ -285,13 +288,13 @@ def _build_llm_eval_layer_prompt(
         if members:
             chunk_lines.append(f"\n## {fid}: {getattr(f, 'text', '')}")
             for c in members:
-                chunk_lines.append(_render_chunk_for_eval(c))
+                chunk_lines.append(_render_chunk_for_eval(c, chunk_ref=(chunk_refs or {}).get(c.id)))
                 placed.add(c.id)
     leftover = [c for c in chunks if c.id not in placed]
     if leftover:
         chunk_lines.append("\n## Unassigned")
         for c in leftover:
-            chunk_lines.append(_render_chunk_for_eval(c))
+            chunk_lines.append(_render_chunk_for_eval(c, chunk_ref=(chunk_refs or {}).get(c.id)))
     chunks_block = "\n".join(chunk_lines)
 
     n_focuses = len(focuses)
@@ -312,7 +315,7 @@ def _build_llm_eval_layer_prompt(
     constraints = f"""\
 - selected_ids 长度 ≤ {top_k}，对应 tiers 须覆盖全部 selected_ids
 {per_focus_min_line + chr(10) if per_focus_min_line else ""}\
-- chunk_id 必须来自上方 chunks_block（不允许编造不存在的 id）
+- chunk_id 必须是上方 chunks_block 中打印的 chunk_ref（C1, C2, ...），不允许输出 canonical ID
 - answered_focuses 中的 focus_id 须来自 focuses_block：{valid_fids}
 - 一条 chunk 同时覆盖多个 focus 时，answered_focuses 列出所有命中的 focus_id
 - relevance 为 [0,1] 连续分；angle_tag 为 1-2 个英文小写词"""
@@ -338,10 +341,10 @@ global_top_k: {top_k}
 
 ## 输出 schema（严格 JSON，不输出任何其他文字）
 {{
-  "selected_ids": ["<chunk_id1>", "<chunk_id2>", ...],
+  "selected_ids": ["<chunk_ref1>", "<chunk_ref2>", ...],
   "tiers": [
     {{
-      "chunk_id": "<chunk_id>",
+      "chunk_id": "<chunk_ref>",
       "tier": "critical",
       "relevance": 0.90,
       "answered_focuses": {example_answered},
@@ -357,8 +360,36 @@ global_top_k: {top_k}
 
 _VALID_TIERS = {"critical", "important", "noise"}
 
-# Gemini response_schema：与 TierAssignment + selected_ids 对齐，提供字段级强制
-# （等价于 eval_only 用 pydantic output_schema 的结构约束效果）
+
+def _normalize_eval_payload(parsed: object, *, top_k: int) -> Dict[str, List[Dict] | List[str]]:
+    """Normalize the JSON-mode response without silently discarding LLM work.
+
+    DeepSeek JSON mode normally returns the requested object.  In practice it
+    can emit a top-level list of tier assignments even when the object schema
+    was supplied.  That is still useful evidence judgment, not a reason to
+    degrade to the unrelated rule selector.  Recover selected IDs from the
+    tier list in tier/relevance order and leave hallucinated IDs to the normal
+    callback below.
+    """
+    if isinstance(parsed, dict):
+        return {
+            "selected_ids": list(parsed.get("selected_ids") or []),
+            "tiers": list(parsed.get("tiers") or []),
+        }
+    if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
+        rows = [dict(item) for item in parsed]
+        tier_rank = {"critical": 0, "important": 1, "noise": 2}
+        rows.sort(key=lambda row: (
+            tier_rank.get(str(row.get("tier")), 3),
+            -float(row.get("relevance") or 0.0),
+        ))
+        return {
+            "selected_ids": [str(row["chunk_id"]) for row in rows if row.get("chunk_id")][:top_k],
+            "tiers": rows,
+        }
+    raise TypeError(f"eval JSON must be object or tier list, got {type(parsed).__name__}")
+
+# OpenAI-compatible JSON schema: aligns with TierAssignment + selected_ids.
 _EVAL_LAYER_RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
@@ -395,7 +426,9 @@ class LlmEvalLayer:
     同步实现（blocking）：retrieve_agent 通过 ``asyncio.to_thread`` 调用。
     任何异常（LLM 超时 / JSON 解析 / 空选 / 幻觉 chunk_id）→ fallback RuleEvalLayer。
     """
-    model: str = "gemini-3.1-flash-lite"
+    # Keep deep-dive global evaluation on the same configured DeepSeek path as
+    # source eval_only/plan_eval.  It must not implicitly require Vertex ADC.
+    model: str = "deepseek/deepseek-v4-flash"
     timeout_s: float = 30.0
     max_input_chunks: int = 40      # 超出时先过规则层截断
     rule_params: RuleEvalParams = field(default_factory=RuleEvalParams)
@@ -446,7 +479,9 @@ class LlmEvalLayer:
         from tools.core.llm_client import call_llm, parse_json_response
 
         valid_fids = {getattr(f, "focus_id", "") for f in focuses}
-        prompt = _build_llm_eval_layer_prompt(candidates, focuses, top_k)
+        ref_to_id = {f"C{index}": chunk.id for index, chunk in enumerate(candidates, 1)}
+        id_to_ref = {chunk_id: ref for ref, chunk_id in ref_to_id.items()}
+        prompt = _build_llm_eval_layer_prompt(candidates, focuses, top_k, chunk_refs=id_to_ref)
         raw = call_llm(
             prompt,
             max_tokens=2048,
@@ -455,10 +490,20 @@ class LlmEvalLayer:
             model=self.model,
             response_schema=_EVAL_LAYER_RESPONSE_SCHEMA,  # 结构强制（含 response_mime_type）
         )
-        parsed = parse_json_response(raw)
+        parsed = _normalize_eval_payload(parse_json_response(raw), top_k=top_k)
 
-        selected_ids: List[str] = parsed.get("selected_ids") or []
-        tiers_list: List[Dict] = parsed.get("tiers") or []
+        selected_ids: List[str] = [
+            ref_to_id[ref] for ref in (parsed.get("selected_ids") or [])
+            if isinstance(ref, str) and ref in ref_to_id
+        ]
+        tiers_list: List[Dict] = []
+        for assignment in (parsed.get("tiers") or []):
+            if not isinstance(assignment, dict):
+                continue
+            ref = assignment.get("chunk_id")
+            canonical_id = ref_to_id.get(ref) if isinstance(ref, str) else None
+            if canonical_id:
+                tiers_list.append({**assignment, "chunk_id": canonical_id})
 
         # tiers_map: chunk_id → full assignment dict（对齐 TierAssignment schema）
         tiers_map: Dict[str, Dict] = {}

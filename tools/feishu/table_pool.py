@@ -4,7 +4,7 @@
   1. 前置 budget：按 focus_id 控制每类表格的读取上限
   2. 去重与缓存：多个 sub_query/loop 命中同一父文件 → 只读一次
   3. 结构缓存：sheet tabs / bitable tables 元数据复用
-  4. 调度：按 candidate_rerank_score 排优先级，异步安排 reader
+  4. 调度：按 API 原始顺序安排 reader
   5. 原始 chunk 回收：返回已读父文件的 raw UnifiedChunk
 """
 
@@ -178,13 +178,15 @@ class TablePool:
                 list(existing.get("selected_table_titles") or []),
                 list(candidate.get("selected_table_titles") or []),
             ),
-            "candidate_rerank_score": max(
-                float(existing.get("candidate_rerank_score", 0.0) or 0.0),
-                float(candidate.get("candidate_rerank_score", 0.0) or 0.0),
+            "cross_query_hit_count": int(existing.get("cross_query_hit_count", 1) or 1)
+            + int(candidate.get("cross_query_hit_count", 1) or 1),
+            "best_api_rank": min(
+                int(existing.get("best_api_rank", 10**9) or 10**9),
+                int(candidate.get("best_api_rank", 10**9) or 10**9),
             ),
-            "candidate_rerank_rank": min(
-                int(existing.get("candidate_rerank_rank", 10**9) or 10**9),
-                int(candidate.get("candidate_rerank_rank", 10**9) or 10**9),
+            "first_seen_order": min(
+                int(existing.get("first_seen_order", 10**9) or 10**9),
+                int(candidate.get("first_seen_order", 10**9) or 10**9),
             ),
             "table_selected_child_count": max(
                 int(existing.get("table_selected_child_count", 0) or 0),
@@ -344,8 +346,9 @@ class TablePool:
         ordered_candidates = sorted(
             candidates,
             key=lambda c: (
-                -float(c.get("candidate_rerank_score", 0.0) or 0.0),
-                int(c.get("candidate_rerank_rank", 10**9) or 10**9),
+                -int(c.get("cross_query_hit_count", 1) or 1),
+                int(c.get("best_api_rank", 10**9) or 10**9),
+                int(c.get("first_seen_order", 10**9) or 10**9),
                 str(c.get("title", "") or ""),
             ),
         )
@@ -418,7 +421,9 @@ class TablePool:
             merged_meta["selected_sub_query_ids"] = list(meta.get("selected_sub_query_ids") or [])
             merged_meta["selected_feishu_urls"] = list(meta.get("selected_feishu_urls") or [])
             merged_meta["selected_query_types"] = list(meta.get("selected_query_types") or [])
-            merged_meta["candidate_rerank_score"] = float(meta.get("candidate_rerank_score", 0.0) or 0.0)
+            merged_meta["cross_query_hit_count"] = int(meta.get("cross_query_hit_count", 1) or 1)
+            merged_meta["best_api_rank"] = int(meta.get("best_api_rank", 10**9) or 10**9)
+            merged_meta["first_seen_order"] = int(meta.get("first_seen_order", 10**9) or 10**9)
             merged_meta["candidate_source"] = meta.get("_source", "")
             merged_meta["candidate_sources"] = list(meta.get("_sources") or [])
             merged_meta["read_query"] = meta.get("read_query", "")
@@ -575,8 +580,9 @@ class TablePool:
                 "token": token,
                 "title": meta.get("title", ""),
                 "doc_type": meta.get("doc_type", ""),
-                "candidate_rerank_score": float(meta.get("candidate_rerank_score", 0.0) or 0.0),
-                "candidate_rerank_rank": int(meta.get("candidate_rerank_rank", 10**9) or 10**9),
+                "cross_query_hit_count": int(meta.get("cross_query_hit_count", 1) or 1),
+                "best_api_rank": int(meta.get("best_api_rank", 10**9) or 10**9),
+                "first_seen_order": int(meta.get("first_seen_order", 10**9) or 10**9),
                 "selected_child_count": selected_count,
                 "structure_child_count": raw_structure_count,
                 "selected_child_ratio": round(selected_count / structure_count, 4),
@@ -594,8 +600,9 @@ class TablePool:
                 not row["submit_selected"],
                 not row["final_selected"],
                 -row["read_ms"],
-                -row["candidate_rerank_score"],
-                row["candidate_rerank_rank"],
+                -row["cross_query_hit_count"],
+                row["best_api_rank"],
+                row["first_seen_order"],
                 row["title"],
             )
         )

@@ -1,7 +1,7 @@
 """Experiment configuration — bundles all tuneable parameters for A/B testing.
 
-ExperimentConfig wraps EvalConfig (early-stop / reranker / embedding) and
-adds planner / reranker overrides plus metadata so each experiment run is
+ExperimentConfig wraps EvalConfig (early-stop / evidence / embedding) and
+adds planner overrides plus metadata so each experiment run is
 fully reproducible.
 """
 
@@ -33,15 +33,8 @@ class ExperimentConfig:
     planner_overrides: Dict[str, Any] = field(default_factory=dict)
     #   e.g. {"max_sub_queries": 6}
 
-    # ── reranker overrides (passed through to rerank_and_filter) ─
-    reranker_overrides: Dict[str, Any] = field(default_factory=dict)
-    #   e.g. {"emb_weight": 0.6, "kw_weight": 0.1}
-
     # ── retrieval overrides (passed through to source retrievers) ─
     retrieval_overrides: Dict[str, Any] = field(default_factory=dict)
-    #   bailian:
-    #     bailian_rerank_top_n: int       — override rerank_top_n per index
-    #     bailian_rerank_min_score: float  — override rerank_min_score threshold
     #   feishu doc_pool:
     #     feishu_top_n_docs: int           — PoolConfig.top_n_docs
     #     feishu_max_per_doc: int          — PoolConfig.max_per_doc
@@ -81,7 +74,7 @@ class ExperimentConfig:
 
 BASELINE = ExperimentConfig(
     name="baseline",
-    description="Production defaults — current EvalConfig + reranker params snapshot",
+    description="Production defaults — current EvalConfig snapshot",
 )
 
 AGGRESSIVE_EARLY_STOP = ExperimentConfig(
@@ -118,9 +111,6 @@ WIDE_RECALL = ExperimentConfig(
         min_per_focus=1,
     ),
     retrieval_overrides={
-        # bailian — loosen bottlenecks B1+B2
-        "bailian_rerank_top_n": 15,
-        "bailian_rerank_min_score": 0.3,
         # feishu doc_pool — loosen bottlenecks B3+B4
         "feishu_top_n_docs": 10,
         "feishu_max_per_doc": 8,
@@ -143,8 +133,6 @@ SPEED_TUNING = ExperimentConfig(
         min_per_focus_select=2,
     ),
     retrieval_overrides={
-        "bailian_rerank_top_n": 10,
-        "bailian_rerank_min_score": 0.4,
         "feishu_top_n_docs": 6,
         "feishu_max_per_doc": 5,
         "feishu_max_output": 15,
@@ -166,8 +154,6 @@ BALANCED_COVERAGE = ExperimentConfig(
         min_per_focus=1,
     ),
     retrieval_overrides={
-        "bailian_rerank_top_n": 12,
-        "bailian_rerank_min_score": 0.35,
         "feishu_top_n_docs": 8,
         "feishu_max_per_doc": 6,
         "feishu_max_output": 20,
@@ -195,8 +181,6 @@ P2_CONSERVATIVE = ExperimentConfig(
     ),
     retrieval_overrides={
         # keep wide_recall retrieval params — only change early-stop behavior
-        "bailian_rerank_top_n": 15,
-        "bailian_rerank_min_score": 0.3,
         "feishu_top_n_docs": 10,
         "feishu_max_per_doc": 8,
         "feishu_max_output": 25,
@@ -220,8 +204,6 @@ P2_BALANCED = ExperimentConfig(
         min_per_focus_select=3,
     ),
     retrieval_overrides={
-        "bailian_rerank_top_n": 15,
-        "bailian_rerank_min_score": 0.3,
         "feishu_top_n_docs": 10,
         "feishu_max_per_doc": 8,
         "feishu_max_output": 25,
@@ -246,8 +228,6 @@ P3_SINGLE_SOURCE = ExperimentConfig(
         min_per_focus_select=3,
     ),
     retrieval_overrides={
-        "bailian_rerank_top_n": 15,
-        "bailian_rerank_min_score": 0.3,
         "feishu_top_n_docs": 10,
         "feishu_max_per_doc": 8,
         "feishu_max_output": 25,

@@ -244,10 +244,9 @@ def _select_sheet_ranges(
     query: str,
     creds,
 ) -> Optional[List[str]]:
-    """使用 rerank 筛选出最相关的 sheets。"""
+    """Return sheet ranges in spreadsheet metadata order."""
     try:
         from google_workspace_tool.readers.sheet_reader import get_spreadsheet_info
-        from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
     except ImportError:
         return None
 
@@ -267,77 +266,12 @@ def _select_sheet_ranges(
             "_sheet_title": s.get("title")
         })
 
-    if len(candidates) <= 2:
-        return [c["_sheet_title"] for c in candidates]
-
-    question = build_focus_sub_query_question(query, query)
-    rerank_result = select_search_candidates(
-        query=question,
-        candidates=candidates,
-        top_n=2,
-        score_threshold=0.18,
-        min_keep=1,
-        instruct_template="qa"
-    )
-
-    if rerank_result.get("status") == "success":
-        selected = list(rerank_result.get("selected_candidates") or [])
-        return [c["_sheet_title"] for c in selected]
-    else:
-        return [c["_sheet_title"] for c in candidates[:2]]
+    return [c["_sheet_title"] for c in candidates]
 
 
 def _select_drive_candidates(query: str, files: List[dict], top_n: int = 5) -> List[dict]:
-    """使用 rerank 筛选出最相关的 Drive 文件候选。"""
-    try:
-        from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-    except ImportError:
-        return files[:top_n]
-
-    candidates = []
-    for f in files:
-        # 构建丰富的摘要用于 LLM 排序
-        desc = f.get("description") or f.get("mimeType", "")
-        owners = ", ".join([o.get("displayName", "") for o in f.get("owners", []) if o.get("displayName")])
-        modified_time = f.get("modifiedTime") or f.get("createdTime", "Unknown")
-        viewed_time = f.get("viewedByMeTime", "Not viewed")
-        
-        summary_parts = [
-            f"Type: {f.get('mimeType', 'Unknown')}",
-            f"Desc: {desc}",
-        ]
-        if owners:
-            summary_parts.append(f"Owners: {owners}")
-        summary_parts.append(f"Modified: {modified_time}")
-        summary_parts.append(f"Last Viewed: {viewed_time}")
-        
-        rich_summary = " | ".join(summary_parts)
-
-        candidates.append({
-            "id": f.get("id"),
-            "title": f.get("name", ""),
-            "summary": rich_summary,
-            "_file": f
-        })
-
-    if len(candidates) <= top_n:
-        return [c["_file"] for c in candidates]
-
-    question = build_focus_sub_query_question(query, query)
-    rerank_result = select_search_candidates(
-        query=question,
-        candidates=candidates,
-        top_n=top_n,
-        score_threshold=0.1,  # 较低阈值，因为仅靠标题判断
-        min_keep=1,
-        instruct_template="qa"
-    )
-
-    if rerank_result.get("status") == "success":
-        selected = list(rerank_result.get("selected_candidates") or [])
-        return [c["_file"] for c in selected]
-    else:
-        return [c["_file"] for c in candidates[:top_n]]
+    """Keep the Drive API order within the declared read budget."""
+    return list(files[:top_n])
 
 
 def _sync_google_retrieve(
@@ -400,9 +334,9 @@ def _sync_google_retrieve(
     # 过滤不支持的 MIME
     files = [f for f in files if f.get("mimeType") in _SUPPORTED_MIMETYPES and f.get("id")]
     
-    # 文件候选重排：利用 Rerank 选出最相关的 Top N (e.g. 5) 避免全部下载
+    # Bound reads without changing the native Drive result order.
     files = _select_drive_candidates(query, files, top_n=5)
-    logger.debug("google_retrieve: selected %d files after candidate rerank...", len(files))
+    logger.debug("google_retrieve: selected %d files in native API order", len(files))
 
     def _process_file(f):
         file_id = f.get("id")

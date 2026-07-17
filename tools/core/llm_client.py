@@ -1,51 +1,50 @@
-"""Shared LLM client — generic Gemini call wrappers.
+"""Shared LLM client — litellm wrapper for DeepSeek models.
 
-Used by: tools/query_planner.py, agents/sub_agents/*.py, answer_agent.py
+Used by: global_planner.py, query_planner.py, answer_agent.py
 """
+
+from __future__ import annotations
 
 import json
 import logging
 import os
 import re
-from typing import Any
+import time as _time
+from typing import Any, Optional
 
-from google import genai
-from google.genai import types as genai_types
 from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── LLM constants ────────────────────────────────────────────────
-# [P2.7] 从 .env 读取模型配置，支持 lite 模型 + fallback
-LLM_MODEL       = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
-LLM_FALLBACK    = os.getenv("GEMINI_FALLBACK_MODEL", "")
+LLM_MODEL       = os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash")
 LLM_MAX_TOKENS  = 8192
 LLM_TEMPERATURE = 0.0
 
-_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
+_RETRYABLE_KEYWORDS = ("503", "429", "UNAVAILABLE", "Resource exhausted",
+                        "overloaded", "quota", "rate")
 
 
 def configure_llm_client(
     *,
-    api_key: str,
+    api_key: str = "",
     model: str | None = None,
     fallback_model: str | None = None,
 ) -> None:
-    """显式注入 llm_client 运行时配置，避免依赖 .env 读取。"""
-    global _client, LLM_MODEL, LLM_FALLBACK
-    _client = genai.Client(api_key=api_key)
+    """显式注入 llm_client 运行时配置（兼容旧签名，DeepSeek 场景 api_key 可忽略）。"""
+    global LLM_MODEL
+    if api_key:
+        os.environ.setdefault("DEEPSEEK_API_KEY", api_key)
     if model:
         LLM_MODEL = model
-    if fallback_model is not None:
-        LLM_FALLBACK = fallback_model
+
 
 # ── Trace hook ───────────────────────────────────────────────────
 _llm_trace_hook: Any = None
 
 
 def set_llm_trace_hook(hook) -> None:
-    """Register hook(prompt, response, caller_tag) called after every LLM call."""
     global _llm_trace_hook
     _llm_trace_hook = hook
 
@@ -55,84 +54,82 @@ def clear_llm_trace_hook() -> None:
     _llm_trace_hook = None
 
 
-# ── Generic LLM call ─────────────────────────────────────────────
+# ── LLM call ─────────────────────────────────────────────────────
 
-_RETRYABLE_KEYWORDS = ("503", "429", "UNAVAILABLE", "Resource exhausted", "overloaded", "quota")
+def call_llm(
+    prompt: str,
+    max_tokens: int = LLM_MAX_TOKENS,
+    timeout: float = 30.0,
+    _caller_tag: str = "unknown",
+    max_retries: int = 3,
+    retry_delay: float = 1.5,
+    model: str | None = None,
+    thinking_budget: int | None = None,       # 兼容旧签名，DeepSeek 忽略
+    thinking_config: dict | None = None,
+    response_mime_type: str | None = None,     # 兼容旧签名，DeepSeek 忽略
+    response_schema: dict | None = None,
+) -> str:
+    """LLM call via litellm (DeepSeek). Returns response text.
 
-
-def call_llm(prompt: str, max_tokens: int = LLM_MAX_TOKENS, timeout: float = 30.0,
-             _caller_tag: str = "unknown",
-             max_retries: int = 3, retry_delay: float = 1.5,
-             model: str | None = None,
-             thinking_budget: int | None = None,
-             response_mime_type: str | None = None,
-             response_schema: dict | None = None) -> str:
-    """Generic LLM call via Gemini API. Returns response text.
-
-    自动重试（指数退避）：503 / 429 / UNAVAILABLE / quota exceeded → 最多 max_retries 次。
+    自动重试（指数退避）。
 
     Args:
-        thinking_budget: None=use default (0 for flash, auto for pro-thinking models).
-                        0=disable thinking. >0=explicit budget.
-    Raises RuntimeError on API failure after retries.
+        thinking_config: DeepSeek thinking 配置，
+          如 {"thinking": {"type": "enabled"}, "output_config": {"effort": "high"}}。
+        response_schema: 如需结构化输出，转为 prompt 内嵌 JSON 指令 + json_object。
     """
-    import time as _time
+    import litellm
 
     use_model = model or LLM_MODEL
-    # Models with "-pro-preview" or "thinking" in name require thinking mode
-    _needs_thinking = any(k in use_model for k in ("pro-preview", "thinking"))
-    if thinking_budget is not None:
-        _tb = thinking_budget
-    elif _needs_thinking:
-        _tb = 8192  # default thinking budget for pro models
-    else:
-        _tb = 0     # disable thinking for flash models (fast path)
+    # 保持 provider 前缀 (如 "deepseek/xxx") — litellm 需要它来识别 provider
 
-    response_text = ""
+    # response_schema → prompt 内嵌 + json_object
+    messages = [{"role": "user", "content": prompt}]
+    completion_kwargs: dict = {
+        "model": use_model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": LLM_TEMPERATURE,
+        "timeout": timeout,
+    }
+
+    if response_schema:
+        schema_json = json.dumps(response_schema, ensure_ascii=False)
+        messages[0]["content"] = (
+            prompt + "\n\nOutput strictly as JSON matching this schema:\n" + schema_json
+        )
+        completion_kwargs["response_format"] = {"type": "json_object"}
+
+    if thinking_config:
+        completion_kwargs.update(thinking_config)
+
     last_exc: Exception | None = None
-
     for attempt in range(max_retries):
         try:
-            _cfg_kwargs: dict = dict(
-                max_output_tokens=max_tokens,
-                temperature=LLM_TEMPERATURE,
-                thinking_config=genai_types.ThinkingConfig(thinking_budget=_tb),
-                http_options=genai_types.HttpOptions(timeout=int(timeout * 1000)),
-            )
-            if response_mime_type:
-                _cfg_kwargs["response_mime_type"] = response_mime_type
-            if response_schema:
-                _cfg_kwargs["response_schema"] = response_schema
-                # response_schema 隐含 JSON 输出，但显式设置更保险
-                _cfg_kwargs.setdefault("response_mime_type", "application/json")
-            response = _client.models.generate_content(
-                model=use_model,
-                contents=prompt,
-                config=genai_types.GenerateContentConfig(**_cfg_kwargs),
-            )
-            response_text = response.text or ""
-            if not response_text:
-                # Safety-blocked or empty response — raise so retry/fallback logic fires
-                try:
-                    candidate = response.candidates[0] if response.candidates else None
-                    reason = candidate.finish_reason if candidate else "unknown"
-                except Exception:
-                    reason = "unknown"
-                raise RuntimeError(
-                    f"empty response from model (finish_reason={reason})"
-                )
+            response = litellm.completion(**completion_kwargs)
+            message = response.choices[0].message
+            # Per DeepSeek's JSON-mode contract, only ``content`` is the final
+            # answer. ``reasoning_content`` is a thinking trace, never a JSON
+            # fallback. Empty content is retried because the API documents it
+            # as an intermittent JSON-mode condition.
+            text = message.content or ""
+            if not text:
+                raise RuntimeError("empty response from model")
             if _llm_trace_hook is not None:
                 try:
-                    _llm_trace_hook(prompt, response_text, _caller_tag)
+                    _llm_trace_hook(prompt, text, _caller_tag)
                 except Exception:
                     pass
-            return response_text
+            return text
         except Exception as e:
             last_exc = e
             err_str = str(e)
-            retryable = any(k.lower() in err_str.lower() for k in _RETRYABLE_KEYWORDS)
+            retryable = (
+                "empty response from model" in err_str.lower()
+                or any(k.lower() in err_str.lower() for k in _RETRYABLE_KEYWORDS)
+            )
             if retryable and attempt < max_retries - 1:
-                wait = retry_delay * (2 ** attempt)  # 1.5s → 3s → 6s
+                wait = retry_delay * (2 ** attempt)
                 logger.warning(
                     "call_llm [%s] attempt %d/%d failed: %s — retrying in %.1fs",
                     _caller_tag, attempt + 1, max_retries, err_str[:80], wait,
@@ -141,44 +138,28 @@ def call_llm(prompt: str, max_tokens: int = LLM_MAX_TOKENS, timeout: float = 30.
             else:
                 break
 
-    # [P2.7] Fallback to secondary model if primary fails and fallback configured
-    if LLM_FALLBACK and (model is None or model == LLM_MODEL) and LLM_FALLBACK != use_model:
-        logger.warning(
-            "call_llm [%s]: primary model %s failed, trying fallback %s",
-            _caller_tag, use_model, LLM_FALLBACK,
-        )
-        try:
-            return call_llm(prompt, max_tokens=max_tokens, timeout=timeout,
-                            _caller_tag=_caller_tag, max_retries=2,
-                            model=LLM_FALLBACK, thinking_budget=thinking_budget,
-                            response_mime_type=response_mime_type,
-                            response_schema=response_schema)
-        except Exception as fallback_exc:
-            logger.warning("call_llm [%s]: fallback also failed: %s", _caller_tag, fallback_exc)
-
     if _llm_trace_hook is not None:
         try:
-            _llm_trace_hook(prompt, response_text, _caller_tag)
+            _llm_trace_hook(prompt, "", _caller_tag)
         except Exception:
             pass
     raise RuntimeError(
-        f"LLM API call failed after {max_retries} attempts [{_caller_tag}]: {last_exc}"
+        f"LLM call failed after {max_retries} attempts [{_caller_tag}]: {last_exc}"
     ) from last_exc
 
 
+# ── JSON helpers ──────────────────────────────────────────────────
+
 def _fix_json(text: str) -> str:
     """Best-effort fix for common LLM JSON quirks (trailing commas, truncation)."""
-    # Remove trailing commas before } or ]
     text = re.sub(r',\s*([}\]])', r'\1', text)
     return text
 
 
 def _repair_truncated_json(text: str) -> str:
     """Try to close a JSON object/array truncated by max_tokens."""
-    # Strip any trailing incomplete string value
-    text = re.sub(r',?\s*"[^"]*$', '', text)  # dangling key or string value
+    text = re.sub(r',?\s*"[^"]*$', '', text)
     text = re.sub(r',?\s*$', '', text)
-    # Count unmatched braces/brackets and close them
     opens = {'[': ']', '{': '}'}
     stack: list[str] = []
     in_string = False
@@ -205,7 +186,7 @@ def _repair_truncated_json(text: str) -> str:
 
 def parse_json_response(text: str) -> Any:
     """Safely parse JSON from LLM response — handles code fences and preamble."""
-    clean = text.strip()
+    clean = text.strip().lstrip("\ufeff")
     if "```" in clean:
         clean = re.sub(r'```(?:json)?\s*', '', clean)
         clean = re.sub(r'```', '', clean)
@@ -214,11 +195,22 @@ def parse_json_response(text: str) -> Any:
         return json.loads(clean)
     except json.JSONDecodeError:
         pass
-    # Try after fixing common LLM JSON quirks
     try:
         return json.loads(_fix_json(clean))
     except json.JSONDecodeError:
         pass
+    # Structured providers can append a usage marker or a second text segment
+    # after a valid object.  raw_decode accepts the first complete JSON value
+    # instead of letting a greedy {.*} extraction swallow that tail.
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(clean):
+        if char not in "[{":
+            continue
+        try:
+            value, _end = decoder.raw_decode(clean[index:])
+            return value
+        except json.JSONDecodeError:
+            continue
     match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', clean)
     if match:
         candidate = match.group(1)
@@ -229,7 +221,6 @@ def parse_json_response(text: str) -> Any:
                 return json.loads(_fix_json(candidate))
             except json.JSONDecodeError:
                 pass
-    # Last resort: repair truncated JSON (max_tokens cut-off)
     repaired = _repair_truncated_json(_fix_json(clean))
     try:
         return json.loads(repaired)

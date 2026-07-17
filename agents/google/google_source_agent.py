@@ -2,7 +2,7 @@
 
 Phase 4 完整版：
 - 继承 ``SourceAgent`` 通用骨架；单/多 loop 由 ``SourceAgentConfig`` 决定
-- 引入 SheetPool：跨 sub_query 合并 spreadsheet 元数据获取 + qwen rerank 选 sheets + batchGet 只读选中 sheets
+- 引入 SheetPool：跨 sub_query 合并 spreadsheet 元数据获取 + metadata 原顺序读取 sheets
 - 非原生文件（Excel/CSV/Word/PDF/Slide）走原有 drive_content_reader 路径
 """
 
@@ -18,12 +18,8 @@ from datetime import date
 from typing import Dict, List, Optional, Set, Tuple
 
 from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
+from tools.core.chunk_preview import build_chunk_preview
 from tools.core.source_profiles import get_profile
-from tools.core.rerank import (
-    build_focus_sub_query_question,
-    get_chunk_selection_config,
-    select_reranked_chunks,
-)
 
 from agents.source_agent_base import Focus, SourceAgent, SubQuery
 from google.adk.agents.llm_agent import LlmAgent
@@ -68,16 +64,8 @@ def _drive_file_size(file_meta: dict) -> Optional[int]:
         return None
 
 
-def _uc_to_rerank_payload(uc: UnifiedChunk) -> dict:
-    return {
-        "text": uc.text or "",
-        "source_name": uc.source_name or "",
-        "heading_path": uc.heading_path or "",
-    }
-
-
 def _fallback_select(uc_list: List[UnifiedChunk], top_n: int) -> List[UnifiedChunk]:
-    return sorted(uc_list, key=lambda x: float(x.score or 0.0), reverse=True)[:top_n]
+    return list(uc_list[:top_n])
 
 
 # ── 跨 query 文件级 LRU cache ────────────────────────────────────────────
@@ -241,7 +229,7 @@ def _is_native(mime: Optional[str]) -> bool:
 
 
 def _format_label(mime: Optional[str]) -> str:
-    """Short Format tag for Qwen rerank candidate summary."""
+    """Short format tag for reader metadata summaries."""
     return {
         _MIME_DOCS: "native_doc", _MIME_SHEETS: "native_sheet", _MIME_SLIDES: "native_slide",
         _MIME_WORD: "docx", _MIME_WORD_OLD: "doc", _MIME_TXT: "txt",
@@ -397,7 +385,7 @@ def _query_aware_truncate(
     uc_list: List[UnifiedChunk], query: str, top_n: int,
 ) -> List[UnifiedChunk]:
     """关键词命中 + reader_score 融合的快速截断。
-    比纯 reader_score 截断更稳，开销 <50ms（无外部 rerank 调用）。
+    比纯 reader_score 截断更稳，开销 <50ms（无外部模型调用）。
     """
     if len(uc_list) <= top_n:
         return uc_list
@@ -431,61 +419,17 @@ def _quantiles(values: List[float]) -> tuple[float, float, float]:
     return p50, p95, ordered[-1]
 
 
-def _clone_uc_with_score(uc: UnifiedChunk, score: float, rank: int, mode: str) -> UnifiedChunk:
-    meta = dict(uc.metadata or {})
-    meta.setdefault("reader_score", float(uc.score or 0.0))
-    meta["chunk_rerank_score"] = float(score)
-    meta["chunk_rerank_rank"] = int(rank)
-    meta["selection_mode"] = mode
-    return UnifiedChunk(
-        text=uc.text, source_name=uc.source_name, source_url=uc.source_url,
-        source_tool=uc.source_tool, heading_path=uc.heading_path,
-        score=float(score), confidence_tier=uc.confidence_tier, metadata=meta,
-    )
-
-
-def _select_chunks_for_sub_query(
+def _preserve_api_order_chunks(
     query: str, focus_text: str, query_type: str,
     uc_list: List[UnifiedChunk], top_n: int,
 ) -> List[UnifiedChunk]:
-    """Per-sub_query chunk 筛选（qwen rerank）。"""
+    """Keep reader output order until preview evidence evaluation."""
     started = time.perf_counter()
     if not uc_list:
         return []
-    cfg = get_chunk_selection_config(query_type)
-    question = build_focus_sub_query_question(focus_text, query)
-    payloads = [_uc_to_rerank_payload(uc) for uc in uc_list]
-    result = select_reranked_chunks(
-        query=question, chunks=payloads,
-        top_n=top_n, score_threshold=float(cfg["score_threshold"]),
-        min_keep=int(cfg["min_keep"]), instruct_template="qa",
-    )
-    if result.get("status") != "success":
-        logger.warning("[google] chunk rerank failed: %s; fallback", result.get("message"))
-        selected = _fallback_select(uc_list, top_n)
-        logger.info("TIMING google.chunk_select mode=fallback query=%.24r input=%d selected=%d ms=%.1f",
-                     query, len(uc_list), len(selected), _elapsed_ms(started))
-        return selected
-    selected_items = result.get("selected_results") or []
-    if not selected_items:
-        selected = _fallback_select(uc_list, top_n)
-        logger.info("TIMING google.chunk_select mode=fallback_empty query=%.24r input=%d selected=%d ms=%.1f",
-                     query, len(uc_list), len(selected), _elapsed_ms(started))
-        return selected
-    selected: List[UnifiedChunk] = []
-    for item in selected_items:
-        idx = item.get("index")
-        if idx is None or idx < 0 or idx >= len(uc_list):
-            continue
-        selected.append(_clone_uc_with_score(
-            uc_list[idx], float(item.get("relevance_score", 0.0)),
-            int(item.get("rank", len(selected) + 1)), "rerank",
-        ))
-    if not selected:
-        selected = _fallback_select(uc_list, top_n)
-    logger.info("TIMING google.chunk_select mode=rerank query=%.24r input=%d selected=%d ms=%.1f",
-                 query, len(uc_list), len(selected), _elapsed_ms(started))
-    return selected
+    # Native API/read order is preserved until token-aware evidence evaluation.
+    logger.info("TIMING google.chunk_bucket mode=api_order input=%d ms=%.1f", len(uc_list), _elapsed_ms(started))
+    return list(uc_list)
 
 
 def _unified_to_chunk_entry(
@@ -536,6 +480,7 @@ def _unified_to_chunk_entry(
         id=cid,
         source="google",
         content=uc.text or "",
+        preview_content=build_chunk_preview(uc.text or "", merged_meta),
         metadata=merged_meta,
         score=uc.score,
         sub_query=sub_query,
@@ -674,113 +619,17 @@ class GoogleSourceAgent(SourceAgent):
 
     def _select_file_candidates(
         self,
-        query: str,
-        focus_text: str,
         files: List[dict],
         top_n: int = 4,
-        score_threshold: float = 0.10,
-        min_keep: int = 1,
-        use_description: bool = True,
         filter_fn=None,
     ) -> List[str]:
-        """对 file 列表做 qwen rerank，返回选中的 file_id 列表。
-
-        Args:
-            query: sub_query 文本
-            focus_text: focus 文本
-            files: Drive search 返回的 file dict 列表（含 name, description, owners 等）
-            top_n: 最多返回几个 file
-            use_description: 是否使用 file.description 作为 summary
-            filter_fn: 可选的过滤函数，接收 file dict 返回 bool；
-                       被过滤掉的候选会从 rerank 排名中按序补齐
-        """
+        """Return bounded Drive API-order file ids after an optional safety gate."""
         if not files:
             return []
-        if len(files) <= top_n:
-            ids = [f.get("id", "") for f in files if f.get("id")]
-            if filter_fn:
-                ids = [fid for fid in ids if filter_fn(next(f for f in files if f.get("id") == fid))]
-            return ids
-
-        try:
-            from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-        except ImportError:
-            ids = [f.get("id", "") for f in files[:top_n]]
-            if filter_fn:
-                ids = [fid for fid in ids if filter_fn(next(f for f in files if f.get("id") == fid))]
-            return ids
-
-        candidates = []
-        file_by_id = {}
-        for f in files:
-            fid = f.get("id", "")
-            if fid:
-                file_by_id[fid] = f
-            parts = [f"Title: {f.get('name', '')}"]
-            fmt_label = _format_label(f.get("mimeType"))
-            if fmt_label and fmt_label != "unknown":
-                parts.append(f"Format: {fmt_label}")
-            if use_description and f.get("description"):
-                parts.append(f"Desc: {f.get('description', '')}")
-            owners = ", ".join([o.get("displayName", "") for o in f.get("owners", []) if o.get("displayName")])
-            if owners:
-                parts.append(f"Owner: {owners}")
-            if f.get("modifiedTime"):
-                parts.append(f"Modified: {f.get('modifiedTime', '')}")
-            candidates.append({
-                "id": fid,
-                "title": f.get("name", ""),
-                "summary": " | ".join(parts),
-                "_file_id": fid,
-            })
-
-        question = build_focus_sub_query_question(focus_text, query)
-        rerank_result = select_search_candidates(
-            query=question,
-            candidates=candidates,
-            top_n=len(candidates),  # 请求全部候选的完整排名
-            score_threshold=score_threshold,
-            min_keep=min_keep,
-            instruct_template="qa",
-        )
-
-        if rerank_result.get("status") != "success":
-            ids = [f.get("id", "") for f in files[:top_n]]
-            if filter_fn:
-                ids = [fid for fid in ids if filter_fn(file_by_id.get(fid, {}))]
-            return ids
-
-        # 获取完整 rerank 排名（按 relevance_score 降序）
-        all_ranked = list(rerank_result.get("results") or [])
-        # 映射 index → file_id
-        index_to_fid = {i: c["_file_id"] for i, c in enumerate(candidates) if c.get("_file_id")}
-
-        selected = []
-        # 第一轮：应用 filter_fn 取前 top_n
-        for item in all_ranked:
-            idx = item.get("index")
-            fid = index_to_fid.get(idx)
-            if not fid or fid in selected:
-                continue
-            f = file_by_id.get(fid, {})
-            if filter_fn and not filter_fn(f):
-                continue
-            selected.append(fid)
-            if len(selected) >= top_n:
-                break
-
-        # 第二轮：如果 filter 后不足 min_keep，从被 filter 掉的候选中按序补齐
-        if filter_fn and len(selected) < min_keep:
-            for item in all_ranked:
-                idx = item.get("index")
-                fid = index_to_fid.get(idx)
-                if not fid or fid in selected:
-                    continue
-                selected.append(fid)
-                if len(selected) >= min_keep:
-                    break
-
-        return selected
+        # Drive's bounded API order is the only read priority.  The optional
+        # size/type predicate is a safety gate, not a relevance selector.
+        ordered = [f for f in files if not filter_fn or filter_fn(f)]
+        return [str(f.get("id")) for f in ordered[:top_n] if f.get("id")]
 
     def _prefilter_sheet_files_before_metadata(
         self,
@@ -1027,6 +876,7 @@ class GoogleSourceAgent(SourceAgent):
                     id=c.id,
                     source=c.source,
                     content=c.content,
+                    preview_content=c.preview_content,
                     metadata=dict(c.metadata or {}),
                     score=min(float(c.score or 0.0), 0.1),
                     sub_query=c.sub_query,
@@ -1040,9 +890,9 @@ class GoogleSourceAgent(SourceAgent):
     # ── 核心：覆写 _execute_batch，实现跨 sub_query 合并读取 ────────────
 
     async def _execute_batch(
-        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry],
+        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
     ) -> None:
-        """跨 sub_query 合并读取：先统一搜索 → batchGet 元数据 → qwen rerank 选 sheets → 合并读取。"""
+        """跨 sub_query 合并读取：先统一搜索 → batchGet 元数据 → 原顺序合并读取。"""
         from tools.core.kw_generalization import generate_grouped_keywords
         from google_workspace_tool.drive_search_tool import search_drive
         from google_workspace_tool.drive_content_reader import read_drive_chunks
@@ -1183,7 +1033,7 @@ class GoogleSourceAgent(SourceAgent):
                 if not self.cfg.google_enable_gmail:
                     return []
                 gmail_q = self._build_gmail_q(sq.query, keyword_groups)
-                # fetch_snippets=True：拉 snippet+subject，让后续 snippet rerank 真正起作用
+                # fetch_snippets=True：拉取 snippet+subject 作为预览证据。
                 return search_gmail(
                     q=gmail_q,
                     max_results=self.cfg.google_max_gmail_threads_per_subquery,
@@ -1463,7 +1313,7 @@ class GoogleSourceAgent(SourceAgent):
         )
 
         # ── Phase B: 收集所有 spreadsheet file_ids，batchGet 元数据 ────────
-        # SheetPool 元数据获取是同步阻塞调用，但只影响 Sheet 的后续 rerank/读取，
+        # SheetPool 元数据获取是同步阻塞调用，但只影响 Sheet 的后续读取，
         # 与 Doc/Slide/Gmail 的后续处理互不等待。
         all_spreadsheet_ids: Set[str] = set()
         spreadsheet_size_map: Dict[str, Optional[int]] = {}
@@ -1594,7 +1444,7 @@ class GoogleSourceAgent(SourceAgent):
                         url=f"https://mail.google.com/mail/u/0/#inbox/{tid}",
                     ))
 
-        # ── Phase C: Per-sub_query 筛选（qwen rerank）───────────────────────
+        # ── Phase C: Per-sub_query bounded API-order reads ─────────────────
 
         # C1. Sheet 筛选（收紧：精准搜索后只保留 top 5 sheets）
         sq_sheet_selections: Dict[str, List[SheetSelection]] = {}
@@ -1618,11 +1468,7 @@ class GoogleSourceAgent(SourceAgent):
                 fid = f.get("id")
                 if not fid:
                     continue
-                selected_titles = sheet_pool.select_sheets_for_sub_query(
-                    file_id=fid, query=sq.query, focus_text=focus_text,
-                    top_n=self.cfg.google_sheet_candidates_per_sq,
-                    score_threshold=0.12, min_keep=1, skip_rerank_if_few=True,
-                )
+                selected_titles = sheet_pool.native_sheet_titles(fid)
                 if selected_titles:
                     sq_sheet_selections[sq.sub_query_id].append(
                         SheetSelection(file_id=fid, selected_titles=selected_titles,
@@ -1664,21 +1510,9 @@ class GoogleSourceAgent(SourceAgent):
                 moderate_cap=int(self.cfg.google_doc_candidates_per_sq) + 1,
             )
             selected_docs = self._select_file_candidates(
-                query=sq.query, focus_text=focus_text,
                 files=doc_files, top_n=adaptive_doc_top_n,
-                use_description=True,
                 filter_fn=_doc_filter,
             )
-            if doc_files and len(selected_docs) == 0:
-                # 质量保护：放宽 rerank score 阈值，但保留 size gate（避免救回会读爆超时的大文件）
-                selected_docs = self._select_file_candidates(
-                    query=sq.query, focus_text=focus_text,
-                    files=doc_files, top_n=min(2, self.cfg.google_doc_candidates_per_sq),
-                    use_description=True,
-                    filter_fn=_doc_filter,
-                )
-                if selected_docs:
-                    logger.debug("[google] doc filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_docs))
             skipped = [f.get("id", "") for f in doc_files]
             kept = set(selected_docs)
             skipped_count = sum(1 for fid in skipped if fid not in kept)
@@ -1716,21 +1550,9 @@ class GoogleSourceAgent(SourceAgent):
                 moderate_cap=int(self.cfg.google_slide_candidates_per_sq) + 1,
             )
             selected_slides = self._select_file_candidates(
-                query=sq.query, focus_text=focus_text,
                 files=slide_files, top_n=adaptive_slide_top_n,
-                use_description=False,
                 filter_fn=_slide_filter,
             )
-            if slide_files and len(selected_slides) == 0:
-                # 质量保护：放宽 rerank score 阈值，但保留 size gate（避免救回会读爆超时的大文件）
-                selected_slides = self._select_file_candidates(
-                    query=sq.query, focus_text=focus_text,
-                    files=slide_files, top_n=min(2, self.cfg.google_slide_candidates_per_sq),
-                    use_description=False,
-                    filter_fn=_slide_filter,
-                )
-                if selected_slides:
-                    logger.debug("[google] slide filter fallback sq=%s restored=%d", sq.sub_query_id, len(selected_slides))
             skipped = [f.get("id", "") for f in slide_files]
             kept = set(selected_slides)
             skipped_count = sum(1 for fid in skipped if fid not in kept)
@@ -1742,65 +1564,25 @@ class GoogleSourceAgent(SourceAgent):
                 sq_slide_selections[sq.sub_query_id].append(
                     SlideSelection(file_id=fid, sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
 
-        # C4. Gmail Thread 筛选（snippet rerank：10 → 3）
+        # C4. Gmail threads retain Gmail API order within the read budget.
         sq_gmail_selections: Dict[str, List] = {}
         if self.cfg.google_enable_gmail:
             for res in search_results:
                 sq = res["sq"]
                 sq_gmail_selections[sq.sub_query_id] = []
-                focus_text = focus_text_map[sq.sub_query_id]
                 threads = res.get("gmail_threads", [])
                 if not threads:
                     continue
                 # 自适应 cap：gmail 稀疏时不砍（保留所有 thread）
                 top_n = _adaptive_cap(
                     len(threads),
-                    abundant_cap=int(self.cfg.google_gmail_rerank_top_n),
-                    moderate_cap=int(self.cfg.google_gmail_rerank_top_n) + 1,
+                    abundant_cap=int(self.cfg.google_max_gmail_threads_per_subquery),
+                    moderate_cap=int(self.cfg.google_max_gmail_threads_per_subquery),
                 )
-                if len(threads) <= top_n:
-                    for t in threads:
-                        from google_workspace_tool.gmail_pool import GmailSelection
-                        sq_gmail_selections[sq.sub_query_id].append(
-                            GmailSelection(thread_id=t["id"], sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
-                    continue
-                # qwen rerank 选 thread
-                try:
-                    from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-                    candidates = []
-                    for t in threads:
-                        meta = gmail_pool.get_meta(t["id"])
-                        subject = meta.subject if meta else ""
-                        snippet = meta.snippet if meta else ""
-                        candidates.append({
-                            "id": t["id"],
-                            "title": subject or f"Thread {t['id']}",
-                            "summary": snippet[:300],
-                            "_thread_id": t["id"],
-                        })
-                    question = build_focus_sub_query_question(focus_text, sq.query)
-                    rerank_result = select_search_candidates(
-                        query=question, candidates=candidates,
-                        top_n=top_n, score_threshold=0.18, min_keep=1,
-                        instruct_template="qa",
-                    )
-                    if rerank_result.get("status") == "success":
-                        selected = list(rerank_result.get("selected_candidates") or [])
-                    else:
-                        selected = candidates[:top_n]
-                    for c in selected:
-                        tid = c.get("_thread_id")
-                        if tid:
-                            from google_workspace_tool.gmail_pool import GmailSelection
-                            sq_gmail_selections[sq.sub_query_id].append(
-                                GmailSelection(thread_id=tid, sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
-                except Exception as e:
-                    logger.warning("[google] Gmail thread rerank failed for sq=%s: %s", sq.sub_query_id, e)
-                    # fallback：取前 top_n
-                    for t in threads[:top_n]:
-                        from google_workspace_tool.gmail_pool import GmailSelection
-                        sq_gmail_selections[sq.sub_query_id].append(
-                            GmailSelection(thread_id=t["id"], sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
+                for t in threads[:top_n]:
+                    from google_workspace_tool.gmail_pool import GmailSelection
+                    sq_gmail_selections[sq.sub_query_id].append(
+                        GmailSelection(thread_id=t["id"], sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
 
         # ── Phase D: 合并跨 sq 的读取需求 ──────────────────────────────────
         all_sheet_selections: List[SheetSelection] = []
@@ -2118,7 +1900,7 @@ class GoogleSourceAgent(SourceAgent):
                 status = "ok" if len(uc_list) > 0 else "zero_chunks"
                 _log_file_read(fid, "slide", merged_slides.get(fid, set()), status, len(uc_list))
                 # Slide 读取后不做文件级截断，直接 mark_done。
-                # 文件级 rerank 移到 Phase F 之后（避免 executor shutdown 后丢失）
+                # 文件级内容选择已移除；保留读取结果的 API 顺序。
             except Exception as e:
                 logger.warning("[google] slide read failed %s: %s", fid, e)
                 _log_file_read(fid, "slide", merged_slides.get(fid, set()), "failed", 0, str(e))
@@ -2193,39 +1975,7 @@ class GoogleSourceAgent(SourceAgent):
                     if not attachments:
                         continue
 
-                    # 附件 >5 个时，name rerank 筛选
-                    if len(attachments) > 5:
-                        try:
-                            from tools.core.rerank import select_search_candidates, build_focus_sub_query_question
-                            att_candidates = []
-                            for att in attachments:
-                                att_candidates.append({
-                                    "id": att["filename"],
-                                    "title": att["filename"],
-                                    "summary": f"Filename: {att['filename']} | Type: {att['mimeType']}",
-                                    "_att": att,
-                                })
-                            focus_text = ""
-                            for sq_id in merged_gmail.get(thread_id, set()):
-                                for sq in sub_queries:
-                                    if sq.sub_query_id == sq_id:
-                                        focus_text = focus_text_map.get(sq_id, sq.query)
-                                        break
-                            question = build_focus_sub_query_question(focus_text, query)
-                            rerank_result = select_search_candidates(
-                                query=question, candidates=att_candidates,
-                                top_n=int(self.cfg.google_gmail_attachment_max_files), score_threshold=0.18, min_keep=1,
-                                instruct_template="qa",
-                            )
-                            if rerank_result.get("status") == "success":
-                                selected = list(rerank_result.get("selected_candidates") or [])
-                                attachments = [c["_att"] for c in selected if c.get("_att")]
-                            else:
-                                attachments = attachments[:int(self.cfg.google_gmail_attachment_max_files)]
-                        except Exception:
-                            attachments = attachments[:int(self.cfg.google_gmail_attachment_max_files)]
-                    else:
-                        attachments = attachments[:int(self.cfg.google_gmail_attachment_max_files)]
+                    attachments = attachments[:int(self.cfg.google_gmail_attachment_max_files)]
 
                     # 下载附件 bytes 并用 read_chunks_from_bytes 切 chunks（复用 Drive reader 逻辑）
                     from googleapiclient.discovery import build
@@ -2462,68 +2212,9 @@ class GoogleSourceAgent(SourceAgent):
                     logger.debug("[google] FILE_READ_ISSUE %s type=%s status=%s chunks=%d error=%.100s sqs=%s",
                                 fid, info["type"], info["status"], info["chunks"], info.get("error", ""), info["sq_ids"])
 
-            # ── Phase F-G: Per-type pool budget（条件触发 Qwen，常规路径不 rerank）──
-            async def _rerank_uc_list(
-                sq: SubQuery,
-                family: str,
-                uc_list: List[UnifiedChunk],
-                top_n: int,
-                reason: str,
-            ) -> Tuple[List[UnifiedChunk], float]:
-                started = time.perf_counter()
-                rerank_input = uc_list
-                if len(rerank_input) > 120:
-                    rerank_input = _query_aware_truncate(rerank_input, sq.query, 120)
-                selected = await self._to_thread(
-                    _select_chunks_for_sub_query,
-                    query=sq.query,
-                    focus_text=focus_text_map.get(sq.sub_query_id, sq.query),
-                    query_type=_normalize_google_query_type(sq.query_type),
-                    uc_list=rerank_input,
-                    top_n=top_n,
-                )
-                logger.info(
-                    "TIMING google.type_pool_rerank sq=%s type=%s reason=%s input=%d rerank_input=%d output=%d ms=%.1f",
-                    sq.sub_query_id, family, reason, len(uc_list), len(rerank_input), len(selected), _elapsed_ms(started),
-                )
-                return selected, _elapsed_ms(started)
-
             async def _apply_type_pool_budget(sq: SubQuery, family: str, uc_list: List[UnifiedChunk]) -> List[UnifiedChunk]:
-                if not uc_list:
-                    return []
-                file_threshold = int(self.cfg.google_file_emergency_rerank_threshold)
-                file_top_n = int(self.cfg.google_file_emergency_rerank_top_n)
-                bucket_threshold = int(self.cfg.google_type_bucket_rerank_threshold)
-                bucket_top_n = int(
-                    self.cfg.google_type_bucket_rerank_top_n_gmail
-                    if family == "gmail"
-                    else self.cfg.google_type_bucket_rerank_top_n
-                )
-
-                by_file: Dict[str, List[UnifiedChunk]] = {}
-                for uc in uc_list:
-                    fid = (uc.metadata or {}).get("file_id") or (uc.metadata or {}).get("thread_id") or uc.source_name
-                    by_file.setdefault(str(fid), []).append(uc)
-
-                file_tasks = []
-                file_keys = []
-                for fid, file_ucs in by_file.items():
-                    if len(file_ucs) > file_threshold:
-                        file_tasks.append(_rerank_uc_list(sq, family, file_ucs, file_top_n, "file_emergency"))
-                        file_keys.append(fid)
-                if file_tasks:
-                    file_results = await asyncio.gather(*file_tasks)
-                    for fid, (selected, _) in zip(file_keys, file_results):
-                        by_file[fid] = selected
-
-                bucket: List[UnifiedChunk] = []
-                for file_ucs in by_file.values():
-                    bucket.extend(file_ucs)
-
-                if len(bucket) > bucket_threshold:
-                    selected, _ = await _rerank_uc_list(sq, family, bucket, bucket_top_n, "type_bucket")
-                    return selected
-                return bucket
+                """Keep the reader's bounded API order; read caps apply upstream."""
+                return list(uc_list)
 
             for sq in sub_queries:
                 sq_id = sq.sub_query_id
@@ -2555,12 +2246,7 @@ class GoogleSourceAgent(SourceAgent):
                 )
                 chunks_by_sq[sq_id] = new_uc_list
 
-            # ── Phase G: Per-sub_query qwen rerank（chunk 级）──
-            # 注：之前尝试过 eval_only preview 流水线（与本段并行），但 preview pool 是 pre-rerank
-            # 的 reader_score 粗排，LLM 偶尔判 0 选（Q44 实测），引入语义不稳定性。已回滚。
-            #
-            # 若未来再启 preview pipeline，需用 final chunk_pool 的同构超集（含 sub-query rerank score），
-            # 而不是 chunks_by_sq 的 raw reader_score chunks。
+            # ── Phase G: Preserve per-sub-query reader order into preview evaluation ──
             for sq in sub_queries:
                 uc_list = chunks_by_sq.get(sq.sub_query_id, [])
                 if not uc_list:
@@ -2569,7 +2255,7 @@ class GoogleSourceAgent(SourceAgent):
                 focus_text = focus_text_map[sq.sub_query_id]
                 query_type = _normalize_google_query_type(sq.query_type)
 
-                selected = _select_chunks_for_sub_query(
+                selected = _preserve_api_order_chunks(
                     query=sq.query, focus_text=focus_text, query_type=query_type,
                     uc_list=uc_list, top_n=self.cfg.sub_query_top_n,
                 )
@@ -2578,73 +2264,9 @@ class GoogleSourceAgent(SourceAgent):
                     entry = _unified_to_chunk_entry(uc, sq.query, sq.target_focus)
                     existing = chunk_pool.get(entry.id)
                     chunk_pool[entry.id] = existing.merge(entry) if existing else entry
+                    await self._offer_chunk_for_context_eval(entry, chunk_pool)
 
-                logger.info("[google] Phase G sq=%s chunk_rerank input=%d output=%d", sq.sub_query_id, len(uc_list), len(selected))
-
-            # ── Phase G-3: cross-sq pre-eval Qwen rerank（X1 收口）─────────
-            # 触发条件：chunk_pool > threshold（默认 source_top_k × 2 = 10）
-            # 目的：把 chunk_pool 收紧到 source_top_k × 2，让 eval_only LLM 输入减半
-            # 收益：eval_only -1~1.5s；新增 rerank ~0.3-0.5s；净 -0.7~1.0s
-            if (self.cfg.google_enable_cross_sq_pre_filter
-                    and len(chunk_pool) > int(self.cfg.google_cross_sq_pre_filter_threshold)):
-                try:
-                    pre_filter_started = time.perf_counter()
-                    target_n = max(int(self.cfg.source_top_k) * 2, int(self.cfg.source_top_k) + 2)
-                    # 独立硬上限（如 balanced 把 10 压到 8 减 eval LLM RTT）。
-                    eval_cap = getattr(self.cfg, "google_eval_input_max_chunks", None)
-                    if eval_cap and int(eval_cap) > 0:
-                        target_n = min(target_n, int(eval_cap))
-                    # 用 focus 全文集合作为 query（跨 sq 评估）
-                    seen = set()
-                    focus_texts = []
-                    for sq in sub_queries:
-                        f = self._current_focus_lookup.get(sq.target_focus)
-                        if f and f.focus_id not in seen:
-                            seen.add(f.focus_id)
-                            focus_texts.append(f.text)
-                    combined_focus = " | ".join(focus_texts) if focus_texts else sub_queries[0].query
-                    # ChunkEntry → UnifiedChunk（带回查 entry id）
-                    pool_uc = []
-                    pool_entry_ids = []
-                    for entry in chunk_pool.values():
-                        emeta = dict(entry.metadata or {})
-                        emeta["_chunk_pool_entry_id"] = entry.id
-                        pool_uc.append(UnifiedChunk(
-                            text=entry.content,
-                            source_name=emeta.get("source_name", ""),
-                            source_url=emeta.get("source_url", ""),
-                            source_tool=entry.source,
-                            heading_path=emeta.get("heading_path", ""),
-                            score=float(entry.score or 0.0),
-                            confidence_tier=entry.tier or "",
-                            metadata=emeta,
-                        ))
-                        pool_entry_ids.append(entry.id)
-                    # 跨 sq rerank
-                    selected_uc = _select_chunks_for_sub_query(
-                        query=combined_focus, focus_text=combined_focus, query_type="concept",
-                        uc_list=pool_uc, top_n=target_n,
-                    )
-                    # 提取保留的 entry_ids
-                    keep_ids = set()
-                    for uc in selected_uc:
-                        eid = (uc.metadata or {}).get("_chunk_pool_entry_id")
-                        if eid:
-                            keep_ids.add(eid)
-                    # 安全保护：rerank 异常时 keep_ids 为空 → 不缩 pool
-                    if keep_ids:
-                        orig_size = len(chunk_pool)
-                        new_pool = {eid: chunk_pool[eid] for eid in keep_ids if eid in chunk_pool}
-                        chunk_pool.clear()
-                        chunk_pool.update(new_pool)
-                        logger.info(
-                            "TIMING google.cross_sq_pre_filter chunk_pool %d->%d ms=%.1f",
-                            orig_size, len(chunk_pool), _elapsed_ms(pre_filter_started),
-                        )
-                    else:
-                        logger.warning("[google] cross-sq pre-filter returned empty; chunk_pool unchanged")
-                except Exception as e:
-                    logger.warning("[google] cross-sq pre-filter error: %s; chunk_pool unchanged", e)
+                logger.info("[google] Phase G sq=%s native_chunks input=%d output=%d", sq.sub_query_id, len(uc_list), len(selected))
 
             logger.info("TIMING google.batch_total sub_queries=%d chunk_pool=%d ms=%.1f",
                          len(sub_queries), len(chunk_pool), _elapsed_ms(batch_started))
@@ -2680,8 +2302,8 @@ class GoogleSourceAgent(SourceAgent):
             native_api_timeout=int(self.cfg.google_api_timeout_s),
             enable_gmail=self.cfg.google_enable_gmail,
             enable_gmail_attachments=self.cfg.google_enable_gmail_attachments,
-            enable_sheet_filter=self.cfg.google_enable_sheet_filter,
-            enable_excel_filter=self.cfg.google_enable_excel_filter,
+            enable_sheet_filter=False,
+            enable_excel_filter=False,
             enable_fulltext_search=enable_fulltext,
             order_by_mode=order_by,
         )

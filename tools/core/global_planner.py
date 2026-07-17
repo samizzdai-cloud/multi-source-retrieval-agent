@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -79,10 +80,10 @@ logger = logging.getLogger(__name__)
 
 # 源 profile —— 仅供 planner 路由决策
 _SOURCE_PROFILES_BASE = {
-    "feishu": "飞书文档：团队内部沉淀的运营材料、会议纪要、项目文档、表格数据。",
-    "bailian": "百炼知识库：公司级结构化知识（产品、渠道、合规、市场情报等）向量检索。",
-    "google": "Google Workspace：产品上市规划&报告、上市复盘数据、营销媒体素材、产品系列详情。",
-    "notion": "Notion：外部合作/公共知识文档（当前未启用检索）。",
+    "feishu": "标题/全文关键词搜索；命中后可读取 Doc/Wiki/Sheet/Bitable，支持 time/author filter。",
+    "bailian": "知识库检索；支持 symbolic index 与 tag filter。",
+    "google": "Drive 全文搜索；命中后可读取 Docs/Sheets/Slides/Gmail。",
+    "notion": "页面关键词检索。",
 }
 
 
@@ -145,19 +146,23 @@ def _build_per_source_rules_block(
 def _build_output_schema_block(enabled_sources: List[str]) -> str:
     """输出契约（严格 JSON 结构）。"""
     sources_repr = json.dumps(enabled_sources, ensure_ascii=False)
+    bailian_fields = (
+        '          "tags": ["百炼 L2/时效过滤；仅 target_source=bailian 时输出"],\n'
+        '          "indexes": ["百炼 symbolic index；仅 target_source=bailian 时输出"],\n'
+        if "bailian" in enabled_sources else ""
+    )
     return f"""## 输出契约（严格 JSON；不要 markdown / 不要解释 / 不要 ```代码块）
 
 {{
   "focuses": [
     {{
       "focus_id": "focus_0",                          // 必须形如 focus_0/focus_1 顺序编号
-      "focus_content": "可独立评估的 focus 文本，15-40 字，含实体+维度+可选限定",
+      "focus_content": "一个可独立验收的回答子任务：保留用户实体/限定，并说明要形成什么判断或输出",
       "sub_queries": [
         {{
           "target_source": "<{sources_repr} 之一>",   // 越权值会被 runner 丢弃
-          "query": "投递到该源的检索串（遵守该源专属规则）",
-          "tags": ["仅 bailian 用 L2+时效；其它源 []"],
-          "indexes": ["仅 bailian 用 symbolic 名；其它源 []"],
+           "query": "为该 focus 取得一类证据的 API 检索串",
+{bailian_fields}
           "time_filter": "feishu/google 可用；bailian 恒 null",
           "query_type": "feishu/google：structured|concept|personal_recent；bailian/notion null",
           "author_filter": "feishu/google：'me' 或 null"
@@ -197,10 +202,15 @@ def _build_prompt(
             + "\n"
         )
 
-    return f"""你是多源检索系统的「全局规划器」(v2.2)。一次性完成：
-  1. **语义拆解**：把 user query 拆成 ≤{cfg.max_focuses} 个可独立评估的 focus
-  2. **源路由 + 子查询定制**：为每个 focus 直接产出投递到指定源的 sub_queries
-     （含全部源专业字段，下游不再为你做二次规划）
+    diagnostic_coverage_rule = (
+        "For a broad GTM conversion-diagnosis request that does not limit one stage, "
+        "the answer-task focus and its distinct evidence queries must cover verifiable "
+        "acquisition/channel, paid efficiency, and on-site funnel or page-friction evidence. "
+        "These are evidence angles, not invented business entities.\n\n"
+    )
+    return diagnostic_coverage_rule + f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
+
+核心模型：focus 是回答 user query 的一个可独立验收的子任务，描述理想答案必须形成的判断、结论或结构化输出；它不是文档主题、定义词或单条检索词。sub_query 是为同一个 focus 取得不同证据的 API 请求；一个 focus 可以有多条 query，但它们必须角度不同且不可只是同义改写。
 
 user_query：「{query}」
 current_date：{now_str}（"今年" = {today.year} 年；focus 中的"今年/本年/this year" 必须替换为实际年份）
@@ -220,18 +230,21 @@ session_context：{session_context or "无"}
 
 ## Focus 质量要求
 
-  1. **可评估**：给任一切片能直接判断是否命中（不能是 'nubia'/'销售数据' 这类泛词）
-  2. **自包含**：实体 + 维度 + 可选限定，15-40 字
-  3. **不重叠**：focuses 间语义边界清晰
-  4. **anchor 保真**：user_query 中出现的英文专有名（如 X Ultra / Paid Media）、
-     全大写缩写（如 ROAS / UGC / EDM / DTC / GMV）、型号编号（如 Z80 / Z70 Ultra /
-     11 Pro）、明确时点（YYYY-MM / YYYY Q1 / N 月）**必须原样保留**进每条相关
-     focus_content；这些是下游检索的关键命中词，不可改写、不可抽象化为"销售数据 /
-     广告记录 / 项目进展"这类泛词。
+  1. 诊断/原因/排查问题：focus 必须保留诊断目标与结果，例如“定位 CVR 低的漏斗、流量和页面摩擦证据”；禁止改写为“CVR 定义”或泛泛“优化策略”。
+     query 应面向会出现在证据中的结果词/规范指标词：可保留原缩写，同时补一个必要的规范指标或漏斗表达（如“转化率”“渠道漏斗”“站点漏斗”），
+     不是无边界同义词扩展，也不能加入未出现的业务实体。
+  2. 预测/判断问题：focus 必须保留对象、目标时间和结果指标，并区分现有诊断证据与缺失的上游预测输入。
+  3. 指定表格/渠道输出问题：一个 focus 覆盖完整输出任务；排列顺序和列字段属于答案格式，不要按每个渠道拆成 focus。
+  4. user_query 的实体、缩写、指标、地区、日期、产品状态（如新品/老品）和诊断/预测词必须原样留在相关 focus 或 query；不得引入任何示例品牌或业务实体。
+  5. 预测、判断、估算这类问题通常只能有 **一个** focus：该 focus 是要形成的最终预测/判断；
+     销售现状、历史趋势、库存、渠道明细、预测模型是这个 focus 的不同证据面，必须作为同一 focus 下
+     角度不同的 query，而不是拆成多个“获取数据”的 focus。只有两个结论能被用户独立验收时才可拆 focus。
 
 ## 数量约束（硬要求）
 
-  · focuses 总数 ≤ {cfg.max_focuses}（简单 1-2 / 复杂 3-{cfg.max_focuses}）
+  · focuses 总数 ≤ {cfg.max_focuses}；简单任务通常 1 个，只有答案需要不同、可独立验收的结论时才拆分。
+  · 同一 focus + source 可有多条不同证据角度的 sub_query；禁止只因别名、
+    大小写、翻译或同义表达不同而重复检索。别名/表达替换交由零结果 fallback。
   · 各源 sub_queries 数量遵从其专属规则的预算（google 有明确预算；feishu/bailian
     无显式上限但保持少而精）
   · 若两个候选 focus 可被同一条 sub_query 覆盖 → 合并
@@ -269,6 +282,38 @@ def _parse_planned_sub_query(item: Any, enabled_set: set) -> Optional[PlannedSub
     )
 
 
+_DIAGNOSTIC_TERMS = ("排查", "原因", "异常", "下降", "下滑", "低")
+_FORECAST_TERMS = ("预测", "判断", "预估")
+_LITERAL_TERMS = ("新品", "老品", "UTM", "联盟", "GMV", "CVR", "ROAS", "CPA")
+_REGIONS = ("新加坡", "日本", "美国", "英国", "德国", "法国", "欧洲", "中国")
+
+
+def _semantic_contract_holds(original_query: str, focus: str, sub_queries: List[PlannedSubQuery]) -> bool:
+    """Cheap lexical guard: reject topic drift before source execution.
+
+    This deliberately checks only unambiguous user constraints.  It does not
+    try to infer business facts or replace the LLM's answer-task decomposition.
+    """
+    combined = " ".join([focus] + [sq.query for sq in sub_queries]).casefold()
+    for token in re.findall(r"\b[A-Z][A-Z0-9+._-]{1,}\b", original_query):
+        if token.casefold() not in combined:
+            return False
+    for token in _LITERAL_TERMS + _REGIONS:
+        if token in original_query and token.casefold() not in combined:
+            return False
+    if any(term in original_query for term in _DIAGNOSTIC_TERMS):
+        if not any(term in combined for term in _DIAGNOSTIC_TERMS):
+            return False
+    if any(term in original_query for term in _FORECAST_TERMS):
+        if not any(term in combined for term in _FORECAST_TERMS):
+            return False
+    compact_combined = re.sub(r"\s+", "", combined)
+    for token in re.findall(r"\d{1,2}[./-]\d{1,2}|\d{4}[-/]\d{1,2}|\d+月|Q[1-4]", original_query, re.I):
+        if re.sub(r"\s+", "", token.casefold()) not in compact_combined:
+            return False
+    return True
+
+
 def _parse_global_plan(
     raw: Any,
     original_query: str,
@@ -292,10 +337,16 @@ def _parse_global_plan(
             continue
         sqs_raw = item.get("sub_queries") or []
         sub_queries: List[PlannedSubQuery] = []
+        seen_source_queries: set[tuple[str, str]] = set()
         for sq_item in sqs_raw:
             psq = _parse_planned_sub_query(sq_item, enabled_set)
-            if psq is not None:
+            key = (psq.target_source, re.sub(r"\s+", " ", psq.query).strip().casefold()) if psq is not None else None
+            if psq is not None and key not in seen_source_queries:
                 sub_queries.append(psq)
+                seen_source_queries.add(key)
+        if not _semantic_contract_holds(original_query, focus_content, sub_queries):
+            logger.warning("global_planner dropped semantic-drift focus=%r", focus_content[:80])
+            continue
         out.append(
             PlannedFocus(focus_id=focus_id, focus_content=focus_content, sub_queries=sub_queries)
         )
@@ -340,12 +391,18 @@ def plan_global(
 
     started = time.perf_counter()
     try:
+        # DeepSeek thinking 配置：从 cfg 取，转为 litellm kwargs
+        tc_kwargs = None
+        if cfg.thinking_config is not None:
+            tc_kwargs = cfg.thinking_config.to_litellm_kwargs()
+
         raw_text = call_llm(
             prompt,
             max_tokens=2048,
             timeout=cfg.timeout_s,
             _caller_tag="global_planner_v2",
             model=cfg.model,
+            thinking_config=tc_kwargs,
             response_schema=_RESPONSE_SCHEMA,
         )
     except Exception as e:

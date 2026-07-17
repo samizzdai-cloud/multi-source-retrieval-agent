@@ -53,7 +53,7 @@ def generate_experiment_report(
         if "timing" not in t:
             continue
         tm = t["timing"]
-        rk = t.get("rerank", {})
+        rk = t.get("evidence", {})
         rv = t.get("retrieval", {})
         qt = t.get("plan", {}).get("query_type", "?")
         lines.append(

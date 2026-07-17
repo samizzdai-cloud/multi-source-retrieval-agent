@@ -133,9 +133,9 @@ def enforce_tag_caps(tags: List[str]) -> List[str]:
 
 ENTITY_FIDELITY_BLOCK = """【实体保真原则（强制 / 拒识）】
 - **不得引入** user_query / focus 中没有明确出现的具体产品名、型号、品牌、竞品、地区、时间限定。
-  · 用户问"REDMAGIC 销量"，禁止替换/扩展为"REDMAGIC 11 Pro"、"REDMAGIC 8S Pro"等具体型号。
-  · 用户问"REDMAGIC 竞品格局"，禁止自创"黑鲨"、"ROG"、"拯救者"等品牌——除非用户原话提到。
-  · 用户问"nubia 销售业务"，禁止收缩到"nubia Z70 Ultra"等具体产品线。
+  · 用户问“某品牌销量”，禁止替换/扩展为任一具体型号。
+  · 用户问“竞品格局”，禁止自创未被用户提及的竞品品牌。
+  · 用户问“某品牌销售业务”，禁止收缩到未被用户指定的具体产品线。
 - **泛指保留泛指**：user_query 用泛指词（产品/销售/营销/竞品 等）时，sub_query 必须保留泛指
   或同义改写，不得替换为具体产品/品牌实体。
 - source_profile 列出的索引名/文件夹名仅作为路由参考，**不能据此推断用户在问那些具体实体**。
@@ -179,16 +179,15 @@ QUERY_TYPE_DESCRIPTION = """【query_type】（feishu / google 必填，决定�
 SOURCE_QUERY_RULES: Dict[str, str] = {
     "feishu": (
         "【Feishu 专属规则】\n"
-        "  · 格式：「品牌 + 国家(可选) + 核心动作词」，2-3 词，AND 精确匹配\n"
-        "  · 长度严格 5-15 字，过长零召回\n"
-        "  · 禁止具体月份（「12月」「Q1」）、过专业词（「邮件」「线下」「Google Ads」）\n"
-        "  · 国家必须用中文（美国/英国/德国/日本/墨西哥），禁止 US/UK/DE/JP/MX\n"
-        "  · 动作词从 [销售, 运营, 策略, KOL, 推广, 发布, 计划, 表现, 营销, 合作,\n"
-        "    进度, 市场, 产品, 定价] 中选\n"
-        "  · 优先「品牌 + 动作词」(2词)，必要时加国家(3词)\n"
-        "  · tags=[] / indexes=[] 恒成立\n"
-        "  · time_filter 支持 \">YYYY-MM-DD\" 或相对词 \"last_30_days\"\n"
-        "  · 示例：「nubia 销售」「hypershell 策略」「nubia 日本 运营」"
+        "  · Feishu API 按 query tokenizer 在标题与全文做关键词匹配；query 是为当前 focus 取证，"
+        "不是泛主题或答案改写。\n"
+        "  · 保留 user query/focus 中的实体、缩写、指标、地区、日期、渠道和结果性词；"
+        "不得添加品牌、型号、国家或业务词。\n"
+        "  · 使用 2-6 个高信息关键词或短语；可保留 Google Ads、UTM、月份、英文缩写。"
+        "不得做大小写、品牌或泛化同义词变体；但可为当前 focus 选一个必要的规范指标/结果词，"
+        "以命中文档实际表达（例如 CVR 排查可检索“转化率”“漏斗”，而不是检索 CVR 定义）。\n"
+        "  · 文档/策略证据用 concept；需要数字、明细、表格、渠道拆分、库存或原始数据用 structured。\n"
+        "  · time_filter 仅在用户明确相对时间或可安全推断时使用。"
     ),
     "bailian": (
         "【Bailian 专属规则】\n"
@@ -206,7 +205,7 @@ SOURCE_QUERY_RULES: Dict[str, str] = {
     "notion": (
         "【Notion 专属规则】\n"
         "  · 自然语言检索，关键词或短句均可\n"
-        "  · tags=[] / indexes=[] / time_filter=null 恒成立"
+        "  · 不输出源专属过滤字段；仅提供 query 与适用的时间/作者条件"
     ),
     "google": (
         "【Google Workspace 专属规则】\n"

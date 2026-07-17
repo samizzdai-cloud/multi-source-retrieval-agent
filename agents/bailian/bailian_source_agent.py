@@ -160,7 +160,6 @@ class BailianSourceAgent(SourceAgent):
             query=sq.query,
             tags=tags or None,
             indexes=indexes if indexes else None,
-            rerank_top_n_override=self.cfg.sub_query_top_n,
             executor=self._executor,
         )
         if not uc_list:

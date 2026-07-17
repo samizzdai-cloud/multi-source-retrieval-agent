@@ -1,7 +1,7 @@
 """Experiment runner — execute retrieval pipeline with full trace capture.
 
-Reuses the production pipeline (plan_query → fan-out → EvaluationLayer →
-rerank_and_filter) without copying code.  Captures Phase 1/2/3 traces for
+Reuses the production pipeline (plan_query → fan-out → EvaluationLayer) without
+copying code. Captures planning, retrieval and evidence traces for
 downstream grading.
 
 Usage:
@@ -144,11 +144,6 @@ async def _run_one(
                     if sq.indexes:
                         kwargs["indexes"] = sq.indexes
                     kwargs["query_type"] = plan.query_type
-                    # Inject bailian retrieval overrides
-                    if ro.get("bailian_rerank_top_n"):
-                        kwargs["rerank_top_n_override"] = ro["bailian_rerank_top_n"]
-                    if ro.get("bailian_rerank_min_score") is not None:
-                        kwargs["rerank_min_score_override"] = ro["bailian_rerank_min_score"]
                 task = asyncio.create_task(retriever(sq.query, **kwargs))
                 task_map[task] = target
                 task_group_map[task] = gi
@@ -197,14 +192,14 @@ async def _run_one(
             "is_zero": chunk_count == 0,
         })
 
-    # ── Phase 3: Rerank (Deprecated in V2) ──────────────────────────────────
-    t_rerank = time.monotonic()
+    # ── Phase 3: Evidence finalization (deprecated V2 compatibility) ───────
+    t_evidence = time.monotonic()
     
     # 临时 Dummy 替代
     final_chunks = []
     focus_coverages = []
     
-    rerank_ms = int((time.monotonic() - t_rerank) * 1000)
+    evidence_ms = int((time.monotonic() - t_evidence) * 1000)
     total_ms = int((time.monotonic() - t0) * 1000)
 
     # ── Build trace ──────────────────────────────────────────────────────
@@ -232,7 +227,7 @@ async def _run_one(
         "timing": {
             "plan_ms": plan_ms,
             "retrieve_ms": retrieve_ms,
-            "rerank_ms": rerank_ms,
+            "evidence_ms": evidence_ms,
             "total_ms": total_ms,
         },
         "plan": {
@@ -260,7 +255,7 @@ async def _run_one(
             "sq_results": sq_results,
             "sq_zero_rate": round(sum(1 for sq in sq_results if sq["is_zero"]) / max(1, len(sq_results)), 3),
         },
-        "rerank": {
+        "evidence": {
             "final_chunk_count": len(final_chunks),
             "funnel_rate": round(len(final_chunks) / max(1, len(all_chunks)), 3),
             "focus_coverage": [
@@ -285,7 +280,7 @@ async def _run_one(
         },
         "retrieval_overrides_applied": ro,
         "final_chunks": [_chunk_to_dict(c, i) for i, c in enumerate(final_chunks)],
-        # Phase 1 wide_recall: capture ALL raw chunks for grading reranker funnel loss
+        # Phase 1 wide_recall: capture all raw chunks for evidence funnel analysis.
         "raw_chunks_all": [_chunk_to_dict(c, i) for i, c in enumerate(all_chunks)],
         # annotation from eval dataset
         "annotations": {
@@ -358,7 +353,7 @@ async def run_experiment(
 
     # ── Aggregate stats ──────────────────────────────────────────────────
     timing_totals = [t["timing"]["total_ms"] for t in traces if "timing" in t]
-    final_counts = [t["rerank"]["final_chunk_count"] for t in traces if "rerank" in t]
+    final_counts = [t["evidence"]["final_chunk_count"] for t in traces if "evidence" in t]
     raw_counts = [t["retrieval"]["raw_chunk_count"] for t in traces if "retrieval" in t]
 
     def _stats(vals):

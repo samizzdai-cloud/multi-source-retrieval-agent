@@ -89,7 +89,7 @@ class PipelineConfig:
     # query_type: affects downstream routing (feishu structured vs concept)
     query_type:         str   = "structured"   # "structured" | "concept"
     # Stage 5 scoring params（仅在 skip_scoring=False 的遗留模式下生效）
-    # Deprecated: doc path 由 SourceAgent qwen3-rerank 覆盖，此处 embedding 分支不再启用
+    # Deprecated: source-agent bounded reads make this embedding branch unused.
     use_embedding_score: bool = False      # False = pure BM25, True = BM25+embedding
     bm25_weight:        float = 0.5       # hybrid BM25 weight
     emb_weight_score:   float = 0.5       # hybrid embedding weight

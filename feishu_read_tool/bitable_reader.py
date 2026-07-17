@@ -148,6 +148,17 @@ def _records_to_markdown(field_names: List[str], records: List[dict]) -> str:
     return "\n".join(lines)
 
 
+def _records_preview(field_names: List[str], records: List[dict]) -> str:
+    """Compact, deterministic view of a Bitable child without dropping records."""
+    sample = records[:3]
+    if len(records) > 4:
+        sample = sample + [records[-1]]
+    preview = _records_to_markdown(field_names, sample)
+    if len(records) > len(sample):
+        preview += f"\n[preview: {len(records)} records]"
+    return preview
+
+
 # ── LLM 行筛选 ──────────────────────────────────────────────────────────────
 
 def _bm25_filter_records(
@@ -455,7 +466,7 @@ def _read_single_table(
         return []
 
     # Step 4: Records → output
-    if len(records) > BM25_FILTER_THRESHOLD_ROWS:
+    if False and len(records) > BM25_FILTER_THRESHOLD_ROWS:
         # [P2.5] BM25 筛选（替代 LLM，<5ms vs 2-3s）
         selected_indices = _bm25_filter_records(field_names, records, query)
         selected_records = [records[i] for i in selected_indices if i < len(records)]
@@ -463,6 +474,7 @@ def _read_single_table(
         md += f"\n\n[BM25筛选自 {len(records)} 条记录中的 {len(selected_records)} 条]"
     else:
         md = _records_to_markdown(field_names, records)
+    preview = _records_preview(field_names, records)
 
     if not md.strip():
         return []
@@ -478,7 +490,7 @@ def _read_single_table(
     chunk_score = min(1.0, raw_bm25 / 5.0)  # 归一化到 [0, 1]
 
     # O2: 丰富 metadata
-    is_bm25_filtered = len(records) > BM25_FILTER_THRESHOLD_ROWS
+    is_bm25_filtered = False
     return [UnifiedChunk(
         text=f"## {heading}\n\n{md}",
         source_name=bitable_title,
@@ -488,6 +500,12 @@ def _read_single_table(
         score=chunk_score,
         metadata={
             "doc_type": "BITABLE",
+            "content_type": "table",
+            "parent_id": bitable_id,
+            "child_id": table_id,
+            "range": {"record_ids": [str(r.get("record_id") or r.get("id") or "") for r in records]},
+            "content_mode": "full",
+            "table_preview": preview,
             "table": table_name,
             "table_id": table_id,
             "record_count": len(records),
