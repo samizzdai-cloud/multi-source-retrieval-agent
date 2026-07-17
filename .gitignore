@@ -22,6 +22,7 @@ env/
 
 # Testing & output
 .pytest_cache/
+tests/artifacts/
 .eval_output/
 .test_output/
 .spec_organized/
@@ -48,4 +49,17 @@ credentials.json
 token.json
 gmail_token.json
 *token.json
+
+# Runtime data (SQLite databases)
+data/
+
+# Benchmark / optimization output
+optimize_results/
+
+# Eval cache and live output directories
+eval/cache_*/
+eval/live_*/
+
+# Temp docs
+docs/temp_plan.md
 
