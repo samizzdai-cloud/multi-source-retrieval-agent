@@ -447,6 +447,7 @@ def _read_single_table(
                 bitable_id, table_id, uat,
                 filter_body=filter_body,
                 field_names=field_names,
+                page_size=min(MAX_RECORDS, 500),
                 max_records=MAX_RECORDS,
             )
         except Exception as e:
@@ -456,8 +457,12 @@ def _read_single_table(
     # Fallback: 无 filter 取前 N 条
     if not records:
         try:
-            records = _api_call_with_backoff(search_records, bitable_id, table_id, uat, conditions=None)
-            records = records[:FALLBACK_RECORDS]
+            records = _api_call_with_backoff(
+                search_records, bitable_id, table_id, uat,
+                conditions=None,
+                page_size=min(FALLBACK_RECORDS, 500),
+                max_records=FALLBACK_RECORDS,
+            )
         except Exception as e:
             logger.warning("bitable_reader: fallback search failed for %s.%s: %s", bitable_id, table_id, e)
             return []

@@ -48,6 +48,7 @@ from tools.core.context_budget import ContextBudget, estimate_chunk_tokens, prom
 from tools.core.models import ChunkEntry, SourceAgentConfig
 from tools.core.rerank import RerankError, RerankSettings, rerank_items, select_ranked_ids
 from tools.core.source_profiles import SourceProfile
+from tools.core.evidence_role_funnel import current as current_role_funnel
 
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,88 @@ class ChunkRefRegistry:
             tiers.append({**row, "chunk_id": canonical})
         out["top_k_chunk_ids"] = top_ids
         out["tiers"] = tiers
+
+        # Partial eval's compact response is an evidence shortlist.  Keep
+        # legacy ``tiers`` support for saved fixtures and older providers.
+        compact_tiers: List[Dict[str, Any]] = []
+        compact_seen: set[str] = set()
+        resolved_focus_shortlists: List[Dict[str, Any]] = []
+        raw_focus_shortlists = out.get("focus_shortlists") or []
+        if raw_focus_shortlists and not isinstance(raw_focus_shortlists, list):
+            raw_focus_shortlists, malformed = [], malformed + 1
+        for row in raw_focus_shortlists:
+            if not isinstance(row, dict) or not str(row.get("focus_id") or "").strip():
+                malformed += 1
+                continue
+            focus_id = str(row["focus_id"]).strip()
+            resolved_row: Dict[str, Any] = {"focus_id": focus_id}
+            for field_name, tier, relevance in (
+                ("admission_chunk_ids", "important", 0.65),
+                ("critical_chunk_ids", "critical", 0.9),
+                ("important_chunk_ids", "important", 0.7),
+            ):
+                values: List[str] = []
+                for value in row.get(field_name) or []:
+                    canonical = resolve(value)
+                    if not canonical:
+                        malformed += 1
+                        continue
+                    values.append(canonical)
+                    # A chunk can support more than one focus.  Globally retain
+                    # it once and union focus provenance instead of rejecting it.
+                    if canonical not in compact_seen:
+                        compact_seen.add(canonical)
+                        compact_tiers.append({
+                            "chunk_id": canonical, "tier": tier, "relevance": relevance,
+                            "answered_focuses": [focus_id], "angle_tag": "",
+                        })
+                    else:
+                        for judgment in compact_tiers:
+                            if judgment["chunk_id"] == canonical:
+                                judgment["answered_focuses"] = sorted(set(
+                                    judgment.get("answered_focuses") or []) | {focus_id}
+                                )
+                                if tier == "critical":
+                                    judgment["tier"], judgment["relevance"] = "critical", 0.9
+                                break
+                resolved_row[field_name] = values
+            resolved_focus_shortlists.append(resolved_row)
+        out["focus_shortlists"] = resolved_focus_shortlists
+        for field_name, tier, relevance in (
+            ("critical_chunk_ids", "critical", 0.9),
+            ("important_chunk_ids", "important", 0.7),
+        ):
+            raw_values = out.get(field_name) or []
+            resolved_values: List[str] = []
+            for value in raw_values:
+                canonical = resolve(value)
+                if not canonical or canonical in compact_seen:
+                    malformed += 1
+                    continue
+                compact_seen.add(canonical)
+                resolved_values.append(canonical)
+                compact_tiers.append({
+                    "chunk_id": canonical, "tier": tier, "relevance": relevance,
+                    "answered_focuses": [], "angle_tag": "",
+                })
+            out[field_name] = resolved_values
+        if compact_tiers:
+            out["tiers"] = compact_tiers
+
+        ledgers: List[Dict[str, Any]] = []
+        for ledger in out.get("focus_ledger") or []:
+            if not isinstance(ledger, dict):
+                malformed += 1
+                continue
+            evidence_ids: List[str] = []
+            for value in ledger.get("evidence_chunk_ids") or []:
+                canonical = resolve(value)
+                if canonical:
+                    evidence_ids.append(canonical)
+                else:
+                    malformed += 1
+            ledgers.append({**ledger, "evidence_chunk_ids": evidence_ids})
+        out["focus_ledger"] = ledgers
         return out, malformed
 
 
@@ -387,13 +470,30 @@ def _build_eval_only_prompt(
     )
 
 
-def _build_partial_eval_prompt(focuses: List[Focus], chunks: List[ChunkEntry], batch_id: str) -> str:
+def _build_partial_eval_prompt(
+    focuses: List[Focus],
+    chunks: List[ChunkEntry],
+    batch_id: str,
+    refs: Optional[ChunkRefRegistry] = None,
+    max_critical_per_focus: int = 6,
+    max_important_per_focus: int = 12,
+) -> str:
+    refs = refs or ChunkRefRegistry.build(chunks)
     return (
         f"required_response_format: JSON object\n"
         f"batch_id: {batch_id}\n"
+        "Reference contract: use only chunk_ref values (C1, C2, ...) printed in chunks_block. "
+        "Return focus_shortlists grouped by focus_id. For each focus, admission_chunk_ids is mandatory "
+        "and must contain 1-18 refs that should proceed to plan_eval; it must equal the union of the "
+        "critical_chunk_ids and important_chunk_ids. For each focus return at most "
+        f"{max_critical_per_focus} critical refs and {max_important_per_focus} important refs. "
+        "If uncertain, put the best candidate in important rather than returning an empty group. "
+        "A ref may occur in more than one focus only when it directly supports both. "
+        "Omission means not_shortlisted, not a semantic noise judgment. "
+        "Never output a canonical chunk ID.\n"
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
-        "Judge every supplied chunk. A chunk is noise only when it is unrelated to every focus; "
+        "A chunk is noise only when it is unrelated to every focus; "
         "do not mark a complementary cross-document evidence chunk as noise merely because it is incomplete alone.\n\n"
         + EVAL_RUBRIC_BLOCK
     )
@@ -544,6 +644,7 @@ class SourceAgent:
             max_workers=workers,
             thread_name_prefix=f"src-{self.source or 'unknown'}",
         )
+        self._inflight_futures: set[asyncio.Future[Any]] = set()
 
     async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """``asyncio.to_thread`` 的源专属版本：路由到 ``self._executor``。
@@ -554,7 +655,20 @@ class SourceAgent:
         loop = asyncio.get_event_loop()
         ctx = contextvars.copy_context()
         func_call = functools.partial(ctx.run, fn, *args, **kwargs)
-        return await loop.run_in_executor(self._executor, func_call)
+        future = loop.run_in_executor(self._executor, func_call)
+        self._inflight_futures.add(future)
+        future.add_done_callback(self._inflight_futures.discard)
+        return await asyncio.shield(future)
+
+    async def drain_inflight(self, timeout_s: float = 10.0) -> int:
+        """Bound cancellation drain for synchronous source I/O."""
+        pending = [future for future in self._inflight_futures if not future.done()]
+        if not pending:
+            return 0
+        _done, remaining = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        # Do not cancel executor futures: cancelling the asyncio facade does
+        # not stop the underlying thread and would falsely mark it quiescent.
+        return len(remaining)
 
     async def aclose(self) -> None:
         """退出时调用，释放线程池资源。"""
@@ -576,13 +690,18 @@ class SourceAgent:
         return None
 
     def _build_partial_eval_agent(self) -> LlmAgent:
+        shortlist = self.cfg.eval_shortlist
         return LlmAgent(
             name=f"{self.source}_partial_eval",
             model=build_llm_model(),
-            instruction=("You are a retrieval evidence evaluator. "
-                         "Return a judgment for every supplied chunk and compact per-focus ledgers.\n\n"
+            instruction=("You are a retrieval evidence admission evaluator. "
+                         "Return only focus-grouped critical/important shortlist refs and compact per-focus ledgers; "
+                         "do not emit a judgment for every supplied chunk.\n\n"
                          + EVAL_RUBRIC_BLOCK),
-            output_schema=build_partial_eval_model(),
+            output_schema=build_partial_eval_model(
+                max_critical_per_focus=shortlist.max_critical_per_focus,
+                max_important_per_focus=shortlist.max_important_per_focus,
+            ),
             generate_content_config=AGENT_CFG_EVAL_ONLY,
         )
     async def execute_sub_query(
@@ -747,6 +866,9 @@ class SourceAgent:
           走老 plan_only_LLM 局部修复
         两个 kwarg 均不传时，行为与 v1 完全一致（_plan 内部走老 plan_only_LLM）。
         """
+        still_running = await self.drain_inflight(timeout_s=0.0)
+        if still_running:
+            raise RuntimeError(f"source_not_quiescent:{still_running}")
         start = asyncio.get_event_loop().time()
         chunk_pool: Dict[str, ChunkEntry] = {}
         # 注入 focus 回查表，供 execute_sub_query 读 focus 的完整字段（time_hint/entity_hint 等）
@@ -798,16 +920,24 @@ class SourceAgent:
         # tiers only; evidence text remains in the answer path.
         result.retrieval_trace = list(self._trace_events) + [
             {
+                "event": "source_retained",
                 "source": self.source,
                 "chunk_id": chunk.id,
                 "tier": chunk.tier,
                 "focuses": sorted(chunk.target_focuses),
+                "query_ids": list((chunk.metadata or {}).get("sub_query_ids") or
+                                  (chunk.metadata or {}).get("selected_sub_query_ids") or []),
+                "route": str((chunk.metadata or {}).get("route") or
+                             (chunk.metadata or {}).get("route_hint") or ""),
                 "heading": str(chunk.metadata.get("heading_path", "")),
                 "range": str(chunk.metadata.get("range", "")),
                 "document": str(chunk.metadata.get("source_name", chunk.metadata.get("title", ""))),
             }
             for chunk in result.top_chunks
         ]
+        observer = current_role_funnel()
+        if observer is not None:
+            observer.observe_chunks("source_retained", result.top_chunks)
         return result
 
     # ── 单 loop 路径：plan(pre_planned + replan / 老 LLM) → execute → eval_only ─
@@ -964,6 +1094,7 @@ class SourceAgent:
                 "replan_query_count": len(pe_out.get("replan_queries") or []),
                 "active_chunk_count": len(chunk_pool), "removed_noise_count": len(removed),
                 "focus_decisions": list(pe_out.get("focus_decisions") or []),
+                "contract_normalizations": list(pe_out.get("contract_normalizations") or []),
             })
             logger.info(
                 "[%s] loop=%d plan_eval raw=%s enforced=%s",
@@ -1021,6 +1152,12 @@ class SourceAgent:
                 "chunk_id": chunk_id, "tier": judgment.get("tier"),
                 "answered_focuses": list(judgment.get("answered_focuses") or []),
             } for chunk_id, judgment in tiers_map.items())
+            observer = current_role_funnel()
+            if observer is not None:
+                observer.observe_chunks(
+                    "plan_eval", [chunk_pool[cid] for cid in tiers_map if cid in chunk_pool],
+                    tier_by_id={cid: str(item.get("tier") or "") for cid, item in tiers_map.items()},
+                )
             # ``top_k`` can contain noise as an evaluation footprint.  Never
             # let it reach user-facing assembly, and record the exclusion
             # instead of deleting it first and later calling it hallucinated.
@@ -1101,6 +1238,12 @@ class SourceAgent:
             "tier": judgment.get("tier"),
             "answered_focuses": list(judgment.get("answered_focuses") or []),
         } for chunk_id, judgment in tiers_map.items())
+        observer = current_role_funnel()
+        if observer is not None:
+            observer.observe_chunks(
+                "plan_eval", [chunk_pool[cid] for cid in tiers_map if cid in chunk_pool],
+                tier_by_id={cid: str(item.get("tier") or "") for cid, item in tiers_map.items()},
+            )
         chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
         # Eval-only may deliberately put a weak focus's best noise candidate
         # in top_k as an evaluation footprint.  The footprint already exists
@@ -1191,6 +1334,11 @@ class SourceAgent:
             "scores": dict(chunk.metadata.get("rerank_scores") or {}), "retained": chunk.id in keep_ids,
             "focuses": sorted(chunk.target_focuses),
         } for chunk in pending)
+        observer = current_role_funnel()
+        if observer is not None:
+            observer.observe_chunks(
+                "rerank_retained", [chunk for chunk in pending if chunk.id in keep_ids],
+            )
         self._trace_events.append({"event": "rerank", "source": self.source, "loop": loop_n,
                                    "groups": group_events, "removed_count": len(removed),
                                    "retained_count": len(pending) - len(removed)})
@@ -1226,29 +1374,110 @@ class SourceAgent:
         # Chunks submitted during I/O are already represented by their pending
         # judgments.  Only unsent chunks need a synchronous safeguard here.
         unsent = [c for cid, c in chunk_pool.items() if cid not in self._partial_submitted_ids]
-        batches = split_chunks(unsent, ContextBudget())
-        # Once streaming has already split the pool, evaluate the trailing
-        # buffer too so global plan_eval never receives a mixed 600k+ tail.
-        if len(batches) <= 1 and not self._partial_submitted_ids:
+        shortlist_cfg = self.cfg.eval_shortlist
+        if not shortlist_cfg.enabled:
             return
+        # Admission is a pool-level decision, not a side effect of provider
+        # batch size.  A 59-chunk pool must not silently skip shortlist merely
+        # because it fits into one 80-chunk request.
+        if len(unsent) < shortlist_cfg.trigger_chunk_count and not self._partial_submitted_ids:
+            return
+        batches = split_chunks(
+            unsent,
+            ContextBudget(max_chunks_per_batch=shortlist_cfg.batch_chunk_limit),
+        )
         logger.info("[%s] loop=%d partial-eval batches=%d chunks=%d", self.source, loop_n,
                     len(batches), len(unsent))
 
-        async def _one(index: int, batch: List[ChunkEntry]) -> Dict[str, Any]:
-            prompt = _build_partial_eval_prompt(focuses, batch, f"{self.source}:loop{loop_n}:batch{index}")
-            return await _run_llm_agent(self.partial_eval, prompt)
+        async def _one(label: str, batch: List[ChunkEntry], depth: int = 0) -> Dict[str, Any]:
+            registry = ChunkRefRegistry.build(batch)
+            prompt = _build_partial_eval_prompt(
+                focuses, batch, f"{self.source}:loop{loop_n}:batch{label}", refs=registry,
+                max_critical_per_focus=shortlist_cfg.max_critical_per_focus,
+                max_important_per_focus=shortlist_cfg.max_important_per_focus,
+            )
+            output = await _run_llm_agent(self.partial_eval, prompt)
+            resolved, malformed = registry.resolve_eval_output(output)
+            focus_shortlists = list(resolved.get("focus_shortlists") or [])
+            self._trace_events.append({
+                "event": "partial_eval_response_shape", "source": self.source,
+                "batch_id": f"{self.source}:loop{loop_n}:batch{label}",
+                "focus_group_count": len(focus_shortlists),
+                "nonempty_focus_group_count": sum(1 for item in focus_shortlists if item.get("admission_chunk_ids")),
+                "selected_ref_count": sum(len(set(item.get("admission_chunk_ids") or [])) for item in focus_shortlists),
+                "ledger_count": len(resolved.get("focus_ledger") or []),
+            })
+            if malformed:
+                self._trace_events.append({
+                    "event": "partial_eval_contract_error", "source": self.source,
+                    "batch_id": f"{self.source}:loop{loop_n}:batch{label}",
+                    "malformed_chunk_refs": malformed,
+                })
+            resolved["_submitted_chunk_ids"] = [chunk.id for chunk in batch]
+            return resolved
 
-        outputs = await asyncio.gather(*[_one(i, batch) for i, batch in enumerate(batches, 1)])
-        removed: set[str] = set()
+        outputs = await asyncio.gather(*[
+            _one(str(i), batch) for i, batch in enumerate(batches, 1)
+        ])
+        submitted: set[str] = set()
+        shortlisted: set[str] = set()
         for output in outputs:
+            submitted.update(output.get("_submitted_chunk_ids") or [])
             for cid, judgment in tiers_list_to_map(output.get("tiers")).items():
-                if judgment.get("tier") == "noise" and not judgment.get("answered_focuses"):
-                    removed.add(cid)
+                shortlisted.add(cid)
+                self._trace_events.append({
+                    "event": "judgment", "source": self.source, "phase": "partial_eval",
+                    "chunk_id": cid, "tier": judgment.get("tier"),
+                    "answered_focuses": list(judgment.get("answered_focuses") or []),
+                })
+                chunk = chunk_pool.get(cid)
+                if chunk is not None:
+                    chunk.tier = judgment.get("tier")
+                    chunk.metadata["relevance"] = judgment.get("relevance")
+                    chunk.metadata["answered_focuses"] = list(
+                        judgment.get("answered_focuses") or []
+                    )
+                    chunk.metadata["angle_tag"] = judgment.get("angle_tag", "")
+                    chunk.metadata["shortlisted_for_focuses"] = list(
+                        judgment.get("answered_focuses") or []
+                    )
             for ledger in output.get("focus_ledger") or []:
                 self._partial_ledgers.append(dict(ledger))
+        # An empty compact response is an admission-model outage/underflow, not
+        # evidence that every supplied chunk is noise.  Fail open to the merged
+        # plan_eval and preserve an explicit trace marker.  Normal non-empty
+        # shortlist responses still remove only omitted entries as designed.
+        if submitted and not shortlisted:
+            self._trace_events.append({
+                "event": "partial_eval_no_selection", "source": self.source, "loop": loop_n,
+                "submitted_count": len(submitted), "action": "retain_for_plan_eval",
+            })
+            return
+        removed = submitted - shortlisted
         for cid in removed:
+            chunk = chunk_pool.get(cid)
+            if chunk is not None:
+                chunk.metadata["admission_status"] = "not_shortlisted"
             chunk_pool.pop(cid, None)
-        logger.info("[%s] loop=%d partial-eval removed_noise=%d retained=%d", self.source,
+        observer = current_role_funnel()
+        if observer is not None:
+            observer.observe_chunks(
+                "partial_shortlisted", [chunk_pool[cid] for cid in shortlisted if cid in chunk_pool],
+            )
+        self._trace_events.append({
+            "event": "partial_shortlist", "source": self.source, "loop": loop_n,
+            "submitted_count": len(submitted), "shortlisted_count": len(shortlisted),
+            "not_shortlisted_count": len(removed),
+            "trigger_chunk_count": shortlist_cfg.trigger_chunk_count,
+            "batch_chunk_limit": shortlist_cfg.batch_chunk_limit,
+            "focus_shortlists": [
+                {"focus_id": item.get("focus_id"),
+                 "critical_count": len(item.get("critical_chunk_ids") or []),
+                 "important_count": len(item.get("important_chunk_ids") or [])}
+                for output in outputs for item in (output.get("focus_shortlists") or [])
+            ],
+        })
+        logger.info("[%s] loop=%d partial-eval not_shortlisted=%d retained=%d", self.source,
                     loop_n, len(removed), len(chunk_pool))
 
     async def _offer_chunk_for_context_eval(
@@ -1258,12 +1487,23 @@ class SourceAgent:
         self._trace_events.append({
             "event": "read", "source": self.source, "chunk_id": entry.id,
             "focuses": sorted(entry.target_focuses),
+            "query_ids": list((entry.metadata or {}).get("sub_query_ids") or
+                              (entry.metadata or {}).get("selected_sub_query_ids") or []),
+            "route": str((entry.metadata or {}).get("route") or
+                         (entry.metadata or {}).get("route_hint") or ""),
             "document": str(entry.metadata.get("source_name", entry.metadata.get("title", ""))),
             "heading": str(entry.metadata.get("heading_path", "")),
             "range": str(entry.metadata.get("range", "")),
             "content_sha256": hashlib.sha256(entry.content.encode("utf-8")).hexdigest(),
             "content_chars": len(entry.content),
+            "preview_chars": len(entry.preview_content or ""),
+            "preview_fallback": not bool(entry.preview_content),
         })
+        observer = current_role_funnel()
+        if observer is not None:
+            # Gold anchors intentionally inspect full content; preview is only
+            # an LLM-eval budget surface and must never decide this match.
+            observer.observe_chunks("read", [entry])
         # Streaming partial-eval would otherwise see the pre-rerank pool.
         if self.cfg.rerank_enabled:
             return
@@ -1280,7 +1520,35 @@ class SourceAgent:
         batch_id = f"{self.source}:loop{loop_n}:stream{len(self._partial_pending_tasks)+1}"
 
         async def _evaluate() -> Dict[str, Any]:
-            return await _run_llm_agent(self.partial_eval, _build_partial_eval_prompt(focuses=list(self._current_focus_lookup.values()), chunks=batch, batch_id=batch_id))
+            registry = ChunkRefRegistry.build(batch)
+            output = await _run_llm_agent(
+                self.partial_eval,
+                _build_partial_eval_prompt(
+                    focuses=list(self._current_focus_lookup.values()),
+                    chunks=batch,
+                    batch_id=batch_id,
+                    refs=registry,
+                    max_critical_per_focus=self.cfg.eval_shortlist.max_critical_per_focus,
+                    max_important_per_focus=self.cfg.eval_shortlist.max_important_per_focus,
+                ),
+            )
+            resolved, malformed = registry.resolve_eval_output(output)
+            focus_shortlists = list(resolved.get("focus_shortlists") or [])
+            self._trace_events.append({
+                "event": "partial_eval_response_shape", "source": self.source,
+                "batch_id": batch_id,
+                "focus_group_count": len(focus_shortlists),
+                "nonempty_focus_group_count": sum(1 for item in focus_shortlists if item.get("admission_chunk_ids")),
+                "selected_ref_count": sum(len(set(item.get("admission_chunk_ids") or [])) for item in focus_shortlists),
+                "ledger_count": len(resolved.get("focus_ledger") or []),
+            })
+            if malformed:
+                self._trace_events.append({
+                    "event": "partial_eval_contract_error", "source": self.source,
+                    "batch_id": batch_id, "malformed_chunk_refs": malformed,
+                })
+            resolved["_submitted_chunk_ids"] = [chunk.id for chunk in batch]
+            return resolved
 
         self._partial_pending_tasks.append(asyncio.create_task(_evaluate(), name=batch_id))
         logger.info("[%s] scheduled partial-eval %s chunks=%d", self.source, batch_id, len(batch))
@@ -1294,9 +1562,24 @@ class SourceAgent:
             if isinstance(output, Exception):
                 logger.warning("[%s] partial-eval task failed: %s", self.source, output)
                 continue
+            submitted = set(output.get("_submitted_chunk_ids") or [])
+            selected = set(tiers_list_to_map(output.get("tiers")))
             for cid, judgment in tiers_list_to_map(output.get("tiers")).items():
-                if judgment.get("tier") == "noise" and not judgment.get("answered_focuses"):
-                    chunk_pool.pop(cid, None)
+                self._trace_events.append({
+                    "event": "judgment", "source": self.source, "phase": "partial_eval",
+                    "chunk_id": cid, "tier": judgment.get("tier"),
+                    "answered_focuses": list(judgment.get("answered_focuses") or []),
+                })
+                chunk = chunk_pool.get(cid)
+                if chunk is not None:
+                    chunk.tier = judgment.get("tier")
+                    chunk.metadata["relevance"] = judgment.get("relevance")
+                    chunk.metadata["answered_focuses"] = list(
+                        judgment.get("answered_focuses") or []
+                    )
+                    chunk.metadata["angle_tag"] = judgment.get("angle_tag", "")
+            for cid in submitted - selected:
+                chunk_pool.pop(cid, None)
             self._partial_ledgers.extend(dict(x) for x in (output.get("focus_ledger") or []))
 
     def _post_process_top_chunks(
@@ -1414,6 +1697,7 @@ class SourceAgent:
                 id=entry.id,
                 source=entry.source,
                 content=entry.content,
+                preview_content=entry.preview_content,
                 metadata=new_meta,
                 score=float(rel) if rel is not None else entry.score,
                 sub_query=entry.sub_query,
@@ -1504,6 +1788,7 @@ class SourceAgent:
                     id=c.id,
                     source=c.source,
                     content=c.content,
+                    preview_content=c.preview_content,
                     metadata=dict(c.metadata),
                     score=c.score,
                     sub_query=c.sub_query or sq.query,

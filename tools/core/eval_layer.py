@@ -555,12 +555,16 @@ class LlmEvalLayer:
                 id=c.id,
                 source=c.source,
                 content=c.content,
+                preview_content=c.preview_content,
                 metadata=updated_meta,
                 score=rel,          # 替换为 LLM 给出的连续 relevance 分
                 sub_query=c.sub_query,
                 target_focuses=set(c.target_focuses),
                 tier=c.tier,
             )
+            if c.tier not in {"critical", "important"}:
+                logger.info("LlmEvalLayer: excluded selected non-evidence chunk %s tier=%s", c.id, c.tier)
+                continue
             result.append(c)
             if len(result) >= top_k:
                 break

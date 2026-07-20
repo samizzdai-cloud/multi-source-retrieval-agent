@@ -1,12 +1,12 @@
 """飞书多格式检索编排器 (Dispatcher)
 
 职责：
-  1. Phase A — 文档搜索（始终执行）：MCP + Wiki doc → doc_pool
+  1. Phase A — 文档搜索（始终执行）：MCP-only → doc_pool
   2. Phase B — 表格搜索（条件启动）：Direct + Wiki table → sheet/bitable readers
   3. 合并各 reader 输出的 UnifiedChunk[] 返回给 RetrievalAgent
 
 搜索路由：
-  - 文档类(doc/docx): MCP + Wiki doc → 按 title 去重 → doc_pool
+  - 文档类(doc/docx): MCP-only → 按稳定 ID 去重 → doc_pool
   - 表格类(sheet/bitable): Direct API + Wiki table → TablePool → readers
   - 表格搜索仅在 query_type = "structured" 时启动
 
@@ -47,7 +47,7 @@ async def _exec_to_thread(
 
 from dotenv import load_dotenv
 
-from feishu_read_tool.search import search_feishu_docs, search_feishu_tables
+from feishu_read_tool.search import search_feishu_mcp_pure, search_feishu_tables
 from feishu_read_tool.pipeline_models import ChunkContentType
 from tools.core.models import UnifiedChunk
 from tools.core.bucket_selector import native_candidate_budget
@@ -62,6 +62,7 @@ TABLE_SEARCH_ROUTE_TOP_K_LITE = 3     # search budget is preset-independent
 # evaluation after I/O, never by a child/candidate selector.
 TABLE_NATIVE_ROUTE_TOP_K = 3                # 每个原生 API route 的 bounded-I/O cap
 TABLE_NATIVE_ROUTE_TOP_K_LITE = 3           # search budget is preset-independent
+TABLE_CHILD_READ_LIMIT = 3                  # one parent may expose hundreds of child tables
 
 # Time-filter widening: planner sets time_filter from user's date intent (e.g. "1月15日"
 # → ">2026-01-15"). But edit_time often doesn't reflect content time — narrow cutoff
@@ -596,11 +597,17 @@ async def search_and_select_feishu_doc_candidates(
     query_type = _normalize_query_type(query_type)
 
     try:
+        # Document recall has one authoritative route.  Wiki/Direct remain a
+        # structured-table concern; mixing Wiki documents here duplicated I/O
+        # and made route-level benchmark attribution ambiguous.
         result = await _exec_to_thread(
-            executor, search_feishu_docs,
-            query=query, count=page_size, uat=token, time_filter=time_filter, owner_ids=owner_ids,
+            executor, search_feishu_mcp_pure,
+            query=query, count=page_size, uat=token, time_filter=time_filter,
+            owner_ids=owner_ids,
         )
         doc_candidates = list(result.get("items", []) or [])
+        for candidate in doc_candidates:
+            candidate["search_route"] = "mcp_doc"
     except Exception as exc:
         logger.warning("feishu_retrieve primary doc search failed: %s", exc)
         doc_candidates = []
@@ -718,13 +725,19 @@ async def search_and_select_feishu_table_candidates(
     wiki_limit: int = TABLE_SEARCH_ROUTE_TOP_K,
     owner_ids: Optional[List[str]] = None,
     executor: Optional[concurrent.futures.Executor] = None,
+    child_rerank_enabled: bool = True,
+    child_rerank_model: str = "qwen3-rerank",
+    child_rerank_timeout_s: float = 5.0,
+    child_rerank_top_n: int = TABLE_CHILD_READ_LIMIT,
+    child_rerank_instruct: str = "",
 ) -> List[dict]:
-    """执行 Feishu table 搜索，按原始 API 顺序读取命中 parent 的全部子表。
+    """执行 Feishu table 搜索，并对命中 parent 做有界子表下钻。
 
     流程：
     1. 原 query 搜索并按 API 结果顺序去重
-    2. 在既有 page/route budget 内读取命中 parent 的全部子表结构
-    3. 返回 parent，表格 preview/full 构建负责后续上下文控制
+    2. 在既有 page/route budget 内读取命中 parent 的子表结构
+    3. child 数量大于 3 时，以 parent 为单位做一次 Qwen metadata rerank
+    4. 每个 parent 最多返回 ``TABLE_CHILD_READ_LIMIT`` 个 child 给 reader
 
     ``executor``: 源专属线程池；None 时走 asyncio 默认。
     """
@@ -801,22 +814,36 @@ async def search_and_select_feishu_table_candidates(
         )
         return []
 
-    # ── Step 3: 全局 child 原始顺序合并 ───────────────────────
-    # Preserve structural/API order. A matched parent contributes every child
-    # to its bounded read; table preview construction controls LLM context.
-    selected_child_cands = all_child_candidates
+    # ── Step 3: 按 parent 做 query-aware、fail-open 的硬边界选择 ──
+    from tools.core.table_child_rerank import select_table_children
 
-    # ── Step 4: 按 parent 分组，每个 parent 最多 per_parent_cap 个 child ──
-    # 按分数降序，超出 cap 的截断
-    children_selected_by_parent: Dict[str, List[dict]] = {}
-    for cc in selected_child_cands:
-        parent = parent_by_child_id.get(cc["id"])
-        if parent is None:
-            continue
-        parent_id = parent.get("id", "")
-        if parent_id not in children_selected_by_parent:
-            children_selected_by_parent[parent_id] = []
-        children_selected_by_parent[parent_id].append(cc)
+    async def _rank_parent_children(parent: dict, raw_children: List[dict]) -> tuple[str, List[dict], dict]:
+        parent_id = str(parent.get("id") or "")
+        doc_type = str(parent.get("doc_type", "") or "").upper()
+        child_candidates = (
+            _build_sheet_structure_candidates(parent, raw_children)
+            if doc_type == "SHEET"
+            else _build_bitable_structure_candidates(parent, raw_children)
+        )
+        selected_children, selection = await _exec_to_thread(
+            executor,
+            select_table_children,
+            query,
+            child_candidates,
+            top_n=child_rerank_top_n,
+            enabled=child_rerank_enabled,
+            model=child_rerank_model,
+            timeout_s=child_rerank_timeout_s,
+            instruct=child_rerank_instruct,
+        )
+        return parent_id, selected_children, selection
+
+    ranked_parents = await asyncio.gather(*[
+        _rank_parent_children(parent, children_by_parent.get(str(parent.get("id") or ""), []))
+        for parent, _ in fetch_results if str(parent.get("id") or "") in children_by_parent
+    ])
+    children_selected_by_parent = {parent_id: children for parent_id, children, _ in ranked_parents}
+    child_selection_by_parent = {parent_id: selection for parent_id, _, selection in ranked_parents}
 
     # ── Step 5: 组装 annotated parent 列表 ───────────────────
     selected: List[dict] = []
@@ -847,6 +874,12 @@ async def search_and_select_feishu_table_candidates(
         raw_children = children_by_parent.get(parent_id, [])
         annotated["table_structure_child_count"] = len(raw_children)
         annotated["table_selected_child_count"] = len(sel_children)
+        annotated["table_child_overflow_count"] = max(0, len(raw_children) - len(sel_children))
+        selection = child_selection_by_parent.get(parent_id, {"mode": "empty"})
+        annotated["table_child_selection_mode"] = str(selection.get("mode") or "empty")
+        annotated["table_child_rerank_called"] = bool(selection.get("provider_called", False))
+        annotated["table_child_rerank_error_type"] = str(selection.get("error_type") or "")
+        annotated["table_child_rerank_error"] = str(selection.get("error") or "")
 
         sel_ids = [cc["id"] for cc in sel_children if cc.get("id")]
         sel_titles = [cc.get("_child_title", "") for cc in sel_children]

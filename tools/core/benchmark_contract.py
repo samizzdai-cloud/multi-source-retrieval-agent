@@ -128,3 +128,31 @@ def evaluate_case(case: Mapping[str, object], *, direct_chunk_ids: Iterable[str]
     if replan_decision != expected_replan:
         failures.append(f"expected replan={expected_replan!r}, got {replan_decision!r}")
     return BenchmarkVerdict(str(case.get("id", "")), not failures, tuple(failures))
+
+
+def evaluate_resource_first_case(
+    case: Mapping[str, object], *, final_chunks: Iterable[Mapping[str, Any]], replan_decision: str,
+) -> BenchmarkVerdict:
+    """Evaluate a resource-first P3 gold chain against retrieve-only output.
+
+    The gold chain uses semantic anchors and roles. Resource refs/hashes audit
+    label provenance but are not assumed to equal runtime chunk IDs.
+    """
+    chain = [item for item in case.get("expected_chain", []) if isinstance(item, Mapping)]
+    roles = {str(item.get("role") or item.get("anchor")) for item in chain}
+    observed = _matching_roles(({"role": item.get("role"), "snippet": item.get("anchor")} for item in chain), final_chunks)
+    expected_outcome = str(case.get("expected_outcome") or "")
+    expected_control = str(case.get("expected_control") or "none")
+    failures: list[str] = []
+    if expected_outcome == "sufficient_evidence":
+        missing = roles - observed
+        if missing:
+            failures.append(f"final evidence missing required roles: {sorted(missing)}")
+    elif expected_outcome == "upstream_evidence_needed":
+        if replan_decision != "upstream_evidence_needed":
+            failures.append("expected upstream_evidence_needed was not selected")
+    else:
+        failures.append(f"unknown resource-first outcome: {expected_outcome!r}")
+    if expected_control != replan_decision:
+        failures.append(f"expected control={expected_control!r}, got {replan_decision!r}")
+    return BenchmarkVerdict(str(case.get("case_id", "")), not failures, tuple(failures))

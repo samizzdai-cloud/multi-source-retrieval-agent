@@ -74,13 +74,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     store = RetrievalGovernanceStore(args.store)
     if args.command == "status":
-        output = {"store": str(store.path), "shadow_report_count": store.count(), "profile_write": "disabled"}
+        output = {"store": str(store.path), "shadow_report_count": store.count(),
+                  "outbox": store.outbox_counts(), "profile_write": "disabled"}
     else:
+        drained = store.drain_outbox(limit=args.limit) if args.command == "run-once" and not args.report_json else 0
         cursor_path = Path(args.cursor)
         after_id = _read_cursor(cursor_path) if args.command == "run-once" else max(0, args.after_id)
         records = _load_records(args, store, after_id)
         deltas = extract_profile_deltas(records)
         output = _summary(records, deltas, after_id=after_id)
+        output["outbox_drained"] = drained
         if args.command == "run-once" and not args.report_json:
             _write_json(cursor_path, {"last_report_id": output["last_report_id"]})
 

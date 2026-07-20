@@ -237,6 +237,26 @@ class FeishuClient:
 
         return all_blocks
 
+    def get_document_title(self, document_id: str) -> str:
+        """Read the current Docx title from its metadata endpoint.
+
+        The blocks endpoint is content-only and Drive batch metadata can omit a
+        title for Docx tokens, so callers that export an auditable document
+        resource must use this endpoint rather than inventing a display name.
+        """
+        url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}"
+        headers = {"Authorization": f"Bearer {self.user_access_token}"}
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            raise APIError(response.status_code, f"HTTP error: {response.text}", "")
+        payload = response.json()
+        if payload.get("code") != 0:
+            raise APIError(payload.get("code"), payload.get("msg", "unknown error"), "")
+        title = str((payload.get("data") or {}).get("document", {}).get("title") or "").strip()
+        if not title:
+            raise APIError(0, "document metadata did not contain title", "")
+        return title
+
     def list_folder_files(self, folder_token: str, page_size: int = 200) -> List[Dict]:
         """获取文件夹当前层级的所有文件条目（自动分页）
 

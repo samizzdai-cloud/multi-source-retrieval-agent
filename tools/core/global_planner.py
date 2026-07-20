@@ -182,6 +182,7 @@ def _build_prompt(
     cfg: GlobalPlannerConfig,
     bailian_catalog: Optional[BailianIndexCatalog],
     session_context: str = "",
+    profile_context: str = "",
 ) -> str:
     today = date.today()
     now_str = today.isoformat()
@@ -215,6 +216,10 @@ def _build_prompt(
 user_query：「{query}」
 current_date：{now_str}（"今年" = {today.year} 年；focus 中的"今年/本年/this year" 必须替换为实际年份）
 session_context：{session_context or "无"}
+
+## Profile query vocabulary（仅候选词，不是证据）
+
+{profile_context or "无"}
 
 ## 可用检索源
 
@@ -288,30 +293,37 @@ _LITERAL_TERMS = ("新品", "老品", "UTM", "联盟", "GMV", "CVR", "ROAS", "CP
 _REGIONS = ("新加坡", "日本", "美国", "英国", "德国", "法国", "欧洲", "中国")
 
 
-def _semantic_contract_holds(original_query: str, focus: str, sub_queries: List[PlannedSubQuery]) -> bool:
-    """Cheap lexical guard: reject topic drift before source execution.
+def _semantic_contract_warnings(
+    original_query: str, focuses: List[PlannedFocus],
+) -> List[str]:
+    """Return plan-level anchor warnings without deleting executable work.
 
-    This deliberately checks only unambiguous user constraints.  It does not
-    try to infer business facts or replace the LLM's answer-task decomposition.
+    Anchors are expected across the union of focuses and queries.  Requiring
+    every focus to repeat every global entity/date/diagnostic term caused valid
+    complementary evidence angles to be discarded and produced empty dispatch.
     """
-    combined = " ".join([focus] + [sq.query for sq in sub_queries]).casefold()
+    combined = " ".join(
+        [focus.focus_content for focus in focuses]
+        + [sq.query for focus in focuses for sq in focus.sub_queries]
+    ).casefold()
+    warnings: List[str] = []
     for token in re.findall(r"\b[A-Z][A-Z0-9+._-]{1,}\b", original_query):
         if token.casefold() not in combined:
-            return False
+            warnings.append(f"missing_literal:{token}")
     for token in _LITERAL_TERMS + _REGIONS:
         if token in original_query and token.casefold() not in combined:
-            return False
+            warnings.append(f"missing_literal:{token}")
     if any(term in original_query for term in _DIAGNOSTIC_TERMS):
         if not any(term in combined for term in _DIAGNOSTIC_TERMS):
-            return False
+            warnings.append("missing_diagnostic_intent")
     if any(term in original_query for term in _FORECAST_TERMS):
         if not any(term in combined for term in _FORECAST_TERMS):
-            return False
+            warnings.append("missing_forecast_intent")
     compact_combined = re.sub(r"\s+", "", combined)
     for token in re.findall(r"\d{1,2}[./-]\d{1,2}|\d{4}[-/]\d{1,2}|\d+月|Q[1-4]", original_query, re.I):
         if re.sub(r"\s+", "", token.casefold()) not in compact_combined:
-            return False
-    return True
+            warnings.append(f"missing_period:{token}")
+    return list(dict.fromkeys(warnings))
 
 
 def _parse_global_plan(
@@ -344,9 +356,6 @@ def _parse_global_plan(
             if psq is not None and key not in seen_source_queries:
                 sub_queries.append(psq)
                 seen_source_queries.add(key)
-        if not _semantic_contract_holds(original_query, focus_content, sub_queries):
-            logger.warning("global_planner dropped semantic-drift focus=%r", focus_content[:80])
-            continue
         out.append(
             PlannedFocus(focus_id=focus_id, focus_content=focus_content, sub_queries=sub_queries)
         )
@@ -354,7 +363,14 @@ def _parse_global_plan(
     if not out:
         raise PlannerFailure(reason="empty_focuses", detail="all focuses dropped post-validate")
 
-    return GlobalPlan(original_query=original_query, focuses=out)
+    warnings = _semantic_contract_warnings(original_query, out)
+    if warnings:
+        logger.warning("global_planner plan-level anchor warnings=%s", warnings)
+    return GlobalPlan(
+        original_query=original_query,
+        focuses=out,
+        validation_warnings=warnings,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -366,6 +382,7 @@ def plan_global(
     cfg: GlobalPlannerConfig,
     bailian_catalog: Optional[BailianIndexCatalog] = None,
     session_context: str = "",
+    profile_context: str = "",
 ) -> GlobalPlan:
     """一次 LLM 调用产 ``GlobalPlan``。失败抛 ``PlannerFailure``。
 
@@ -387,6 +404,7 @@ def plan_global(
         cfg=cfg,
         bailian_catalog=bailian_catalog,
         session_context=session_context,
+        profile_context=profile_context,
     )
 
     started = time.perf_counter()

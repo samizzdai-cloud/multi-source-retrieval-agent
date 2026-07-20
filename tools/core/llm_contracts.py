@@ -254,6 +254,14 @@ class FocusEvidenceLedger(BaseModel):
     remaining_gap: str = ""
 
 
+class FocusShortlist(BaseModel):
+    """Request-local shortlist for one focus in one partial-eval batch."""
+    focus_id: str
+    admission_chunk_ids: List[str] = Field(default_factory=list)
+    critical_chunk_ids: List[str] = Field(default_factory=list)
+    important_chunk_ids: List[str] = Field(default_factory=list)
+
+
 class FocusReplanDecision(BaseModel):
     """Per-focus plan-eval conclusion retained in the compact trace."""
     focus_id: str
@@ -314,12 +322,38 @@ def build_eval_only_model(source_top_k: int) -> Type[BaseModel]:
     )
 
 
-def build_partial_eval_model(max_chunks: int = 2000) -> Type[BaseModel]:
-    """Judges every chunk in one context batch; deliberately has no top-K."""
+def build_partial_eval_model(
+    max_chunks: int = 2000,
+    max_critical_per_focus: int = 6,
+    max_important_per_focus: int = 12,
+) -> Type[BaseModel]:
+    """Compact evidence shortlist for one context batch; no final top-K.
+
+    Repeating one object for every chunk consumes more output than the actual
+    decision.  Omitted refs mean not shortlisted, not a semantic noise verdict;
+    final tier and gap remain the responsibility of the merged plan_eval.
+    """
+    focus_shortlist_model = create_model(  # type: ignore[call-overload]
+        f"FocusShortlistC{max_critical_per_focus}I{max_important_per_focus}",
+        focus_id=(str, Field(...)),
+        admission_chunk_ids=(
+            List[str], Field(..., min_length=1,
+                             max_length=max_critical_per_focus + max_important_per_focus),
+        ),
+        critical_chunk_ids=(
+            List[str], Field(default_factory=list, max_length=max_critical_per_focus),
+        ),
+        important_chunk_ids=(
+            List[str], Field(default_factory=list, max_length=max_important_per_focus),
+        ),
+    )
     return create_model(  # type: ignore[call-overload]
         f"PartialEvalOutputK{max_chunks}",
-        tiers=(List[TierAssignment], Field(..., max_length=max_chunks,
-              description="judgment for every supplied chunk; do not omit complementary evidence")),
+        focus_shortlists=(
+            List[focus_shortlist_model],  # type: ignore[valid-type]
+            Field(..., max_length=max_chunks,
+                  description="one compact critical/important shortlist per focus"),
+        ),
         focus_ledger=(List[FocusEvidenceLedger], Field(default_factory=list,
               description="batch-local coverage and remaining gap per focus")),
     )
@@ -371,7 +405,65 @@ def validate_plan_eval_output(payload: dict) -> dict:
     elif decision == "stop":
         payload["top_k_chunk_ids"] = payload.get("top_k_chunk_ids") or []
         payload["tiers"] = payload.get("tiers") or []
-    payload["focus_decisions"] = payload.get("focus_decisions") or []
+    normalized_decisions = []
+    contract_normalizations = []
+    upstream_phrases = (
+        "上游数据", "上游证据", "原始数据", "结构化原始", "定量证据",
+        "further upstream data", "upstream evidence", "raw data",
+        "no chunks provide", "no evidence provides",
+    )
+    missing_markers = (
+        "缺乏", "缺失", "不足", "无法评估", "没有", "未提供",
+        "missing", "insufficient", "lack", "without",
+    )
+    evidence_markers = (
+        "定量", "销量", "转化率", "广告", "热力图", "漏斗", "库存", "渠道",
+        "quantitative", "sales", "conversion", "ads", "heatmap", "funnel",
+        "inventory", "channel", "performance data", "impact evidence",
+    )
+    for raw in payload.get("focus_decisions") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        status = str(item.get("status") or "").strip().lower()
+        raw_status = status
+        if status in {"partially_covered", "partial", "evidence_gap"}:
+            item["status"] = "gap"
+        elif status not in {"covered", "gap", "insufficient"}:
+            item["status"] = "insufficient"
+        gap_type = str(item.get("gap_type") or "none").strip().lower()
+        raw_gap_type = gap_type
+        reason = str(item.get("reason") or "").casefold()
+        explicit_upstream_gap = (
+            any(marker.casefold() in reason for marker in upstream_phrases)
+            or (
+                any(marker.casefold() in reason for marker in missing_markers)
+                and any(marker.casefold() in reason for marker in evidence_markers)
+            )
+        )
+        if item["status"] == "covered" and explicit_upstream_gap:
+            item["status"] = "gap"
+        if gap_type not in {"none", "upstream_evidence_needed", "query_refinement"}:
+            gap_type = (
+                "upstream_evidence_needed"
+                if explicit_upstream_gap
+                else "query_refinement"
+            )
+        if item["status"] != "covered" and gap_type == "none" and explicit_upstream_gap:
+            gap_type = "upstream_evidence_needed"
+        item["gap_type"] = gap_type
+        if raw_status != item["status"] or raw_gap_type != gap_type:
+            contract_normalizations.append({
+                "focus_id": str(item.get("focus_id") or ""),
+                "raw_status": raw_status,
+                "normalized_status": item["status"],
+                "raw_gap_type": raw_gap_type,
+                "normalized_gap_type": gap_type,
+                "reason": "provider_enum_or_semantic_contradiction",
+            })
+        normalized_decisions.append(item)
+    payload["focus_decisions"] = normalized_decisions
+    payload["contract_normalizations"] = contract_normalizations
     return payload
 
 

@@ -54,6 +54,8 @@ from tools.core.final_assembler import (
     assemble_final_chunks,
     render_final_payload,
 )
+from tools.core.evidence_role_funnel import current as current_role_funnel
+from tools.core.global_coverage import snapshot_global_coverage
 
 
 logger = logging.getLogger(__name__)
@@ -136,6 +138,7 @@ def _prepare_plan(
     query: str,
     available_sources: List[str],
     config: RetrieveConfig,
+    resolution_id: str = "",
 ) -> NormalizedPlan:
     """v2.2 主入口：global_planner 直出 GlobalPlan → runner 校验/转译 → NormalizedPlan。
 
@@ -148,13 +151,19 @@ def _prepare_plan(
     """
     gp_cfg = config.global_planner
     catalog = config.bailian_catalog
-    # Profile is intentionally a bounded query-candidate hint, never evidence.
-    profile_context = GTMProfileRepository().build_pack(query).prompt_block()
+    profile_resolution = GTMProfileRepository().resolve(
+        query, config.profile_rerank, resolution_id=resolution_id,
+    )
+
+    def attach(plan: NormalizedPlan) -> NormalizedPlan:
+        plan.profile_resolution = profile_resolution
+        plan.validation_warnings.extend(profile_resolution.warnings)
+        return plan
 
     # 路径 1：硬开关
     if gp_cfg.force_v1:
         logger.info("global_planner: force_v1=True → using v1 path")
-        return _normalize_v1_to_plan(query, available_sources, catalog)
+        return attach(_normalize_v1_to_plan(query, available_sources, catalog))
 
     # 路径 2：v2 LLM
     try:
@@ -163,7 +172,8 @@ def _prepare_plan(
             enabled_sources=available_sources,
             cfg=gp_cfg,
             bailian_catalog=catalog,
-            session_context=profile_context,
+            session_context="",
+            profile_context=profile_resolution.planner_prompt_block(),
         )
     except PlannerFailure as e:
         if gp_cfg.fallback_to_v1:
@@ -171,7 +181,7 @@ def _prepare_plan(
                 "global_planner v2 failed (%s) → safe single-focus fallback",
                 e,
             )
-            return _safe_single_focus_plan(query, available_sources)
+            return attach(_safe_single_focus_plan(query, available_sources))
         # 不允许回退：抛出整盘失败，retrieve_agent 上层会做兜底（单 focus 广播）
         raise
 
@@ -187,13 +197,13 @@ def _prepare_plan(
                 "(rejected=%d) → fallback_to_v1",
                 normalized.rejected_count,
             )
-            return _safe_single_focus_plan(query, available_sources)
+            return attach(_safe_single_focus_plan(query, available_sources))
         logger.warning(
             "global_planner v2 produced 0 pre_planned sub_queries; fallback disabled, "
             "will rely on per-focus replan via plan_only_LLM"
         )
 
-    return normalized
+    return attach(normalized)
 
 
 def _safe_single_focus_plan(query: str, available_sources: List[str]) -> NormalizedPlan:
@@ -379,6 +389,7 @@ async def _dispatch_sources(
     focus_board: Optional[FocusBoard] = None,
     pre_planned_by_source: Optional[Dict[str, List[SubQuery]]] = None,
     replan_needed: Optional[Dict[str, List[Focus]]] = None,
+    profile_resolution: object | None = None,
 ) -> List[SourceAgentResult]:
     """按 focus.targets 把 focuses 路由到对应 SourceAgent 后并发执行。
 
@@ -413,6 +424,7 @@ async def _dispatch_sources(
         # P4: 把 focus_board 注入 source_agent（plan_eval focus-aware 用）
         if focus_board is not None:
             setattr(agent, "_focus_board", focus_board)
+        setattr(agent, "_profile_resolution", profile_resolution)
         logger.info(
             "[%s] dispatch: focuses=%d pre_planned_sq=%d replan_focuses=%d",
             name, len(fs), len(pre_planned or []), len(replan or []),
@@ -428,13 +440,26 @@ async def _dispatch_sources(
             )
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
-            return _timeout_result(name, agent, timeout_s)
+            remaining = await agent.drain_inflight(timeout_s=10.0)
+            result = _timeout_result(name, agent, timeout_s)
+            result.retrieval_trace.append({
+                "event": "cancel_drain", "source": name,
+                "remaining_sync_io": remaining, "drain_timeout_s": 10.0,
+            })
+            return result
         except Exception as e:
             logger.exception("[%s] failed: %s", name, e)
-            return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s)
+            return SourceAgentResult(
+                source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s,
+                retrieval_trace=[{
+                    "event": "source_error", "source": name,
+                    "error_type": type(e).__name__, "error": str(e)[:160],
+                }],
+            )
         finally:
             if focus_board is not None:
                 setattr(agent, "_focus_board", None)
+            setattr(agent, "_profile_resolution", None)
         # P4: 完成即上报到 board（即便 0 chunks 也走，方便 contributors 记录）
         if focus_board is not None and result.top_chunks:
             try:
@@ -463,11 +488,18 @@ class RetrieveAgent(BaseAgent):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    async def aclose(self) -> None:
+        """Drain request I/O and release every source-owned executor."""
+        for source in self.sources.values():
+            await source.drain_inflight(timeout_s=10.0)
+            await source.aclose()
+
     @override
     async def _run_async_impl(
         self, ctx: InvocationContext,
     ) -> AsyncGenerator[Event, None]:
         start = time.monotonic()
+        resolution_id = f"res_{uuid.uuid4().hex}"
 
         # 0. 读 query
         query = ""
@@ -503,6 +535,7 @@ class RetrieveAgent(BaseAgent):
             query,
             enabled,
             self.config,
+            resolution_id,
         )
         focuses = normalized.focuses
         if not focuses:
@@ -539,24 +572,52 @@ class RetrieveAgent(BaseAgent):
             focus_board=focus_board,
             pre_planned_by_source=normalized.pre_planned_by_source,
             replan_needed=normalized.replan_needed,
+            profile_resolution=normalized.profile_resolution,
         )
-        # Governance receives body-free trace events only.  Scheduling it after
-        # source dispatch keeps answer latency independent from profile learning.
+
+        planner_trace = [{
+            "event": "planner_validation_warning",
+            "resolution_id": resolution_id,
+            "warning": warning,
+        } for warning in normalized.validation_warnings]
+        profile_resolution = normalized.profile_resolution
+        if profile_resolution is not None:
+            planner_trace.append({
+                "event": "profile_resolution",
+                "resolution_id": resolution_id,
+                "snapshot_id": profile_resolution.snapshot_id,
+                "registry_snapshot_id": profile_resolution.registry_snapshot_id,
+                "registry_state": profile_resolution.registry_state,
+                "registry_included_count": profile_resolution.registry_included_count,
+                "registry_excluded_count": profile_resolution.registry_excluded_count,
+                "exact_entity_count": len(profile_resolution.exact_entity_matches),
+                "exact_expression_count": len(profile_resolution.exact_expression_matches),
+                "semantic_candidate_count": len(profile_resolution.semantic_expression_candidates),
+                "planner_entity_count": len(profile_resolution.planner_pack.entities),
+                "planner_expression_count": len(profile_resolution.planner_pack.expressions),
+            })
+        for focus in focuses:
+            focus_queries = [
+                sq for rows in normalized.pre_planned_by_source.values()
+                for sq in rows if sq.target_focus == focus.focus_id
+            ]
+            planner_trace.append({
+                "event": "planner_focus", "resolution_id": resolution_id,
+                "focus": focus.focus_id, "objective": focus.text,
+                "targets": list(focus.targets),
+                "query_ids": [sq.sub_query_id for sq in focus_queries],
+            })
+        operational_events = planner_trace + [
+            {**event, "resolution_id": event.get("resolution_id") or resolution_id}
+            for result in per_source
+            for event in (result.retrieval_trace or [])
+            if isinstance(event, dict)
+        ]
+
+        # Governance is projected only after final assembly so Delta extraction
+        # can join fallback/read/judgment to retained evidence.
         if self.profile_governance is None:
             self.profile_governance = ProfileGovernanceAgent()
-        governance_task = asyncio.create_task(self.profile_governance.observe(per_source))
-        def _log_governance_failure(task: asyncio.Task) -> None:
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                # Invocation shutdown may cancel this non-critical shadow task.
-                # It must never surface as an unhandled callback exception.
-                return
-            except Exception as exc:
-                logger.warning("GTM profile governance shadow task failed: %s", exc)
-        governance_task.add_done_callback(_log_governance_failure)
-        shadow_trace = build_shadow_report(per_source)
-        logger.info("GTM profile shadow trace events=%s", shadow_trace["event_counts"])
         # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
         for fid in focus_board.unsatisfied_focus_ids():
             focus_board.mark_terminal(fid, status="noise_only")
@@ -575,11 +636,17 @@ class RetrieveAgent(BaseAgent):
         # 3. Merge
         merge_started = time.perf_counter()
         merged = _merge_across_sources(per_source)
+        observer = current_role_funnel()
+        if observer is not None:
+            observer.observe_chunks("global_retained", merged)
         logger.info(
             "TIMING retrieve.merge merged=%d ms=%.1f",
             len(merged),
             (time.perf_counter() - merge_started) * 1000.0,
         )
+        operational_events.extend(snapshot_global_coverage(
+            merged, focuses, self.config.focus_quota, stage="merged_pre_global_eval",
+        ))
         yield self._make_text_event(
             ctx,
             f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
@@ -631,12 +698,46 @@ class RetrieveAgent(BaseAgent):
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log_observation(merged, per_source, focuses, elapsed_ms)
         payload = render_final_payload(query, selected, focuses)
+        operational_events.extend(snapshot_global_coverage(
+            selected, focuses, self.config.focus_quota, stage="final_post_global_eval",
+        ))
+        if observer is not None:
+            observer.observe_chunks("final", selected)
+        operational_events.extend({
+            "event": "final_retained", "resolution_id": resolution_id,
+            "chunk_id": chunk.id, "tier": chunk.tier,
+            "focuses": sorted(chunk.target_focuses),
+            "query_ids": list((chunk.metadata or {}).get("sub_query_ids") or
+                              (chunk.metadata or {}).get("selected_sub_query_ids") or []),
+            "route": str((chunk.metadata or {}).get("route") or
+                         (chunk.metadata or {}).get("route_hint") or ""),
+        } for chunk in selected if chunk.tier in {"critical", "important"})
+        try:
+            shadow_trace = await asyncio.wait_for(
+                self.profile_governance.observe_events(operational_events), timeout=0.1,
+            )
+        except Exception as exc:
+            logger.warning("GTM profile governance outbox append skipped/late: %s", exc)
+            operational_events.append({
+                "event": "governance_outbox_error", "resolution_id": resolution_id,
+                "error_type": type(exc).__name__,
+            })
+            shadow_trace = build_shadow_report(per_source)
+        logger.info("GTM profile shadow trace events=%s", shadow_trace["event_counts"])
+        operational_trace = {
+            "mode": "operational", "resolution_id": resolution_id,
+            "events": operational_events,
+            "governance_projection": {
+                "mode": shadow_trace.get("mode"),
+                "event_counts": shadow_trace.get("event_counts", {}),
+            },
+        }
         logger.info(
             "RetrieveAgent: done in %dms, picked=%d / merged=%d (cap=%d)",
             elapsed_ms, len(selected), len(merged), final_top_k,
         )
 
-        yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms, retrieval_trace=shadow_trace)
+        yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms, retrieval_trace=operational_trace)
 
     def _make_text_event(self, ctx: InvocationContext, text: str) -> Event:
         return Event(

@@ -269,14 +269,18 @@ class SheetPool:
         Returns:
             file_id → 合并后的 sheet titles 列表（去重）
         """
-        merged: Dict[str, Set[str]] = {}
+        merged: Dict[str, List[str]] = {}
         for sel in selections:
             if sel.file_id not in merged:
-                merged[sel.file_id] = set()
-            merged[sel.file_id].update(sel.selected_titles)
+                merged[sel.file_id] = []
+            for title in sel.selected_titles:
+                if title and title not in merged[sel.file_id]:
+                    merged[sel.file_id].append(title)
 
         # 控制总量：单个 spreadsheet 最多 200 ranges（batchGet 限制）
         result: Dict[str, List[str]] = {}
         for fid, titles in merged.items():
-            result[fid] = list(titles)[:200]
+            # Every selection for a file is produced by the same per-parent
+            # rerank result, so the merged read boundary stays at top3.
+            result[fid] = list(titles)[:3]
         return result

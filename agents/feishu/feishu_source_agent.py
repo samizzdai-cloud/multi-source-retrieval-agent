@@ -21,6 +21,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 from tools.feishu.feishu_retrieve import (
+    TABLE_CHILD_READ_LIMIT,
     search_and_read_feishu_tables,
     search_and_select_feishu_doc_candidates,
     search_and_select_feishu_table_candidates,
@@ -30,6 +31,7 @@ from tools.core.models import ChunkEntry, SourceAgentConfig, UnifiedChunk
 from tools.core.chunk_preview import build_chunk_preview
 from tools.core.source_profiles import get_profile
 from tools.core.source_query_config import SOURCE_QUERY_RULES
+from tools.core.evidence_role_funnel import current as current_role_funnel
 
 from agents.source_agent_base import Focus, SourceAgent, SubQuery
 from google.adk.agents.llm_agent import LlmAgent
@@ -41,6 +43,13 @@ _FEISHU_ID_PREFIX = "feishu:"
 
 def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
+
+
+def _metadata_overlap(query: str, value: str) -> float:
+    """Cheap audit signal only; never a parent filtering decision."""
+    q = {item.casefold() for item in re.findall(r"[\w.-]+", query or "", flags=re.UNICODE) if len(item) > 1}
+    v = {item.casefold() for item in re.findall(r"[\w.-]+", value or "", flags=re.UNICODE) if len(item) > 1}
+    return round(len(q & v) / max(1, len(q)), 4)
 
 
 def _strip_feishu_prefix(s: str) -> str:
@@ -356,8 +365,33 @@ def _merge_table_demands(batches: List[dict]) -> tuple:
                 existing = merged_by_parent[key]
                 _merge_candidate_order(existing, c)
                 for lk in ("selected_focus_ids", "selected_sub_query_ids", "selected_feishu_urls",
-                            "selected_query_types", "selected_sheet_ids", "selected_table_ids"):
-                    existing[lk] = sorted(set(existing.get(lk) or []) | set(c.get(lk) or []))
+                            "selected_query_types"):
+                    existing[lk] = _merge_unique_strs(
+                        list(existing.get(lk) or []), list(c.get(lk) or []),
+                    )
+                for lk in ("selected_sheet_ids", "selected_table_ids"):
+                    combined = _merge_unique_strs(
+                        list(existing.get(lk) or []), list(c.get(lk) or []),
+                    )
+                    existing[lk] = combined[:TABLE_CHILD_READ_LIMIT]
+                for lk in ("selected_sheet_titles", "selected_table_titles"):
+                    combined = _merge_unique_strs(
+                        list(existing.get(lk) or []), list(c.get(lk) or []),
+                    )
+                    existing[lk] = combined[:TABLE_CHILD_READ_LIMIT]
+                existing["table_selected_child_count"] = max(
+                    len(existing.get("selected_sheet_ids") or []),
+                    len(existing.get("selected_table_ids") or []),
+                )
+                existing["table_structure_child_count"] = max(
+                    int(existing.get("table_structure_child_count", 0) or 0),
+                    int(c.get("table_structure_child_count", 0) or 0),
+                )
+                existing["table_child_overflow_count"] = max(
+                    0,
+                    int(existing.get("table_structure_child_count", 0) or 0)
+                    - int(existing.get("table_selected_child_count", 0) or 0),
+                )
                 existing["read_query"] = existing.get("read_query") or c.get("read_query", "")
         table_ids_by_sq[sq.sub_query_id] = selected_ids
     merged_list = sorted(
@@ -433,9 +467,10 @@ def _select_children_from_cache(
             out["table_selected_child_count"] = 0
             result.append(out)
             continue
-        # v5 reads every child of a matched parent.  Table preview/full
-        # construction, not a child top-K, controls later LLM context.
-        sel = children
+        # Defensive bound for the legacy cache helper.  The primary selector
+        # already ranks children by query; this path preserves API-order
+        # fail-open behavior without allowing an unbounded parent expansion.
+        sel = children[:TABLE_CHILD_READ_LIMIT]
         out["table_selected_child_count"] = len(sel)
         if doc_type == "SHEET":
             out["selected_sheet_ids"] = _merge_unique_strs(list(out.get("selected_sheet_ids") or []),
@@ -595,10 +630,10 @@ class FeishuSourceAgent(SourceAgent):
             logger.info("[feishu] plan sanitized total_sub_queries %d -> %d", len(sub_queries), len(sanitized))
         # v5 fallback alternatives are derived only from the bounded profile pack;
         # retrieval invokes them only after the primary API call returns zero.
-        from tools.core.gtm_profile import GTMProfileRepository
-        repo = GTMProfileRepository()
+        resolution = getattr(self, "_profile_resolution", None)
         for sq in sanitized:
-            aliases, expressions = repo.build_pack(sq.query).fallback_variants(sq.query)
+            pack = resolution.fallback_pack if resolution is not None else None
+            aliases, expressions = pack.fallback_variants(sq.query) if pack is not None else ([], [])
             sq.variants = aliases + expressions
             sq.variant_origins = {
                 **{variant: "alias" for variant in aliases},
@@ -809,6 +844,7 @@ class FeishuSourceAgent(SourceAgent):
                                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                                 "query_type": qt, "fallback_origin": "profile",
                                 "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "api_query": fallback_query,
                                 "primary_candidate_count": 0, "fallback_candidate_count": len(group),
                             })
                         doc_cands = [candidate for group in fallback_results for candidate in group]
@@ -834,6 +870,11 @@ class FeishuSourceAgent(SourceAgent):
                     direct_limit=3,
                     wiki_limit=3,
                     executor=self._executor,
+                    child_rerank_enabled=self.cfg.table_child_rerank_enabled,
+                    child_rerank_model=self.cfg.table_child_rerank_model,
+                    child_rerank_timeout_s=self.cfg.table_child_rerank_timeout_s,
+                    child_rerank_top_n=self.cfg.table_child_rerank_top_n,
+                    child_rerank_instruct=self.cfg.table_child_rerank_instruct,
                 )
                 if not table_cands and sq.variants:
                     fallback_queries = list(dict.fromkeys(sq.variants))[:2]
@@ -851,6 +892,11 @@ class FeishuSourceAgent(SourceAgent):
                             direct_limit=3,
                             wiki_limit=3,
                             executor=self._executor,
+                            child_rerank_enabled=self.cfg.table_child_rerank_enabled,
+                            child_rerank_model=self.cfg.table_child_rerank_model,
+                            child_rerank_timeout_s=self.cfg.table_child_rerank_timeout_s,
+                            child_rerank_top_n=self.cfg.table_child_rerank_top_n,
+                            child_rerank_instruct=self.cfg.table_child_rerank_instruct,
                         ) for fallback_query in fallback_queries
                     ])
                     for fallback_query, group in zip(fallback_queries, fallback_results):
@@ -859,6 +905,7 @@ class FeishuSourceAgent(SourceAgent):
                             "focus": sq.target_focus, "query_id": sq.sub_query_id,
                             "query_type": qt, "fallback_origin": "profile",
                             "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                            "api_query": fallback_query,
                             "primary_candidate_count": 0, "fallback_candidate_count": len(group),
                         })
                     table_cands = [candidate for group in fallback_results for candidate in group]
@@ -879,9 +926,14 @@ class FeishuSourceAgent(SourceAgent):
                         "event": "candidate", "source": self.source,
                         "focus": sq.target_focus, "query_id": sq.sub_query_id,
                         "query_type": sq.query_type, "api_rank": int(candidate.get("best_api_rank") or rank),
+                        "route": "mcp_doc",
+                        "document_id": str(candidate.get("document_id") or candidate.get("doc_token") or candidate.get("token") or candidate.get("id") or ""),
                         "document": str(candidate.get("title") or candidate.get("name") or ""),
                         "document_type": str(candidate.get("doc_type") or candidate.get("type") or ""),
                     })
+                    observer = current_role_funnel()
+                    if observer is not None:
+                        observer.observe_candidates([self._trace_events[-1]])
             early_doc_list, doc_ids_by_sq = _merge_doc_demands(doc_prepared)
             if early_doc_list and self._doc_pool is not None:
                 _assign_doc_route_hints(early_doc_list, min_block=2)
@@ -901,13 +953,43 @@ class FeishuSourceAgent(SourceAgent):
             for prepared in table_prepared:
                 sq = prepared["sq"]
                 for rank, candidate in enumerate(prepared.get("table_candidates") or [], 1):
+                    source_route = "wiki_table" if candidate.get("_source") == "wiki" else "direct_table"
                     self._trace_events.append({
                         "event": "candidate", "source": self.source,
                         "focus": sq.target_focus, "query_id": sq.sub_query_id,
                         "query_type": sq.query_type, "api_rank": int(candidate.get("best_api_rank") or rank),
+                        "route": source_route,
+                        "document_id": _candidate_doc_key(candidate),
                         "document": str(candidate.get("title") or candidate.get("name") or ""),
+                        "document_url": str(candidate.get("url") or ""),
                         "document_type": str(candidate.get("doc_type") or candidate.get("type") or ""),
+                        "candidate_source": str(candidate.get("_source") or ""),
+                        "candidate_sources": list(candidate.get("_sources") or []),
+                        "owner_id": str(candidate.get("owner_id") or ""),
+                        "owner_name": str(candidate.get("owner_name") or ""),
+                        "table_structure_child_count": int(candidate.get("table_structure_child_count", 0) or 0),
+                        "table_selected_child_count": int(candidate.get("table_selected_child_count", 0) or 0),
+                        "table_child_overflow_count": int(candidate.get("table_child_overflow_count", 0) or 0),
+                        "table_child_selection_mode": str(candidate.get("table_child_selection_mode") or ""),
+                        "table_child_rerank_called": bool(candidate.get("table_child_rerank_called", False)),
+                        "table_child_rerank_error_type": str(candidate.get("table_child_rerank_error_type") or ""),
+                        "table_child_rerank_error": str(candidate.get("table_child_rerank_error") or ""),
+                        "selected_child_ids": list(
+                            candidate.get("selected_sheet_ids")
+                            or candidate.get("selected_table_ids")
+                            or []
+                        ),
+                        "parent_query_title_overlap": _metadata_overlap(
+                            sq.query, str(candidate.get("title") or candidate.get("name") or ""),
+                        ),
+                        "parent_query_summary_overlap": _metadata_overlap(
+                            sq.query, str(candidate.get("summary") or candidate.get("description") or ""),
+                        ),
+                        "parent_relevance_audit": "observed_only_no_filter",
                     })
+                    observer = current_role_funnel()
+                    if observer is not None:
+                        observer.observe_candidates([self._trace_events[-1]])
             table_list, table_ids_by_sq = _merge_table_demands(table_prepared)
             return table_prepared, table_list, table_ids_by_sq
 
@@ -956,7 +1038,9 @@ class FeishuSourceAgent(SourceAgent):
             # 总预算 8s 足够正常情况 + 1-2 次 90235 重试；超过即放弃这个 sheet（chunks=[]），
             # consumer (sq) 不再被它阻塞。底层 to_thread 任务由于跨线程无法 cancel,
             # 会继续在 worker 中跑完，但结果会被丢弃。
-            _SHEET_READ_WALL_S = 8.0
+            _SHEET_READ_WALL_S = float(self.cfg.feishu_sheet_read_wall_s)
+            _BITABLE_READ_WALL_S = float(self.cfg.feishu_bitable_read_wall_s)
+            table_read_tasks: List[asyncio.Task[None]] = []
 
             async def _read_table_one(cand: dict) -> None:
                 token = _candidate_doc_key(cand)
@@ -977,7 +1061,17 @@ class FeishuSourceAgent(SourceAgent):
                             )
                             chunks = []
                     elif doc_type == "BITABLE":
-                        chunks = await self._to_thread(read_bitables, rq, [cand], self._uat)
+                        try:
+                            chunks = await asyncio.wait_for(
+                                self._to_thread(read_bitables, rq, [cand], self._uat),
+                                timeout=_BITABLE_READ_WALL_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "[feishu] bitable read wall timeout %.1fs token=%s (abandoning)",
+                                _BITABLE_READ_WALL_S, token[:16],
+                            )
+                            chunks = []
                     else:
                         chunks = []
                     read_ms = _elapsed_ms(rd_started)
@@ -1000,6 +1094,12 @@ class FeishuSourceAgent(SourceAgent):
                         meta["table_structure_child_count"] = int(cand.get("table_structure_child_count", 0) or 0)
                         meta["table_read_ms"] = read_ms
                         meta["table_read_chunks"] = len(chunks)
+                        meta["table_selected_child_ids"] = list(
+                            cand.get("selected_sheet_ids") or cand.get("selected_table_ids") or []
+                        )
+                        meta["table_parent_query_title_overlap"] = _metadata_overlap(
+                            str(cand.get("read_query") or ""), str(cand.get("title") or ""),
+                        )
                         meta["table_submit_selected"] = True
                         meta["table_submit_skipped"] = False
                         normalized.append(UnifiedChunk(
@@ -1038,7 +1138,9 @@ class FeishuSourceAgent(SourceAgent):
                     if evt:
                         evt.set()
                     continue
-                asyncio.create_task(_read_table_one(cand))
+                table_read_tasks.append(asyncio.create_task(
+                    _read_table_one(cand), name=f"feishu-table:{token[:16]}",
+                ))
 
         logger.debug("TIMING feishu.batch_prepare docs=%d tables=%d ms=%.1f",
                      len(early_doc_list), len(table_list), _elapsed_ms(prepare_started))
@@ -1159,6 +1261,11 @@ class FeishuSourceAgent(SourceAgent):
             return [_unified_to_chunk_entry(uc, sq.query, sq.target_focus, sq.sub_query_id) for uc in uc_list]
 
         batches_result = await asyncio.gather(*[_execute_one(b) for b in prepared])
+        if table_list:
+            # Every request-owned table coroutine reaches its finally/event
+            # boundary before the source returns.  Sync HTTP work is separately
+            # tracked by SourceAgent._to_thread for quiescent retry checks.
+            await asyncio.gather(*table_read_tasks, return_exceptions=True)
         for sq, chunks in zip(sub_queries, batches_result):
             for c in chunks:
                 entry = ChunkEntry(
@@ -1201,6 +1308,12 @@ class FeishuSourceAgent(SourceAgent):
                     "table_submit_skipped": False,
                     "table_read_ms": read_ms,
                     "table_read_chunks": len(cand_chunks),
+                    "table_selected_child_ids": list(
+                        cand.get("selected_sheet_ids") or cand.get("selected_table_ids") or []
+                    ),
+                    "parent_query_title_overlap": _metadata_overlap(
+                        str(cand.get("read_query") or ""), str(cand.get("title") or ""),
+                    ),
                 })
                 self._table_pool._parent_meta[token] = meta
 
@@ -1269,6 +1382,7 @@ class FeishuSourceAgent(SourceAgent):
                                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                                 "query_type": qt, "fallback_origin": "profile",
                                 "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "api_query": fallback_query,
                                 "primary_candidate_count": 0,
                                 "fallback_candidate_count": len(result.get("items", [])),
                             })

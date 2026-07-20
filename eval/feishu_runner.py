@@ -315,6 +315,7 @@ async def run_case(case: Dict[str, Any], preset: str, retrieve_only: bool = Fals
         logger.exception("[%s/%s] run failed: %s", test_id, preset, e)
     finally:
         logging.getLogger().removeHandler(capture)
+        await retrieve.aclose()
 
     record["e2e_elapsed_s"] = round(time.monotonic() - t0, 2)
     record["rag_answer"] = "".join(answer_parts).strip()

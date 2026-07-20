@@ -420,6 +420,10 @@ def render_final_payload(
     fid_to_text = {f.focus_id: f.text for f in focuses}
     chunks_out: List[Dict[str, Any]] = []
     for c in chunks:
+        # Last boundary invariant: evaluation footprints and unjudged chunks
+        # can remain in operational trace, never in downstream full content.
+        if c.tier not in {"critical", "important"}:
+            continue
         meta = c.metadata or {}
         # focus_query 优先用 LLM 标注的 answered_focuses，否则 fall back 到 target_focuses
         focus_ids = list((meta.get("answered_focuses") or [])) or sorted(c.target_focuses or set())

@@ -234,6 +234,9 @@ class GlobalPlan:
     """v2.2 planner 顶层输出。"""
     original_query: str
     focuses: List[PlannedFocus] = field(default_factory=list)
+    # Program-derived, plan-level observability only.  Warnings never delete a
+    # structurally valid focus or query and are not sent back to the model.
+    validation_warnings: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -425,6 +428,21 @@ class ChunkEntry:
         }
 
 
+@dataclass(frozen=True)
+class EvalShortlistConfig:
+    """Admission policy for the compact pre-plan-eval evidence shortlist.
+
+    This is deliberately independent from ``ContextBudget``: the latter keeps
+    one provider request within its context window, while this policy decides
+    whether a pool needs an admission pass at all.
+    """
+    enabled: bool = True
+    trigger_chunk_count: int = 24
+    batch_chunk_limit: int = 80
+    max_critical_per_focus: int = 6
+    max_important_per_focus: int = 12
+
+
 @dataclass
 class SourceAgentConfig:
     """单个 SourceAgent 的运行参数。
@@ -439,6 +457,19 @@ class SourceAgentConfig:
     rerank_score_threshold: Optional[float] = None
     rerank_timeout_s: float = 20.0
     rerank_max_document_chars: int = 6000
+    eval_shortlist: EvalShortlistConfig = field(default_factory=EvalShortlistConfig)
+    feishu_sheet_read_wall_s: float = 8.0
+    feishu_bitable_read_wall_s: float = 25.0
+    table_child_rerank_enabled: bool = True
+    table_child_rerank_model: str = "qwen3-rerank"
+    table_child_rerank_timeout_s: float = 5.0
+    table_child_rerank_top_n: int = 3
+    table_child_rerank_instruct: str = (
+        "Rank child sheets or tables within one already selected parent by whether their "
+        "metadata indicates they contain data needed for the executable query. Prefer exact "
+        "entity, time period, metric, channel, and task alignment. Penalize generic templates, "
+        "system tables, and merely related topics. Do not infer content absent from metadata."
+    )
     min_loops: int = 1
     max_loops: int = 1
     source_timeout_s: float = 25.0         # SourceAgent 整体软超时
@@ -527,6 +558,50 @@ EvalLayerMode = Literal["rule", "llm_tool"]
 RetrievePreset = Literal["lite", "balanced", "deep_dive"]
 
 
+PROFILE_RERANK_INSTRUCTION = (
+    "Rank profile expression sets by whether they can safely serve as retrieval vocabulary "
+    "for the same user intent. Prefer paraphrases and operationally equivalent search "
+    "expressions. Penalize expressions that are merely related topics. Ignore shared "
+    "entities, brands, products, regions, dates, and generic GTM terms alone. A high-ranked "
+    "expression must preserve the user's requested task and must not introduce a different "
+    "business objective."
+)
+
+
+@dataclass(frozen=True)
+class ProfileRerankConfig:
+    enabled: bool = True
+    shadow: bool = True
+    model: str = "qwen3-rerank"
+    timeout_s: float = 1.5
+    package_limit: int = 450
+    top_n: int = 8
+    max_package_chars: int = 300
+    max_planner_pack_chars: int = 400
+    max_planner_entities: int = 2
+    max_planner_expressions: int = 2
+    min_score: float = 0.60
+    min_margin: float = 0.05
+    instruction_version: str = "profile-expression-v1"
+    instruct: str = PROFILE_RERANK_INSTRUCTION
+
+
+@dataclass(frozen=True)
+class ProfileGovernanceConfig:
+    mode: Literal["commissioning", "shadow", "autonomous"] = "commissioning"
+    policy_version: str = "profile-governance-v1"
+    autonomous_actions: str = "all"
+    min_independent_requests: int = 3
+    min_query_signatures: int = 2
+    min_success_rate: float = 0.60
+    coalesce_window_hours: int = 24
+    max_patches_per_snapshot: int = 10
+    item_cooldown_days: int = 7
+    max_snapshots_per_day: int = 1
+    automatic_publish: bool = True
+    automatic_rollback: bool = True
+
+
 @dataclass
 class RetrieveConfig:
     """retrieve_agent 顶层配置。
@@ -545,6 +620,8 @@ class RetrieveConfig:
     # ── v2.2 Global Planner（升级版）──
     # 配置驱动：模型 / 兜底 / A/B 强制开关全在此，env 不再切换。
     global_planner: GlobalPlannerConfig = field(default_factory=GlobalPlannerConfig)
+    profile_rerank: ProfileRerankConfig = field(default_factory=ProfileRerankConfig)
+    profile_governance: ProfileGovernanceConfig = field(default_factory=ProfileGovernanceConfig)
     # build_retrieve_agent 装配期从 get_all_configured_indexes() 派生 + env
     # BAILIAN_ALLOWED_INDEXES 过滤；planner 注入此对象的 allowed 列表，runner
     # 用同一对象做 indexes symbolic 校验。

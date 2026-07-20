@@ -111,19 +111,22 @@ async def invoke_retrieve_agent(
 
     raw_payload = {}
     progress_events: List[str] = []
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session.id,
-        new_message=content,
-    ):
-        if event.content and event.content.parts:
-            for part in event.content.parts:
-                if part.text:
-                    progress_events.append(part.text)
-        if event.actions and event.actions.state_delta:
-            raw = event.actions.state_delta.get("retrieval_result")
-            if raw:
-                raw_payload = json.loads(raw)
+    try:
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session.id,
+            new_message=content,
+        ):
+            if event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        progress_events.append(part.text)
+            if event.actions and event.actions.state_delta:
+                raw = event.actions.state_delta.get("retrieval_result")
+                if raw:
+                    raw_payload = json.loads(raw)
+    finally:
+        await agent.aclose()
 
     chunks = list(raw_payload.get("chunks") or [])
     metadata = {k: v for k, v in raw_payload.items() if k != "chunks"}

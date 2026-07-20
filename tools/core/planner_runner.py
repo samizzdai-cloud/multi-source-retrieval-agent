@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Protocol
+from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from agents.source_agent_base import Focus, SubQuery
 from tools.core.models import BailianIndexCatalog, GlobalPlan, PlannedFocus, PlannedSubQuery
@@ -200,16 +200,28 @@ _GOOGLE_KEYWORD_MAX = 4
 
 
 def _truncate_google_keywords(query: str, max_kw: int = _GOOGLE_KEYWORD_MAX) -> str:
-    """关键词宽度截断：保留前 N 个核心词（空格分隔后再 join）。
+    """Bound query width while retaining high-information anchors first.
 
-    保留空格分词的原始顺序；中英混合按 _GOOGLE_TOKEN_RE 切。
+    Acronyms, product-like tokens, numbers and dates survive before generic
+    words.  Stable original order is restored after selection so the compiler
+    does not turn the query into an arbitrary bag of terms.
     """
     toks = _GOOGLE_TOKEN_RE.findall(query or "")
     if not toks:
         return query.strip()
     if len(toks) <= max_kw:
         return query.strip()
-    return " ".join(toks[:max_kw])
+    def priority(item: tuple[int, str]) -> tuple[int, int]:
+        index, token = item
+        is_anchor = bool(
+            re.search(r"\d", token)
+            or (re.search(r"[A-Za-z]", token) and token.upper() == token and len(token) > 1)
+            or re.search(r"[-./_]", token)
+        )
+        return (0 if is_anchor else 1, index)
+
+    selected = sorted(sorted(enumerate(toks), key=priority)[:max_kw])
+    return " ".join(token for _, token in selected)
 
 
 class GoogleValidator:
@@ -333,6 +345,8 @@ class NormalizedPlan:
     pre_planned_by_source: Dict[str, List[SubQuery]] = field(default_factory=dict)
     replan_needed: Dict[str, List[Focus]] = field(default_factory=dict)
     rejected_count: int = 0
+    validation_warnings: List[str] = field(default_factory=list)
+    profile_resolution: Any = None
 
 
 _VALIDATOR_FACTORIES: Dict[str, "Callable[..., SourceSubQueryValidator]"] = {
@@ -382,6 +396,7 @@ def normalize_plan(
     out = NormalizedPlan(
         pre_planned_by_source={s: [] for s in enabled_sources},
         replan_needed={s: [] for s in enabled_sources},
+        validation_warnings=list(getattr(plan, "validation_warnings", []) or []),
     )
     enabled_set = set(enabled_sources)
     sq_seq = 0

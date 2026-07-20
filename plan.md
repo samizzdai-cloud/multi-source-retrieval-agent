@@ -91,8 +91,35 @@ runtime-contract bug: DeepSeek occasionally returned non-object entries inside
 called `.get()` on a string. `tiers_list_to_map` now skips malformed entries
 and a unit contract test covers it. This is not a retrieval-chain loss or a
 ranking strategy decision. Remaining zero-chunk cases are different: their
-eval/plan-eval labeled evidence as noise or proposed hallucinated chunk IDs,
-which selection correctly rejected.
+eval/plan-eval labeled evidence as noise or returned IDs whose lifecycle and
+short-reference handling required a follow-up correction; see the session sync
+below.
+
+### Session synchronization — 2026-07-18
+
+- **Feishu short-reference contract:** source eval, plan-eval and cross-source
+  global eval render request-local `C1/C2/...` references and resolve only to
+  the current pool's canonical IDs. Exact known canonical IDs are tolerated as
+  provider compatibility; unknown IDs remain rejected.
+- **Noise lifecycle is now decision-aware:** a `continue` branch prunes
+  uncovered noise before replan. A `stop` branch first consumes that same
+  plan-eval result, records `selected_noise_excluded`, and never reports an ID
+  deleted by the noise policy as an LLM hallucination. Eval-only noise remains
+  judgment trace only and cannot reach source result, global eval or user
+  context.
+- **Live smoke:** `E2E_Hypershell_Comp/deep_dive`, Feishu-only, retrieve-only,
+  90-second source budget, artifact
+  `eval/live_retrieve_noise_exit_fixed_20260717/`. It completed in 72.09 s,
+  with 65 reads and 26 judgments, no source timeout and no stale-ID
+  hallucination. Eight plan-eval noise selections and two eval-only noise
+  selections were explicitly excluded; final payload was correctly empty.
+- **Interpretation:** this is now an evidence-quality/search problem, not an
+  eval-ID contract problem. The read documents were unrelated RAG/product
+  methodology material, not Hypershell competitor/country evidence. Do not
+  relax the noise rubric to manufacture a non-empty answer.
+- **Next implementation gate:** persist pre/post rerank and pre/post eval tier
+  histograms plus `selected_noise_excluded` in the trace, then diagnose Feishu
+  entity/title/body matching and candidate rank on the same E2E cases.
 
 ### 0.1 Mandatory pre-implementation audit
 

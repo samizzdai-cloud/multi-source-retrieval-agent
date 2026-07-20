@@ -33,6 +33,9 @@ class ContextBudget:
     prompt_reserve: int = 30_000
     flush_threshold: int = 600_000
     hard_ceiling: int = 650_000
+    # Partial eval emits only a compact evidence shortlist.  Omitted chunks are
+    # observable as not_shortlisted (not mislabeled as semantic noise).
+    max_chunks_per_batch: int = 80
 
     @property
     def usable_tokens(self) -> int:
@@ -59,7 +62,10 @@ def split_chunks(chunks: Sequence[ChunkEntry], budget: ContextBudget) -> List[Li
     current_tokens = budget.prompt_reserve
     for chunk in chunks:
         cost = estimate_chunk_tokens(chunk)
-        if current and current_tokens + cost > budget.flush_threshold:
+        if current and (
+            current_tokens + cost > budget.flush_threshold
+            or len(current) >= budget.max_chunks_per_batch
+        ):
             batches.append(current)
             current, current_tokens = [], budget.prompt_reserve
         # A pathological single chunk is kept intact; readers must not silently

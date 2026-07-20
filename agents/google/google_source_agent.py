@@ -1449,6 +1449,7 @@ class GoogleSourceAgent(SourceAgent):
         # C1. Sheet 筛选（收紧：精准搜索后只保留 top 5 sheets）
         sq_sheet_selections: Dict[str, List[SheetSelection]] = {}
         sq_sheet_nonnative_selections: Dict[str, List[DocSelection]] = {}
+        native_sheet_requests: Dict[str, dict] = {}
         for res in search_results:
             sq = res["sq"]
             sq_sheet_selections[sq.sub_query_id] = []
@@ -1470,9 +1471,76 @@ class GoogleSourceAgent(SourceAgent):
                     continue
                 selected_titles = sheet_pool.native_sheet_titles(fid)
                 if selected_titles:
-                    sq_sheet_selections[sq.sub_query_id].append(
-                        SheetSelection(file_id=fid, selected_titles=selected_titles,
-                                       sub_query_id=sq.sub_query_id, focus_id=sq.target_focus))
+                    request = native_sheet_requests.setdefault(fid, {
+                        "titles": selected_titles,
+                        "queries": [],
+                        "targets": [],
+                    })
+                    query_text = f"{focus_text} {sq.query}".strip()
+                    if query_text and query_text not in request["queries"]:
+                        request["queries"].append(query_text)
+                    request["targets"].append((sq.sub_query_id, sq.target_focus))
+
+        # Native Google Sheet child tabs use the same per-parent contract as
+        # Feishu: <=3 pass through; >3 invokes one metadata-only Qwen rerank
+        # for that spreadsheet and shares the resulting top3 across queries.
+        if native_sheet_requests:
+            from tools.core.table_child_rerank import select_table_children
+
+            async def _rank_google_sheet_parent(fid: str, request: dict) -> tuple[str, List[str], dict]:
+                meta = sheet_pool.get_meta(fid)
+                sheet_meta_by_title = {
+                    str(item.get("title") or ""): item
+                    for item in (meta.sheets if meta else [])
+                }
+                children = []
+                for title in request["titles"]:
+                    item = sheet_meta_by_title.get(title, {})
+                    grid = item.get("gridProperties") or {}
+                    children.append({
+                        "id": title,
+                        "_child_title": title,
+                        "row_count": grid.get("rowCount"),
+                        "column_count": grid.get("columnCount"),
+                    })
+                selected, selection = await self._to_thread(
+                    select_table_children,
+                    "\n".join(request["queries"]),
+                    children,
+                    top_n=self.cfg.table_child_rerank_top_n,
+                    enabled=self.cfg.table_child_rerank_enabled,
+                    model=self.cfg.table_child_rerank_model,
+                    timeout_s=self.cfg.table_child_rerank_timeout_s,
+                    instruct=self.cfg.table_child_rerank_instruct,
+                )
+                return fid, [str(item.get("id") or "") for item in selected if item.get("id")], selection
+
+            ranked_sheet_parents = await asyncio.gather(*[
+                _rank_google_sheet_parent(fid, request)
+                for fid, request in native_sheet_requests.items()
+            ])
+            for fid, selected_titles, selection in ranked_sheet_parents:
+                request = native_sheet_requests[fid]
+                self._trace_events.append({
+                    "event": "table_child_selection", "source": self.source,
+                    "parent_id": fid, "parent_type": "google_sheet",
+                    "input_child_count": int(selection.get("input_count", 0) or 0),
+                    "selected_child_count": len(selected_titles),
+                    "selection_mode": str(selection.get("mode") or ""),
+                    "rerank_called": bool(selection.get("provider_called", False)),
+                    "rerank_error_type": str(selection.get("error_type") or ""),
+                    "rerank_error": str(selection.get("error") or ""),
+                    "selected_child_ids": selected_titles,
+                })
+                for sub_query_id, focus_id in request["targets"]:
+                    sq_sheet_selections[sub_query_id].append(
+                        SheetSelection(
+                            file_id=fid,
+                            selected_titles=selected_titles,
+                            sub_query_id=sub_query_id,
+                            focus_id=focus_id,
+                        )
+                    )
 
         # C2. Doc 筛选（原生 Doc + word/docx/txt）。Excel/CSV 已归入 sheet family。
         _DOC_SIZE_THRESHOLD = int(self.cfg.google_native_doc_size_gate_bytes)

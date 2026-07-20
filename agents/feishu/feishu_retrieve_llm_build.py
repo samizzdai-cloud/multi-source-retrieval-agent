@@ -70,8 +70,12 @@ PLAN_EVAL_INSTRUCTION = f"""你是检索评估与规划器。判断是否继续 
 
 ## 决策规则
 - 先为每个 focus 输出 focus_decisions：status、gap_type、reason。
+- status 只允许 `covered | gap | insufficient`；部分覆盖必须写 `status="gap"`，禁止输出 `partially_covered` 或 `evidence_gap`。
+- gap_type 只允许 `none | upstream_evidence_needed | query_refinement`；`covered` 必须配 `none`，其余状态不得配 `none`。
 - 当前文档只有诊断或结论、但回答需要上游日期/账户/结构化原始资料 → gap_type="upstream_evidence_needed"；replan_queries 使用可执行 query_type（需要表格时为 structured）。
 - 仅在词面/API 召回不足且仍有合理同一意图检索方式 → gap_type="query_refinement"。
+- 相关文档已确认业务事件，但缺少销量、转化率、广告报表、热力图、库存等原始测量资料，是 upstream gap，不是 query refinement。
+- 只有相关候选为零/偏题，或同一证据仍可通过更准确关键词找到，才是 query refinement。
 - 若已有 chunks 足够覆盖所有 focus → decision="stop"。
 - 否则 → decision="continue"，给出与每个 gap_type 一致的 replan_queries（同样遵守上述实体保真原则）。
 

@@ -8,10 +8,18 @@ bitable_read.py — 多维表格查询工具
   list_fields(bitable_id, table_id, uat)                    → 列出所有字段
 """
 
+import os
 import requests
 from typing import Optional
 
 _BASE_URL = "https://open.feishu.cn/open-apis/bitable/v1"
+
+
+def _http_timeout() -> float:
+    try:
+        return max(1.0, min(float(os.getenv("FEISHU_BITABLE_HTTP_TIMEOUT_S", "5")), 10.0))
+    except ValueError:
+        return 5.0
 
 
 def _auth_headers(uat: str) -> dict:
@@ -41,7 +49,7 @@ def list_tables(bitable_id: str, user_access_token: str) -> list[dict]:
         if page_token:
             params["page_token"] = page_token
 
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp = requests.get(url, headers=headers, params=params, timeout=_http_timeout())
         resp.raise_for_status()
         body = resp.json()
 
@@ -68,6 +76,8 @@ def search_records(
     table_id: str,
     user_access_token: str,
     conditions: Optional[list[dict]] = None,
+    page_size: int = 500,
+    max_records: Optional[int] = None,
 ) -> list[dict]:
     """查询数据表记录。
 
@@ -79,6 +89,8 @@ def search_records(
                             [{"field_name": "字段名", "value": ["值"]}]
                             operator 固定为 "is"，conjunction 固定为 "and"
                             默认 None 表示不筛选，返回全部记录
+        page_size:          单页大小，最大 500
+        max_records:        最大返回数；None 表示读取全部分页
 
     Returns:
         原始 record 列表，每条包含 record_id 和 fields
@@ -102,8 +114,11 @@ def search_records(
             ],
         }
 
+    bounded_page_size = max(1, min(int(page_size), 500))
+    bounded_max = None if max_records is None else max(1, int(max_records))
     while True:
-        params = {"page_size": 500}
+        remaining = bounded_page_size if bounded_max is None else max(1, bounded_max - len(results))
+        params = {"page_size": min(bounded_page_size, remaining)}
         if page_token:
             params["page_token"] = page_token
 
@@ -111,7 +126,7 @@ def search_records(
         if body_filter:
             payload["filter"] = body_filter
 
-        resp = requests.post(url, headers=headers, params=params, json=payload, timeout=10)
+        resp = requests.post(url, headers=headers, params=params, json=payload, timeout=_http_timeout())
         resp.raise_for_status()
         body = resp.json()
 
@@ -121,11 +136,11 @@ def search_records(
         data = body.get("data") or {}
         results.extend(data.get("items", []))
 
-        if not data.get("has_more"):
+        if not data.get("has_more") or (bounded_max is not None and len(results) >= bounded_max):
             break
         page_token = data.get("page_token")
 
-    return results
+    return results if bounded_max is None else results[:bounded_max]
 
 
 def search_records_with_filter(
@@ -176,7 +191,7 @@ def search_records_with_filter(
         if page_token:
             params["page_token"] = page_token
 
-        resp = requests.post(url, headers=headers, params=params, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, params=params, json=payload, timeout=_http_timeout())
         resp.raise_for_status()
         body = resp.json()
 
@@ -220,7 +235,7 @@ def list_fields(bitable_id: str, table_id: str, user_access_token: str) -> list[
         if page_token:
             params["page_token"] = page_token
 
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp = requests.get(url, headers=headers, params=params, timeout=_http_timeout())
         resp.raise_for_status()
         body = resp.json()
 
