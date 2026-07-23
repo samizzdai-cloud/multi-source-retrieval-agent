@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time as _time
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from dotenv import load_dotenv
 
@@ -68,6 +68,7 @@ def call_llm(
     thinking_config: dict | None = None,
     response_mime_type: str | None = None,     # 兼容旧签名，DeepSeek 忽略
     response_schema: dict | None = None,
+    trace_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> str:
     """LLM call via litellm (DeepSeek). Returns response text.
 
@@ -103,11 +104,30 @@ def call_llm(
     if thinking_config:
         completion_kwargs.update(thinking_config)
 
+    def _emit_trace(payload: Mapping[str, Any]) -> None:
+        """Emit body-free per-attempt telemetry without affecting the call path."""
+        if trace_callback is None:
+            return
+        try:
+            trace_callback(payload)
+        except Exception:
+            # Observability must never turn a recoverable provider failure into
+            # a retrieval failure.
+            pass
+
     last_exc: Exception | None = None
     for attempt in range(max_retries):
+        started = _time.perf_counter()
+        response_meta: dict[str, Any] = {}
         try:
             response = litellm.completion(**completion_kwargs)
-            message = response.choices[0].message
+            choice = response.choices[0]
+            message = choice.message
+            response_meta = {
+                "finish_reason": str(getattr(choice, "finish_reason", "") or ""),
+                "has_reasoning_content": bool(getattr(message, "reasoning_content", None)),
+                "has_tool_calls": bool(getattr(message, "tool_calls", None)),
+            }
             # Per DeepSeek's JSON-mode contract, only ``content`` is the final
             # answer. ``reasoning_content`` is a thinking trace, never a JSON
             # fallback. Empty content is retried because the API documents it
@@ -115,6 +135,14 @@ def call_llm(
             text = message.content or ""
             if not text:
                 raise RuntimeError("empty response from model")
+            _emit_trace({
+                "event": "llm_call_attempt", "caller_tag": _caller_tag,
+                "model": use_model, "attempt": attempt + 1,
+                "outcome": "success", "timeout_s": timeout,
+                "max_tokens": max_tokens,
+                "elapsed_ms": round((_time.perf_counter() - started) * 1000.0, 1),
+                **response_meta,
+            })
             if _llm_trace_hook is not None:
                 try:
                     _llm_trace_hook(prompt, text, _caller_tag)
@@ -124,12 +152,25 @@ def call_llm(
         except Exception as e:
             last_exc = e
             err_str = str(e)
+            empty_response = "empty response from model" in err_str.lower()
             retryable = (
-                "empty response from model" in err_str.lower()
+                empty_response
                 or any(k.lower() in err_str.lower() for k in _RETRYABLE_KEYWORDS)
             )
-            if retryable and attempt < max_retries - 1:
-                wait = retry_delay * (2 ** attempt)
+            will_retry = retryable and attempt < max_retries - 1
+            wait = retry_delay * (2 ** attempt) if will_retry else 0.0
+            _emit_trace({
+                "event": "llm_call_attempt", "caller_tag": _caller_tag,
+                "model": use_model, "attempt": attempt + 1,
+                "outcome": "retry" if will_retry else "failed",
+                "error_type": "empty_response" if empty_response else type(e).__name__,
+                "empty_response": empty_response, "timeout_s": timeout,
+                "max_tokens": max_tokens,
+                "elapsed_ms": round((_time.perf_counter() - started) * 1000.0, 1),
+                "retry_delay_s": wait,
+                **response_meta,
+            })
+            if will_retry:
                 logger.warning(
                     "call_llm [%s] attempt %d/%d failed: %s — retrying in %.1fs",
                     _caller_tag, attempt + 1, max_retries, err_str[:80], wait,

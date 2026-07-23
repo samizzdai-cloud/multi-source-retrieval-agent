@@ -430,17 +430,17 @@ class ChunkEntry:
 
 @dataclass(frozen=True)
 class EvalShortlistConfig:
-    """Admission policy for the compact pre-plan-eval evidence shortlist.
+    """Batching policy for Focus-local partial tier evaluation.
 
     This is deliberately independent from ``ContextBudget``: the latter keeps
     one provider request within its context window, while this policy decides
-    whether a pool needs an admission pass at all.
+    when a complete provisional tier pass begins.  It contains no output quota:
+    partial eval classifies every Focus/chunk pair in the submitted batch.
     """
     enabled: bool = True
     trigger_chunk_count: int = 24
     batch_chunk_limit: int = 80
-    max_critical_per_focus: int = 6
-    max_important_per_focus: int = 12
+    max_concurrency: int = 3
 
 
 @dataclass
@@ -453,9 +453,13 @@ class SourceAgentConfig:
     source_top_k: int = 5                  # 本源最终产出 chunks 上限
     # Post-I/O evidence compression. It remains opt-in per source.
     rerank_enabled: bool = False
-    rerank_keep_ratio: float = 0.8
+    rerank_keep_ratio: float = 0.7
     rerank_score_threshold: Optional[float] = None
-    rerank_timeout_s: float = 20.0
+    rerank_timeout_s: float = 8.0
+    rerank_max_concurrency: int = 2
+    rerank_max_retries: int = 1
+    rerank_retry_delay_s: float = 0.2
+    rerank_trigger_chunk_count: int = 60
     rerank_max_document_chars: int = 6000
     eval_shortlist: EvalShortlistConfig = field(default_factory=EvalShortlistConfig)
     feishu_sheet_read_wall_s: float = 8.0
@@ -473,6 +477,7 @@ class SourceAgentConfig:
     min_loops: int = 1
     max_loops: int = 1
     source_timeout_s: float = 25.0         # SourceAgent 整体软超时
+    cancel_drain_timeout_s: float = 10.0   # 超时后等待同步 I/O 收敛的上限；未收敛则禁止 whole-case retry
     sub_query_top_n: int = 8               # 每个 sub_query 原始召回上限
     google_download_timeout_s: float = 12.0 # 非原生文件流式下载强制打断时间
     google_api_timeout_s: float = 12.0      # 原生文件单次 API 请求底层 Socket 超时
@@ -858,7 +863,8 @@ class RetrieveConfig:
             "source_top_k", "min_loops", "max_loops",
             "source_timeout_s", "sub_query_top_n",
             "rerank_enabled", "rerank_keep_ratio", "rerank_score_threshold",
-            "rerank_timeout_s", "rerank_max_document_chars",
+            "rerank_timeout_s", "rerank_max_concurrency", "rerank_max_retries",
+            "rerank_retry_delay_s", "rerank_trigger_chunk_count", "rerank_max_document_chars",
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_search",

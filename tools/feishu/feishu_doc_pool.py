@@ -89,18 +89,62 @@ class FeishuDocPool:
         # doc_id → 首次 submit 进入 _reading 的 monotonic 时间戳；
         # 供 wait_and_collect 的 per_doc_timeout 计算单 doc 等待上限
         self._doc_submit_times: Dict[str, float] = {}
+        # Reserved for failures that invalidate the document's own Block API
+        # payload. A type-30 embed is not such a failure: its unavailability
+        # must never discard otherwise readable Docx text/native-grid blocks.
+        self._doc_read_failures: Dict[str, List[dict]] = {}
+        self._doc_skipped_embeds: Dict[str, List[dict]] = {}
+        self._doc_embed_selections: Dict[str, List[dict]] = {}
+        self._consumer_deadlines: Dict[str, dict] = {}
+        self._reader_events: List[dict] = []
+        # ``wait_and_collect`` may stop waiting on a slow synchronous reader,
+        # but a thread cannot be cancelled safely. Keep explicit ownership so
+        # request cancellation/retry can observe real remaining I/O instead of
+        # treating the abandoned asyncio waiter as quiescence.
+        self._inflight_futures: Set[asyncio.Future] = set()
+        self._read_tasks: Set[asyncio.Task] = set()
 
     async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """走注入 executor 的 to_thread；executor=None 时退回 asyncio 默认。
 
         与 ``asyncio.to_thread`` 同义：保留 contextvars 传播。
         """
-        if self._executor is None:
-            return await asyncio.to_thread(fn, *args, **kwargs)
         loop = asyncio.get_event_loop()
         ctx = contextvars.copy_context()
         func_call = functools.partial(ctx.run, fn, *args, **kwargs)
-        return await loop.run_in_executor(self._executor, func_call)
+        future = loop.run_in_executor(self._executor, func_call)
+        self._inflight_futures.add(future)
+        future.add_done_callback(self._inflight_futures.discard)
+        # Shield preserves the fact that the underlying sync call is still
+        # live when a parent request is cancelled.
+        return await asyncio.shield(future)
+
+    def _start_read_task(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._read_tasks.add(task)
+        task.add_done_callback(self._read_tasks.discard)
+
+    async def drain_inflight(self, timeout_s: float = 10.0) -> int:
+        """Wait boundedly for pool tasks and synchronous readers to quiesce.
+
+        No cancellation is applied to executor futures: it would cancel only
+        the asyncio facade while the Open API call continues in its thread.
+        The returned count is therefore safe retry input.
+        """
+        pending: Set[asyncio.Future] = {
+            future for future in self._inflight_futures if not future.done()
+        } | {task for task in self._read_tasks if not task.done()}
+        if not pending:
+            return 0
+        _done, remaining = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        return len(remaining)
+
+    def consume_observability_events(self) -> List[dict]:
+        """Return body-free reader deadline events once per request pool."""
+        events = list(self._consumer_deadlines.values()) + list(self._reader_events)
+        self._consumer_deadlines.clear()
+        self._reader_events.clear()
+        return events
 
     def _get_doc_id(self, candidate: dict) -> str:
         return candidate.get("id", candidate.get("document_id", candidate.get("doc_id", "")))
@@ -220,9 +264,9 @@ class FeishuDocPool:
 
             # 启动异步读取（不 await，让调用方通过 event 等待）
             if to_read_block:
-                asyncio.create_task(self._read_block_api_batch(to_read_block))
+                self._start_read_task(self._read_block_api_batch(to_read_block))
             if to_read_mcp:
-                asyncio.create_task(self._read_mcp_batch(to_read_mcp))
+                self._start_read_task(self._read_mcp_batch(to_read_mcp))
 
         # 观测分桶统计（debug 级，排查重复读时再开）
         if logger.isEnabledFor(logging.DEBUG):
@@ -280,6 +324,14 @@ class FeishuDocPool:
                         newly_done.append(doc_id)
                         # 标记为 0 chunks（不动 self._doc_chunks，避免影响后续真正完成的事件）
                         per_doc_timeouts += 1
+                        self._consumer_deadlines.setdefault(doc_id, {
+                            "event": "consumer_deadline",
+                            "document_id": doc_id,
+                            "route": self._doc_route.get(doc_id, "unknown"),
+                            "elapsed_s": round(now_t - submit_t, 3),
+                            "deadline_s": float(per_doc_timeout),
+                            "sync_io_may_continue": True,
+                        })
                         logger.info(
                             "DocPool.wait_and_collect: per-doc timeout %s after %.1fs (limit=%.1fs)",
                             doc_id[:16], now_t - submit_t, per_doc_timeout,
@@ -309,6 +361,7 @@ class FeishuDocPool:
                         heading_path=chunk.heading_path,
                         score=0.0,
                         metadata={
+                            **dict(chunk.metadata or {}),
                             "content_type": chunk.content_type.value if hasattr(chunk.content_type, 'value') else str(chunk.content_type),
                             "doc_id": doc_id,
                             "route": self._doc_route.get(doc_id, "unknown"),
@@ -320,6 +373,36 @@ class FeishuDocPool:
                             "cross_query_hit_count": int(meta.get("cross_query_hit_count", 1) or 1),
                             "best_api_rank": int(meta.get("best_api_rank", 10**9) or 10**9),
                             "first_seen_order": int(meta.get("first_seen_order", 10**9) or 10**9),
+                            "reader_partial": bool(self._doc_read_failures.get(doc_id)),
+                            "reader_failure_count": len(self._doc_read_failures.get(doc_id, [])),
+                            "reader_failure_types": sorted({
+                                str(item.get("error_type") or "")
+                                for item in self._doc_read_failures.get(doc_id, [])
+                                if item.get("error_type")
+                            }),
+                            "embedded_sheet_skip_count": len(self._doc_skipped_embeds.get(doc_id, [])),
+                            "embedded_sheet_failure_disposition": ",".join(sorted({
+                                str(item.get("disposition") or "")
+                                for item in self._doc_skipped_embeds.get(doc_id, [])
+                                if item.get("disposition")
+                            })),
+                            "embedded_sheet_failures": [
+                                {
+                                    "block_id": str(item.get("block_id") or ""),
+                                    "spreadsheet_token": str(item.get("spreadsheet_token") or ""),
+                                    "sheet_id": str(item.get("sheet_id") or ""),
+                                    "error_type": str(item.get("error_type") or ""),
+                                    "disposition": str(item.get("disposition") or ""),
+                                }
+                                for item in self._doc_skipped_embeds.get(doc_id, [])
+                            ],
+                            "embedded_sheet_selection_count": len(self._doc_embed_selections.get(doc_id, [])),
+                            "embedded_sheet_selected_child_ids": sorted({
+                                child_id
+                                for item in self._doc_embed_selections.get(doc_id, [])
+                                for child_id in str(item.get("selected_child_ids") or "").split(",")
+                                if child_id
+                            }),
                         },
                     )
                     doc_chunks.append(uc)
@@ -374,6 +457,7 @@ class FeishuDocPool:
                     try:
                         # run_rag_pipeline 是同步的，放线程池
                         # 传真实 sub_query（用于 Stage 4 大表 LLM 提取），跳过 Stage 2+5 评分
+                        io_failures: List[dict] = []
                         rag = await self._to_thread(
                             run_rag_pipeline,
                             query=self._doc_query.get(doc_id, ""),
@@ -383,8 +467,20 @@ class FeishuDocPool:
                                 max_candidates=1,
                                 skip_scoring=True,
                                 lite_block_only=self._lite_block_only,
+                                io_failure_sink=io_failures,
                             ),
                         )
+                        # type-30 is a Feishu Docx embedded Spreadsheet, not
+                        # the Docx payload itself. Its single bounded Sheets
+                        # call can fail independently. Retain natural Docx
+                        # content and record the child read gap; never rerun
+                        # or drop the whole document because of that child.
+                        self._doc_skipped_embeds[doc_id] = [
+                            item for item in io_failures if item.get("source") == "type30_sheet"
+                        ]
+                        self._doc_embed_selections[doc_id] = [
+                            item for item in io_failures if item.get("source") == "type30_sheet_selection"
+                        ]
                         # 转换 ChunkResult → Chunk（保留原始格式）
                         chunks = []
                         for cr in rag.chunks:
@@ -403,6 +499,7 @@ class FeishuDocPool:
                                 has_table=ct_val in ("table_md", "table_json"),
                             ))
                         self._doc_chunks[doc_id] = chunks
+                        self._doc_read_failures[doc_id] = []
                         self._done.add(doc_id)
                         self._reading.discard(doc_id)
                         evt = self._doc_ready_events.get(doc_id)
@@ -421,6 +518,28 @@ class FeishuDocPool:
                             await asyncio.sleep(0.5 * (attempt + 1))
                             continue
                         logger.warning("DocPool: block_api failed %s after 3 retries: %s", doc_id[:16], e)
+                        self._doc_read_failures[doc_id] = [{"error_type": type(e).__name__}]
+                        self._reader_events.append({
+                            "event": "block_api_failed", "document_id": doc_id,
+                            "route": "block_api", "error_type": type(e).__name__,
+                            "attempts": 3,
+                        })
+                        # Do not start a second reader at an arbitrary elapsed
+                        # time: the failed Block call has fully returned after
+                        # its bounded retry policy. MCP is now sequential and
+                        # single-flight for this document.
+                        if not self._lite_block_only:
+                            self._reader_events.append({
+                                "event": "mcp_fallback_started", "document_id": doc_id,
+                                "from_route": "block_api", "route": "mcp",
+                            })
+                            self._doc_route[doc_id] = "mcp_fallback"
+                            await self._read_mcp_batch([doc])
+                            self._reader_events.append({
+                                "event": "mcp_fallback_success" if self._doc_chunks.get(doc_id) else "mcp_fallback_failed",
+                                "document_id": doc_id, "route": "mcp",
+                            })
+                            return
                         self._doc_chunks[doc_id] = []
                         self._done.add(doc_id)
                         self._reading.discard(doc_id)

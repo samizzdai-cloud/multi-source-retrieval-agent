@@ -19,7 +19,7 @@ import json
 import logging
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Dict, List, Optional
 
@@ -292,6 +292,79 @@ _FORECAST_TERMS = ("预测", "判断", "预估")
 _LITERAL_TERMS = ("新品", "老品", "UTM", "联盟", "GMV", "CVR", "ROAS", "CPA")
 _REGIONS = ("新加坡", "日本", "美国", "英国", "德国", "法国", "欧洲", "中国")
 
+# The planner often writes a Chinese evidence angle for an English request.  That
+# is fine for intent planning, but Feishu keyword search also needs the original
+# surface form when the target document/table is English.  Keep this extractor
+# deliberately conservative: it is *not* query expansion and must never invent
+# a business entity.  It only returns product-like literals, acronyms, and a
+# small set of explicit proper-name phrases copied from the user's request.
+_SURFACE_STOPWORDS = {
+    "Should", "Could", "Would", "What", "Which", "When", "Where", "Why", "How",
+    "The", "This", "That", "These", "Those", "And", "Or", "For", "From", "To",
+    "With", "In", "On", "At", "By", "Of", "Is", "Are", "Be", "Has", "Have",
+}
+_SURFACE_PROPER_RE = re.compile(r"\b[A-Z][A-Za-z0-9]*(?:\s+[A-Z][A-Za-z0-9]*){0,2}\b")
+
+
+def _original_surface_anchors(query: str, *, limit: int = 6) -> List[str]:
+    """Return bounded user-authored literals suitable for source-query repair."""
+    out: List[str] = []
+    for match in _SURFACE_PROPER_RE.finditer(query or ""):
+        phrase = match.group(0).strip()
+        words = phrase.split()
+        # Keep all-caps acronyms, product identifiers containing a digit, and
+        # title-cased names.  Single ordinary sentence starters are excluded.
+        is_acronym = phrase.isupper() and len(phrase) >= 2
+        has_digit = any(ch.isdigit() for ch in phrase)
+        is_name = len(words) > 1 or (phrase not in _SURFACE_STOPWORDS and phrase[0].isupper())
+        if not (is_acronym or has_digit or is_name):
+            continue
+        if phrase.casefold() not in {x.casefold() for x in out}:
+            out.append(phrase)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _preserve_source_surface_anchors(original_query: str, focuses: List[PlannedFocus]) -> List[PlannedFocus]:
+    """Add one bounded lexical recall probe for cross-language source plans.
+
+    A translated semantic query and a three-term literal probe serve different
+    purposes.  The latter prevents an AND-like document search from losing an
+    English table because its product/task wording was translated.  It only
+    copies user-authored surfaces, is bounded to one probe per source/focus,
+    and leaves the planner's primary executable queries untouched.
+    """
+    anchors = _original_surface_anchors(original_query)
+    if not anchors:
+        return focuses
+    repaired: List[PlannedFocus] = []
+    for focus in focuses:
+        by_source: Dict[str, List[PlannedSubQuery]] = {}
+        for sq in focus.sub_queries:
+            by_source.setdefault(sq.target_source, []).append(sq)
+        repaired_queries = list(focus.sub_queries)
+        for queries in by_source.values():
+            combined = " ".join(sq.query for sq in queries).casefold()
+            missing = [anchor for anchor in anchors if anchor.casefold() not in combined]
+            has_latin_input = bool(re.search(r"[A-Za-z]", original_query))
+            has_cjk_plan = bool(re.search(r"[\u4e00-\u9fff]", " ".join(sq.query for sq in queries)))
+            if not (has_latin_input and has_cjk_plan and len(anchors) >= 2):
+                continue
+            # The final three literals are usually the requested comparison
+            # set (for example, countries) rather than generic sentence
+            # starters or the product name already covered by the main query.
+            probe_terms = (missing or anchors)[-3:]
+            probe = " ".join(probe_terms)
+            if not probe or any(re.sub(r"\s+", " ", sq.query).casefold() == probe.casefold() for sq in queries):
+                continue
+            target = next((sq for sq in queries if sq.query_type == "structured"), queries[0])
+            repaired_queries.append(replace(target, query=probe))
+        repaired.append(
+            replace(focus, sub_queries=repaired_queries)
+        )
+    return repaired
+
 
 def _semantic_contract_warnings(
     original_query: str, focuses: List[PlannedFocus],
@@ -363,6 +436,7 @@ def _parse_global_plan(
     if not out:
         raise PlannerFailure(reason="empty_focuses", detail="all focuses dropped post-validate")
 
+    out = _preserve_source_surface_anchors(original_query, out)
     warnings = _semantic_contract_warnings(original_query, out)
     if warnings:
         logger.warning("global_planner plan-level anchor warnings=%s", warnings)

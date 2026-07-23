@@ -7,6 +7,9 @@ read_sheet_data.py — 表格结构读取工具模块
 """
 
 
+import re
+
+
 def number_to_column(n: int) -> str:
     """将列索引（0-based）转换为 Excel 列名
 
@@ -50,9 +53,16 @@ def parse_sheet_token(token: str) -> tuple[str, str]:
         >>> parse_sheet_token("PZ64sJ5FRh45cJtNbEBcyJdDnQg_fgvTJC")
         ('PZ64sJ5FRh45cJtNbEBcyJdDnQg', 'fgvTJC')
     """
-    parts = token.split('_')
-    if len(parts) != 2:
-        raise ValueError(f"Invalid sheet token format: {token}")
+    # Block payloads occasionally carry copy/paste whitespace or invisible
+    # separators around an otherwise valid ``spreadsheet_sheet`` token.  Tokens
+    # themselves are identifier-only, so removing Unicode whitespace here is
+    # a local normalization step, not an extra validity API call.
+    normalized = re.sub(r"[\s\u00a0\u200b\ufeff]+", "", str(token or ""))
+    parts = normalized.split('_')
+    if (len(parts) != 2 or not parts[0] or not parts[1]
+            or not re.fullmatch(r"[A-Za-z0-9]+", parts[0])
+            or not re.fullmatch(r"[A-Za-z0-9]+", parts[1])):
+        raise ValueError("Invalid sheet token format")
     return parts[0], parts[1]
 
 

@@ -52,10 +52,12 @@ from tools.core.focus_board import FocusBoard
 from tools.core.gtm_profile import GTMProfileRepository, ProfileGovernanceAgent, build_shadow_report
 from tools.core.final_assembler import (
     assemble_final_chunks,
+    enforce_focus_quota,
     render_final_payload,
 )
 from tools.core.evidence_role_funnel import current as current_role_funnel
 from tools.core.global_coverage import snapshot_global_coverage
+from tools.core.global_plan_eval import evaluate_merged_plan
 
 
 logger = logging.getLogger(__name__)
@@ -440,11 +442,12 @@ async def _dispatch_sources(
             )
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
-            remaining = await agent.drain_inflight(timeout_s=10.0)
+            drain_timeout_s = agent.cfg.cancel_drain_timeout_s
+            remaining = await agent.drain_inflight(timeout_s=drain_timeout_s)
             result = _timeout_result(name, agent, timeout_s)
             result.retrieval_trace.append({
                 "event": "cancel_drain", "source": name,
-                "remaining_sync_io": remaining, "drain_timeout_s": 10.0,
+                "remaining_sync_io": remaining, "drain_timeout_s": drain_timeout_s,
             })
             return result
         except Exception as e:
@@ -618,10 +621,10 @@ class RetrieveAgent(BaseAgent):
         # can join fallback/read/judgment to retained evidence.
         if self.profile_governance is None:
             self.profile_governance = ProfileGovernanceAgent()
-        # 兜底标记：所有源完成后未达 quota 的 focus → noise_only
-        for fid in focus_board.unsatisfied_focus_ids():
-            focus_board.mark_terminal(fid, status="noise_only")
-        logger.debug("FocusBoard final: %s", focus_board.snapshot())
+        # FocusBoard is a dispatch/readiness control only.  It must not turn
+        # an unsatisfied source quota into a final semantic `noise_only`
+        # verdict; merged plan-eval below is the completion authority.
+        logger.debug("FocusBoard dispatch snapshot: %s", focus_board.snapshot())
         logger.info(
             "TIMING retrieve.dispatch sources=%d ms=%.1f",
             len(self.sources),
@@ -647,6 +650,26 @@ class RetrieveAgent(BaseAgent):
         operational_events.extend(snapshot_global_coverage(
             merged, focuses, self.config.focus_quota, stage="merged_pre_global_eval",
         ))
+        global_plan_eval = evaluate_merged_plan(
+            merged,
+            focuses,
+            self.config.focus_quota,
+            {result.source: result.retrieval_trace or [] for result in per_source},
+        )
+        operational_events.append({
+            **global_plan_eval.trace_event(), "resolution_id": resolution_id,
+        })
+        if global_plan_eval.decision == "continue":
+            # The decision is explicit but not yet executable: a global retry
+            # needs query-signature ownership so it cannot repeat completed
+            # source I/O.  Keep it visible instead of silently launching a
+            # second whole-source run.
+            operational_events.append({
+                "event": "global_replan_deferred",
+                "resolution_id": resolution_id,
+                "focus_ids": list(global_plan_eval.replan_focus_ids),
+                "reason": "query_signature_dedup_not_implemented",
+            })
         yield self._make_text_event(
             ctx,
             f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
@@ -667,6 +690,11 @@ class RetrieveAgent(BaseAgent):
             # LlmEvalLayer.rank() 是同步阻塞调用（含 LLM RTT），通过 to_thread 不阻塞事件循环；
             # RuleEvalLayer.rank() 亦是同步，同样走 to_thread 保持一致（开销可忽略）。
             selected = await asyncio.to_thread(eval_layer.rank, merged, focuses, final_top_k)
+            # A resilient Rule fallback is not a healthy LLM verdict. Keep
+            # body-free provider attempt telemetry in the operational trace.
+            operational_events.extend({
+                **event, "resolution_id": resolution_id,
+            } for event in list(getattr(eval_layer, "trace_events", []) or []))
             logger.info(
                 "TIMING retrieve.eval_layer candidates=%d picked=%d cap=%d mode=%s ms=%.1f",
                 len(merged), len(selected), final_top_k, self.config.eval_layer_effective_mode,
@@ -690,6 +718,26 @@ class RetrieveAgent(BaseAgent):
                 (time.perf_counter() - assemble_started) * 1000.0,
             )
             assemble_path = "rule"
+        # LLM global rank is ordering, not permission to silently break a
+        # Focus evidence quota.  This deterministic guard consumes only
+        # already judged evidence and records any cap-impossible gap.
+        selected, quota_events = enforce_focus_quota(
+            selected, merged, focuses, final_top_k, focus_quota,
+        )
+        operational_events.extend({
+            **event, "resolution_id": resolution_id,
+        } for event in quota_events)
+        final_global_plan_eval = evaluate_merged_plan(
+            selected,
+            focuses,
+            self.config.focus_quota,
+            {result.source: result.retrieval_trace or [] for result in per_source},
+        )
+        operational_events.append({
+            **final_global_plan_eval.trace_event(),
+            "stage": "final_post_selection",
+            "resolution_id": resolution_id,
+        })
         yield self._make_text_event(
             ctx,
             f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={final_top_k} total_ms={(time.monotonic() - start) * 1000:.0f}",

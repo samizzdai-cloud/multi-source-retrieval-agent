@@ -709,14 +709,14 @@ def merge_adjacent_chunks(
     chunks: List[Chunk],
     max_chunk_tokens: int = 800,
 ) -> List[Chunk]:
-    """Post-merge pass: combine adjacent chunks that share the same parent heading
-    and fit within the token budget.
+    """Post-merge pass: combine adjacent chunks with the exact same heading
+    and that fit within the token budget.
 
     Rules:
       1. Heading inheritance: chunks without heading_path inherit from the
          nearest preceding chunk that has one.
       2. Adjacent chunks merge if:
-         - _parent_heading() is identical (second-to-last heading segment)
+         - their full ``heading_path`` is identical
          - Combined token count ≤ max_chunk_tokens
       3. Merged content: keep a single heading prefix, concatenate bodies.
       4. content_type: if any constituent has TABLE_MD/TABLE_JSON → TABLE_MD.
@@ -741,11 +741,9 @@ def merge_adjacent_chunks(
 
     for c in chunks[1:]:
         prev = merged[-1]
-        prev_parent = _parent_heading(prev.heading_path)
-        curr_parent = _parent_heading(c.heading_path)
-
         can_merge = (
-            prev_parent == curr_parent
+            bool(prev.heading_path)
+            and prev.heading_path == c.heading_path
             and prev.token_count + c.token_count <= max_chunk_tokens
         )
 

@@ -21,6 +21,7 @@ _TRACE_EVENT_FIELDS = frozenset({
     "api_query", "api_rank", "document", "document_id", "heading", "range", "batch_id",
     "content_sha256", "content_chars", "timeout_s", "outcome", "tier", "fallback", "fallback_origin", "fallback_kind",
     "candidate_count", "primary_candidate_count", "fallback_candidate_count", "replan", "route", "phase",
+    "profile_item_id", "profile_item_type", "snapshot_id",
 })
 _SKU = re.compile(r"\bsku\b|\b[a-z]{1,8}[-_]?(?:\d{3,}|\d{2}[a-z]\d*)\b", re.I)
 _GENERIC = {"data", "report", "marketing", "campaign", "sales", "region", "market", "analysis"}
@@ -39,28 +40,56 @@ class MemoryPack:
     def prompt_block(self) -> str:
         if not self.entities and not self.expressions:
             return ""
+        # Internal profile IDs are governance-only provenance.  Planner input
+        # is intentionally vocabulary-only and must not gain profile refs.
+        entities = [
+            {key: value for key, value in entity.items() if key != "id"}
+            for entity in self.entities
+        ]
+        expressions = [
+            {key: value for key, value in expression.items() if key != "id"}
+            for expression in self.expressions
+        ]
         return "GTM profile query candidates only; not evidence or facts: " + json.dumps(
-            {"entities": self.entities, "expression_sets": self.expressions}, ensure_ascii=False,
+            {"entities": entities, "expression_sets": expressions}, ensure_ascii=False,
         )
 
     def fallback_variants(self, original_query: str) -> tuple[List[str], List[str]]:
         """Return at most one alias and one exact-expression replacement."""
-        aliases, expressions = [], []
+        aliases = [item[0] for item in self.fallback_variant_specs(original_query) if item[1] == "alias"]
+        expressions = [item[0] for item in self.fallback_variant_specs(original_query) if item[1] == "expression"]
+        return aliases[:1], expressions[:1]
+
+    def fallback_variant_specs(self, original_query: str) -> list[tuple[str, str, int]]:
+        """Return deterministic fallback variants with internal provenance.
+
+        The ``item_id`` is never included in planner context.  It becomes a
+        body-free trace field only after this exact/lexical fallback actually
+        runs, so offline governance can attribute its outcome safely.
+        """
+        aliases: list[tuple[str, str, int]] = []
+        expressions: list[tuple[str, str, int]] = []
         for entity in self.entities:
             for alias in entity.get("aliases", []):
                 entity_forms = [entity.get("name", "")] + list(entity.get("aliases", []))
                 matched = next((form for form in entity_forms if normalize(form) in normalize(original_query)), "")
                 if matched and normalize(alias) and normalize(alias) != normalize(matched):
-                    aliases.append(re.sub(re.escape(str(matched)), str(alias), original_query, count=1, flags=re.I))
+                    aliases.append((
+                        re.sub(re.escape(str(matched)), str(alias), original_query, count=1, flags=re.I),
+                        "alias", int(entity.get("id") or 0),
+                    ))
                     break
         for expression in self.expressions:
             for variant in expression.get("variants", []):
                 forms = [expression.get("name", "")] + list(expression.get("variants", []))
                 matched = next((form for form in forms if normalize(form) in normalize(original_query)), "")
                 if matched and normalize(variant) and normalize(variant) != normalize(matched):
-                    expressions.append(re.sub(re.escape(str(matched)), str(variant), original_query, count=1, flags=re.I))
+                    expressions.append((
+                        re.sub(re.escape(str(matched)), str(variant), original_query, count=1, flags=re.I),
+                        "expression", int(expression.get("id") or 0),
+                    ))
                     break
-        return aliases[:1], expressions[:1]
+        return (aliases + expressions)[:2]
 
 
 @dataclass(frozen=True)
@@ -140,7 +169,7 @@ class GTMProfileRepository:
             ):
                 aliases = [row[0] for row in db.execute("SELECT alias FROM entity_alias WHERE entity_id=?", (eid,))]
                 if normalize(name) in q or any(normalize(alias) in q for alias in aliases):
-                    entities.append({"name": name, "kind": kind, "aliases": aliases[:2]})
+                    entities.append({"id": int(eid), "name": name, "kind": kind, "aliases": aliases[:2]})
             expressions = []
             # FTS narrows candidates, then exact lexical checks prevent broad semantic expansion.
             # FTS5's query grammar treats punctuation (for example ``5.20``)
@@ -151,23 +180,23 @@ class GTMProfileRepository:
             if fts_query:
                 try:
                     rows = db.execute(
-                        "SELECT f.name,f.variants FROM expression_fts f "
+                        "SELECT e.id,f.name,f.variants FROM expression_fts f "
                         "JOIN expression_set e ON e.scope=f.scope AND e.name=f.name "
                         "WHERE expression_fts MATCH ? AND f.scope=? AND e.status='active'",
                         (fts_query, self.scope),
                     ).fetchall()
                 except sqlite3.OperationalError:
                     rows = db.execute(
-                        "SELECT name,variants FROM expression_set WHERE scope=? AND status='active'", (self.scope,),
+                        "SELECT id,name,variants FROM expression_set WHERE scope=? AND status='active'", (self.scope,),
                     ).fetchall()
             else:
                 rows = db.execute(
-                    "SELECT name,variants FROM expression_set WHERE scope=? AND status='active'", (self.scope,),
+                    "SELECT id,name,variants FROM expression_set WHERE scope=? AND status='active'", (self.scope,),
                 ).fetchall()
-            for name, raw_variants in rows:
+            for expression_id, name, raw_variants in rows:
                 variants = [v for v in raw_variants.split("|") if v]
                 if normalize(name) in q or any(normalize(v) in q for v in variants):
-                    expressions.append({"name": name, "variants": variants[:2]})
+                    expressions.append({"id": int(expression_id), "name": name, "variants": variants[:2]})
         return MemoryPack(entities[:3], expressions[:3])
 
     def resolve(self, query: str, config: Any, *, resolution_id: str = "") -> ProfileResolution:
@@ -415,6 +444,9 @@ class RetrievalDelta:
     rank_after: int | None = None
     root_request_id: str = ""
     query_signature: str = ""
+    profile_item_id: int = 0
+    profile_item_type: str = ""
+    snapshot_id: str = ""
 
     def qualifies(self) -> bool:
         return (
@@ -515,6 +547,9 @@ def extract_profile_deltas(report_records: Iterable[Mapping[str, object]]) -> li
                 final_evidence_hits=len(query_chunks.get(str(event.get("query_id") or ""), set()) & final_ids),
                 root_request_id=str(event.get("resolution_id") or ""),
                 query_signature=normalize(str(event.get("api_query") or event.get("query_id") or "")),
+                profile_item_id=int(event.get("profile_item_id") or 0),
+                profile_item_type=str(event.get("profile_item_type") or kind),
+                snapshot_id=str(event.get("snapshot_id") or ""),
             ))
     return deltas
 

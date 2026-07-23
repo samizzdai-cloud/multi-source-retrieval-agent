@@ -127,6 +127,11 @@ def _ensure_response_format_patch() -> None:
 AGENT_CFG_EVAL_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=16384)
 AGENT_CFG_PLAN_ONLY = _genai_types.GenerateContentConfig(max_output_tokens=4096)
 AGENT_CFG_PLAN_EVAL = _genai_types.GenerateContentConfig(max_output_tokens=16384)
+# Partial eval must classify every supplied Focus/chunk pair.  Do not impose a
+# product-level output-token cap here: a cap turns a complete classification
+# into an indistinguishable truncated/empty response.  Provider-side hard
+# limits still apply and are handled as an explicit contract failure.
+AGENT_CFG_PARTIAL_EVAL = _genai_types.GenerateContentConfig()
 
 
 # ── multi-focus 动态预算常量 ─────────────────────────────────────────────────
@@ -150,6 +155,7 @@ def effective_source_top_k(base_top_k: int, n_focuses: int) -> int:
 
 # ── 共用字面量 ──────────────────────────────────────────────────────────────
 Tier = Literal["critical", "important", "noise"]
+PartialTier = Literal["critical", "important"]
 Decision = Literal["continue", "stop"]
 
 
@@ -254,12 +260,28 @@ class FocusEvidenceLedger(BaseModel):
     remaining_gap: str = ""
 
 
-class FocusShortlist(BaseModel):
-    """Request-local shortlist for one focus in one partial-eval batch."""
+class PartialFocusTier(BaseModel):
+    """One retained chunk's provisional tier for the enclosing Focus only.
+
+    Partial evaluation is an admission filter: it emits only evidence that
+    survives to merged plan_eval.  Omitted submitted refs are explicit noise
+    for that Focus; an all-omitted Focus group must carry
+    ``reason=no_qualifying_chunks``.
+    """
+    chunk_id: str
+    tier: PartialTier
+
+
+class PartialFocusGroup(BaseModel):
+    """Focus-local retained evidence for one partial-eval batch.
+
+    ``reason`` is required when no submitted chunk survives this Focus filter.
+    It is deliberately attached to the Focus group rather than represented by
+    a separate "uncovered focuses" output surface.
+    """
     focus_id: str
-    admission_chunk_ids: List[str] = Field(default_factory=list)
-    critical_chunk_ids: List[str] = Field(default_factory=list)
-    important_chunk_ids: List[str] = Field(default_factory=list)
+    tiers: List[PartialFocusTier] = Field(default_factory=list)
+    reason: str = ""
 
 
 class FocusReplanDecision(BaseModel):
@@ -322,40 +344,20 @@ def build_eval_only_model(source_top_k: int) -> Type[BaseModel]:
     )
 
 
-def build_partial_eval_model(
-    max_chunks: int = 2000,
-    max_critical_per_focus: int = 6,
-    max_important_per_focus: int = 12,
-) -> Type[BaseModel]:
-    """Compact evidence shortlist for one context batch; no final top-K.
+def build_partial_eval_model() -> Type[BaseModel]:
+    """Complete, Focus-grouped partial tiering; no shortlist or final top-K.
 
-    Repeating one object for every chunk consumes more output than the actual
-    decision.  Omitted refs mean not shortlisted, not a semantic noise verdict;
-    final tier and gap remain the responsibility of the merged plan_eval.
+    Partial evaluation must not cap retained evidence. Each Focus group emits
+    provisional ``critical`` / ``important`` refs; omitted submitted refs are
+    noise for that Focus. Only merged ``plan_eval`` owns final tier, coverage,
+    gap, replan, and top-K.
     """
-    focus_shortlist_model = create_model(  # type: ignore[call-overload]
-        f"FocusShortlistC{max_critical_per_focus}I{max_important_per_focus}",
-        focus_id=(str, Field(...)),
-        admission_chunk_ids=(
-            List[str], Field(..., min_length=1,
-                             max_length=max_critical_per_focus + max_important_per_focus),
-        ),
-        critical_chunk_ids=(
-            List[str], Field(default_factory=list, max_length=max_critical_per_focus),
-        ),
-        important_chunk_ids=(
-            List[str], Field(default_factory=list, max_length=max_important_per_focus),
-        ),
-    )
     return create_model(  # type: ignore[call-overload]
-        f"PartialEvalOutputK{max_chunks}",
-        focus_shortlists=(
-            List[focus_shortlist_model],  # type: ignore[valid-type]
-            Field(..., max_length=max_chunks,
-                  description="one compact critical/important shortlist per focus"),
+        "PartialFocusTierOutput",
+        focus_groups=(
+            List[PartialFocusGroup],
+            Field(..., description="complete per-Focus provisional tier groups"),
         ),
-        focus_ledger=(List[FocusEvidenceLedger], Field(default_factory=list,
-              description="batch-local coverage and remaining gap per focus")),
     )
 
 

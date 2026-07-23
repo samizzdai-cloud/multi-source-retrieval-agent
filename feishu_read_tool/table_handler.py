@@ -504,6 +504,71 @@ def _make_error_chunk(
 
 # ── type30 (embedded sheet) handler ─────────────────────────────
 
+def _embedded_sheet_failure_disposition(error: Exception) -> str:
+    """A malformed/dead embed is skipped; only transport is retryable."""
+    text = str(error).lower()
+    markers = (
+        "invalid token", "invalid spreadsheet", "invalid sheet", "invalid parameter",
+        "field validation", "spreadsheet_token is required", "malformed token",
+    )
+    return "skip_invalid_token" if any(marker in text for marker in markers) else "transient"
+
+
+def fetch_embedded_sheet_rows(
+    block: Dict,
+    client,
+    doc_id: str,
+    cfg: "PipelineConfig",
+) -> Optional[List[List]]:
+    """Read one type-30 child without allocating chunk IDs.
+
+    This is deliberately separate from ``build_sheet_chunk`` so a Docx can
+    fetch independent Sheets children concurrently while converting successful
+    responses to chunks in stable document order.  A failed child is recorded
+    as a read gap and never invalidates its enclosing Docx.
+    """
+    block_id = block.get("block_id", "")
+    sheet_obj = block.get("sheet")
+    if not sheet_obj:
+        return None
+    if hasattr(sheet_obj, "token"):
+        raw_token = sheet_obj.token
+    elif isinstance(sheet_obj, dict):
+        raw_token = sheet_obj.get("token")
+    else:
+        raw_token = None
+    if not raw_token:
+        return None
+    try:
+        from .basic_tool.sheet_utils import parse_sheet_token, number_to_column
+        from .sheet_reader import _api_call_with_backoff
+        spreadsheet_token, sheet_id = parse_sheet_token(raw_token)
+        range_str = f"{sheet_id}!A1:{number_to_column(19)}100"
+        return _api_call_with_backoff(
+            client.read_sheet_range, spreadsheet_token, range_str,
+            per_call_timeout_s=3.0, max_attempts=1,
+        )
+    except Exception as e:
+        msg = str(e)
+        if len(msg) > 160:
+            msg = msg[:160] + "..."
+        logger.warning(
+            "feishu.read_fail source=type30_sheet doc=%s block=%s token=%s kind=%s msg=%s",
+            doc_id[:12], block_id[:12], str(raw_token)[:24], type(e).__name__, msg,
+        )
+        sink = getattr(cfg, "io_failure_sink", None)
+        if isinstance(sink, list):
+            sink.append({
+                "source": "type30_sheet",
+                "document_id": str(doc_id),
+                "block_id": str(block_id),
+                "spreadsheet_token": str(spreadsheet_token) if 'spreadsheet_token' in locals() else "",
+                "sheet_id": str(sheet_id) if 'sheet_id' in locals() else "",
+                "error_type": type(e).__name__,
+                "disposition": _embedded_sheet_failure_disposition(e),
+            })
+        return None
+
 def build_sheet_chunk(
     block: Dict,
     client,
@@ -515,6 +580,7 @@ def build_sheet_chunk(
     query: str,
     llm_caller: Callable[[str], str],
     cfg: "PipelineConfig",
+    rows_raw: Optional[List[List]] = None,
 ) -> Tuple[List[Chunk], set]:
     """Convert a single type30 (embedded Sheet) block into Chunks."""
     block_id = block.get("block_id", "")
@@ -535,27 +601,21 @@ def build_sheet_chunk(
         return [], consumed
 
     try:
-        from .basic_tool.sheet_utils import parse_sheet_token, number_to_column
-        from .sheet_reader import _api_call_with_backoff
+        from .basic_tool.sheet_utils import parse_sheet_token
         spreadsheet_token, sheet_id = parse_sheet_token(raw_token)
-        # 限制范围：嵌入式 sheet 只读前 100 行 × 20 列，避免大表超时
-        range_str = f"{sheet_id}!A1:{number_to_column(19)}100"
-        # 走 sheet_reader 共用的 retry wrapper：3s per-call timeout + 90235 重试
-        # 配合上层 8s 总预算（type30 是 docx Stage 4 内部调用，没有外层 wait_for；
-        # 故 max_attempts=3 让最坏 3×3 = 9s 受 stage timeout 兜底）
-        rows_raw = _api_call_with_backoff(
-            client.read_sheet_range, spreadsheet_token, range_str,
-            per_call_timeout_s=3.0, max_attempts=3,
-        )
-    except Exception as e:
-        # 结构化失败日志（S2.1 观测），便于统一 grep 分析是否值得做短期缓存
-        msg = str(e)
-        if len(msg) > 160:
-            msg = msg[:160] + "..."
-        logger.warning(
-            "feishu.read_fail source=type30_sheet doc=%s block=%s token=%s kind=%s msg=%s",
-            doc_id[:12], block_id[:12], str(raw_token)[:24], type(e).__name__, msg,
-        )
+    except ValueError:
+        # The normal read path records malformed tokens through the fetch
+        # helper. A caller supplying pre-fetched rows must still not construct
+        # untraceable chunks from an invalid token.
+        return [], consumed
+
+    if rows_raw is None:
+        # A type-30 child is optional only relative to preserving the enclosing
+        # Docx body/native-grid chunks. One bounded read exposes its gap without
+        # discarding parent chunks. The Docx pipeline normally prefetches rows
+        # in a dedicated Sheets pool and passes them here in stable block order.
+        rows_raw = fetch_embedded_sheet_rows(block, client, doc_id, cfg)
+    if rows_raw is None:
         return [], consumed
 
     rows: List[List[str]] = [
@@ -594,6 +654,12 @@ def build_sheet_chunk(
     chunks = _split_rows_into_chunks(
         rows, doc_id, doc_title, doc_url, heading_path,
         chunk_counter, consumed, header_info, rows_per_chunk=20,
+        section_meta={
+            "source_kind": "docx_embedded_sheet",
+            "embedded_spreadsheet_token": spreadsheet_token,
+            "embedded_sheet_id": sheet_id,
+            "embedded_block_id": block_id,
+        },
     )
     return chunks, consumed
 

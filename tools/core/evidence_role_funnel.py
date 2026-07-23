@@ -32,7 +32,7 @@ class _RoleState:
     candidate_granularity: str = "not_observed"
     read_present: bool = False
     rerank_retained: bool = False
-    partial_shortlisted: bool = False
+    partial_tier_retained: bool = False
     plan_eval_judged: bool = False
     plan_eval_tier: str = ""
     source_retained: bool = False
@@ -77,8 +77,8 @@ class RoleFunnelObserver:
                     self.read_lineage_events.append({"role": state.role, **self._chunk_ref(chunk)})
                 elif stage == "rerank_retained":
                     state.rerank_retained = True
-                elif stage == "partial_shortlisted":
-                    state.partial_shortlisted = True
+                elif stage == "partial_tier_retained":
+                    state.partial_tier_retained = True
                 elif stage == "plan_eval":
                     state.plan_eval_judged = True
                     state.plan_eval_tier = str((tier_by_id or {}).get(chunk.id) or state.plan_eval_tier)
@@ -104,7 +104,7 @@ class RoleFunnelObserver:
     def summary(self) -> dict[str, Any]:
         stage_order = (
             ("candidate_present", "candidate"), ("read_present", "read"),
-            ("rerank_retained", "rerank"), ("partial_shortlisted", "shortlist"),
+            ("rerank_retained", "rerank"), ("partial_tier_retained", "partial_tier"),
             ("plan_eval_judged", "plan_eval"), ("source_retained", "source_retained"),
             ("global_retained", "global_retained"), ("final_present", "final"),
         )
@@ -115,7 +115,7 @@ class RoleFunnelObserver:
                 "role": state.role, "candidate_present": state.candidate_present,
                 "candidate_granularity": state.candidate_granularity,
                 "read_present": state.read_present, "rerank_retained": state.rerank_retained,
-                "partial_shortlisted": state.partial_shortlisted,
+                "partial_tier_retained": state.partial_tier_retained,
                 "plan_eval_judged": state.plan_eval_judged, "plan_eval_tier": state.plan_eval_tier,
                 "source_retained": state.source_retained, "global_retained": state.global_retained,
                 "final_present": state.final_present, "first_missing_stage": first_missing,

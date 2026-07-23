@@ -26,8 +26,11 @@ def snapshot_global_coverage(
         for chunk in rows:
             if chunk.tier not in {"critical", "important"}:
                 continue
+            # target_focuses is only planner/dispatch lineage.  Final coverage
+            # must come from a source judgment, otherwise a broad query can
+            # falsely satisfy a Focus before plan_eval has evaluated it.
             answered = set((chunk.metadata or {}).get("answered_focuses") or [])
-            if focus_id in answered or focus_id in (chunk.target_focuses or set()):
+            if focus_id in answered:
                 matched.append(chunk)
         critical = [chunk for chunk in matched if chunk.tier == "critical"]
         important = [chunk for chunk in matched if chunk.tier == "important"]

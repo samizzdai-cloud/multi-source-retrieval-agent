@@ -22,7 +22,133 @@ from typing import List, Dict, Optional, Set
 from .client import FeishuClient
 from .pipeline_models import Chunk, ChunkResult, RAGResult, PipelineConfig, ChunkContentType
 from .chunker import build_text_chunks, HeadingStack
-from .table_handler import build_table_chunk, build_sheet_chunk
+from .table_handler import build_table_chunk, build_sheet_chunk, fetch_embedded_sheet_rows
+
+
+_TYPE30_CHILD_SELECT_INSTRUCT = (
+    "Rank embedded spreadsheet tabs by whether their metadata is likely to contain "
+    "evidence for the same user retrieval task. Prefer direct operational relevance; "
+    "do not select tabs merely because they share broad business terms."
+)
+
+
+def _type30_parts(block: Dict) -> tuple[str, str] | None:
+    """Return normalized spreadsheet/tab IDs for a Docx type-30 block."""
+    sheet = block.get("sheet") if isinstance(block, dict) else getattr(block, "sheet", None)
+    raw = sheet.get("token") if isinstance(sheet, dict) else getattr(sheet, "token", None)
+    try:
+        from .basic_tool.sheet_utils import parse_sheet_token
+        return parse_sheet_token(str(raw or ""))
+    except ValueError:
+        return None
+
+
+def _has_semantic_type30_metadata(children: List[Dict]) -> bool:
+    """Whether every referenced tab has human-meaningful pre-read metadata.
+
+    Feishu may expose a tab ``title`` equal to its opaque ``sheet_id``.  That
+    is an identifier, not retrieval vocabulary: using it as Qwen input would
+    make a top-3 decision arbitrary and silently lose evidence.  Embedded
+    tabs are eligible for metadata rerank only when each candidate has a
+    non-identifier title or a supplied summary.
+    """
+    for child in children:
+        child_id = str(child.get("id") or "").strip()
+        title = str(child.get("_child_title") or child.get("title") or "").strip()
+        summary = str(child.get("summary") or "").strip()
+        if not summary and (not title or title.casefold() == child_id.casefold()):
+            return False
+    return bool(children)
+
+
+def _select_type30_sheet_tasks(
+    tasks: List[tuple], *, client: FeishuClient, query: str, cfg: PipelineConfig,
+) -> List[tuple]:
+    """Apply the normal parent-child read boundary to Docx sheet embeds.
+
+    Type-30 blocks provide a child tab token directly.  Many blocks can belong
+    to the same spreadsheet parent, so reading every child is equivalent to
+    bypassing the standalone Sheet/Bitable child-select contract.  Invalid
+    tokens remain in the list and are reported by ``build_sheet_chunk``; only
+    structurally valid, same-parent children participate in selection.
+    """
+    groups: Dict[str, List[tuple]] = {}
+    passthrough: List[tuple] = []
+    for task in tasks:
+        task_type, block, btype, _block_id = task
+        if task_type != "block" or btype != 30:
+            passthrough.append(task)
+            continue
+        parts = _type30_parts(block)
+        if not parts:
+            passthrough.append(task)
+            continue
+        groups.setdefault(parts[0], []).append(task)
+
+    selected_tasks: List[tuple] = list(passthrough)
+    trace_sink = getattr(cfg, "io_failure_sink", None)
+    for spreadsheet_token, group in groups.items():
+        # Preserve document order for <=3 and all provider/metadata failures.
+        child_ids = [_type30_parts(task[1])[1] for task in group]
+        if len(group) <= 3:
+            selected_tasks.extend(group)
+            selection = {"mode": "all_children", "input_count": len(group), "selected_count": len(group)}
+        else:
+            try:
+                metadata = client.query_all_sheets_metadata(spreadsheet_token, timeout=3.0)
+                by_id = {str(item.get("sheet_id") or ""): item for item in metadata}
+                children = []
+                for task, child_id in zip(group, child_ids):
+                    item = by_id.get(child_id) or {}
+                    children.append({
+                        "id": child_id,
+                        "_child_title": str(item.get("title") or child_id),
+                        "row_count": item.get("row_count"),
+                        "column_count": item.get("column_count"),
+                    })
+                if not _has_semantic_type30_metadata(children):
+                    # Preserve evidence recall rather than pretending opaque
+                    # tab IDs can produce a relevance ranking.  The I/O cost
+                    # is addressed by the dedicated Sheets execution policy,
+                    # not by lossy pseudo-selection.
+                    selected_tasks.extend(group)
+                    selection = {
+                        "mode": "metadata_unusable_full_read",
+                        "input_count": len(group), "selected_count": len(group),
+                    }
+                else:
+                    from tools.core.table_child_rerank import select_table_children
+                    chosen, selection = select_table_children(
+                        query, children, top_n=3, timeout_s=5.0,
+                        instruct=_TYPE30_CHILD_SELECT_INSTRUCT,
+                    )
+                    chosen_ids = {str(item.get("id") or "") for item in chosen}
+                    selected_tasks.extend(task for task, child_id in zip(group, child_ids) if child_id in chosen_ids)
+            except Exception as exc:
+                selected_tasks.extend(group[:3])
+                selection = {
+                    "mode": "metadata_error_api_order_fallback",
+                    "input_count": len(group), "selected_count": min(3, len(group)),
+                    "error_type": type(exc).__name__,
+                }
+        if isinstance(trace_sink, list):
+            chosen_ids = []
+            for task in selected_tasks:
+                parts = _type30_parts(task[1]) if task[0] == "block" and task[2] == 30 else None
+                if parts and parts[0] == spreadsheet_token:
+                    chosen_ids.append(parts[1])
+            trace_sink.append({
+                "source": "type30_sheet_selection",
+                "spreadsheet_token": spreadsheet_token,
+                "input_child_count": str(selection.get("input_count", len(group))),
+                "selected_child_count": str(selection.get("selected_count", len(chosen_ids))),
+                "selected_child_ids": ",".join(chosen_ids),
+                "selection_mode": str(selection.get("mode") or ""),
+                "error_type": str(selection.get("error_type") or ""),
+            })
+    # Keep document block order after group selection, rather than grouped order.
+    selected_ids = {id(task) for task in selected_tasks}
+    return [task for task in tasks if id(task) in selected_ids]
 
 def _call_llm_table(prompt: str) -> str:
     """Wrapper so table/sheet LLM calls carry a recognizable caller_tag."""
@@ -662,6 +788,7 @@ def run_rag_pipeline(
                      for block in blocks
                      if (block.get("block_type") if isinstance(block, dict) else getattr(block, "block_type", None))
                      in _IO_BLOCK_TYPES]
+        io_tasks = _select_type30_sheet_tasks(io_tasks, client=client, query=query, cfg=cfg)
         
         # 将获取评论也作为一个 IO 任务加入并行池（lite_block_only 模式跳过）
         if not getattr(cfg, "lite_block_only", False):
@@ -669,7 +796,47 @@ def run_rag_pipeline(
 
         fetched_comments = []
 
-        if io_tasks:
+        # Type-30 uses the independent Feishu Sheets API. Fetch its rows in a
+        # dedicated bounded pool, then construct chunks below in document-block
+        # order. This avoids starving Sheets behind comments/board/bitable work
+        # and avoids concurrent mutation of the shared chunk counter.
+        type30_tasks = [task for task in io_tasks if task[0] == "block" and task[2] == 30]
+        other_io_tasks = [task for task in io_tasks if task not in type30_tasks]
+        prefetched_type30_rows: Dict[int, Optional[List[List]]] = {}
+        if type30_tasks:
+            sheet_workers = max(1, int(getattr(cfg, "embedded_sheet_read_concurrency", 10)))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=sheet_workers) as sheet_pool:
+                futures = {
+                    sheet_pool.submit(fetch_embedded_sheet_rows, task[1], client, doc_id, cfg): id(task)
+                    for task in type30_tasks
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    task_key = futures[future]
+                    try:
+                        prefetched_type30_rows[task_key] = future.result()
+                    except Exception as exc:
+                        logger.warning("Stage 4: type30 fetch future failed: %s", exc)
+                        prefetched_type30_rows[task_key] = None
+            for task in type30_tasks:
+                _task_type, block, _btype, bid = task
+                rows_raw = prefetched_type30_rows.get(id(task))
+                if rows_raw is None:
+                    continue
+                try:
+                    _hp = _io_hp_map.get(bid, "")
+                    chunks_result, consumed = build_sheet_chunk(
+                        block=block, client=client, doc_id=doc_id,
+                        doc_title=doc_title, doc_url=doc_url,
+                        heading_path=_hp, chunk_counter=chunk_counter, query=query,
+                        llm_caller=_call_llm_table, cfg=cfg, rows_raw=rows_raw,
+                    )
+                    if chunks_result:
+                        doc_chunks.extend(chunks_result)
+                        consumed_table_block_ids.update(consumed)
+                except Exception as exc:
+                    logger.warning("Stage 4: type30 chunk build failed block %s: %s", bid, exc)
+
+        if other_io_tasks:
             _IO_PARALLEL = 4  # 3 个 block 并发 + 1 个 comment 并发
 
             def _process_io_task(args):
@@ -687,15 +854,7 @@ def run_rag_pipeline(
                 # 处理 IO blocks
                 try:
                     _hp = _io_hp_map.get(bid, "")
-                    if btype == 30:
-                        return ("chunks", build_sheet_chunk(
-                            block=block, client=client, doc_id=doc_id,
-                            doc_title=doc_title, doc_url=doc_url,
-                            heading_path=_hp,
-                            chunk_counter=chunk_counter, query=query,
-                            llm_caller=_call_llm_table, cfg=cfg,
-                        ))
-                    elif btype == 53:
+                    if btype == 53:
                         bitable_token = block.get("bitable_token") if isinstance(block, dict) else None
                         view_id = block.get("bitable_view_id", "") if isinstance(block, dict) else ""
                         if bitable_token:
@@ -728,7 +887,7 @@ def run_rag_pipeline(
                 return ("chunks", ([], set()))
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=_IO_PARALLEL) as pool:
-                futures = [pool.submit(_process_io_task, args) for args in io_tasks]
+                futures = [pool.submit(_process_io_task, args) for args in other_io_tasks]
                 for fut in concurrent.futures.as_completed(futures):
                     try:
                         res_type, payload = fut.result()

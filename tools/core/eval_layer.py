@@ -376,8 +376,30 @@ def _normalize_eval_payload(parsed: object, *, top_k: int) -> Dict[str, List[Dic
             "selected_ids": list(parsed.get("selected_ids") or []),
             "tiers": list(parsed.get("tiers") or []),
         }
-    if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
-        rows = [dict(item) for item in parsed]
+    if isinstance(parsed, list):
+        # Some OpenAI-compatible providers wrap the requested object in a
+        # one-element array, or append a harmless non-tier object to a tier
+        # list.  Recover the useful, schema-shaped part without treating an
+        # arbitrary prose list as evidence judgment.
+        wrappers = [
+            item for item in parsed
+            if isinstance(item, dict) and ("selected_ids" in item or "tiers" in item)
+        ]
+        if len(wrappers) == 1:
+            wrapper = wrappers[0]
+            tiers = wrapper.get("tiers") or []
+            if isinstance(tiers, list):
+                return {
+                    "selected_ids": list(wrapper.get("selected_ids") or []),
+                    "tiers": [dict(item) for item in tiers if isinstance(item, dict)],
+                }
+        rows = [
+            dict(item) for item in parsed
+            if isinstance(item, dict) and isinstance(item.get("chunk_id"), str)
+        ]
+        if not rows:
+            item_types = ",".join(sorted({type(item).__name__ for item in parsed}))
+            raise TypeError(f"eval JSON list has no usable tier rows; item_types={item_types}")
         tier_rank = {"critical": 0, "important": 1, "noise": 2}
         rows.sort(key=lambda row: (
             tier_rank.get(str(row.get("tier")), 3),
@@ -430,8 +452,15 @@ class LlmEvalLayer:
     # source eval_only/plan_eval.  It must not implicitly require Vertex ADC.
     model: str = "deepseek/deepseek-v4-flash"
     timeout_s: float = 30.0
+    # This layer improves final ordering only. After one transient retry,
+    # deterministic RuleEvalLayer preserves already judged evidence instead of
+    # spending another long provider round-trip on a non-critical optimization.
+    max_retries: int = 2
     max_input_chunks: int = 40      # 超出时先过规则层截断
     rule_params: RuleEvalParams = field(default_factory=RuleEvalParams)
+    # Request-local, body-free telemetry. RetrieveAgent appends it to the
+    # operational trace after rank() returns.
+    trace_events: List[Dict] = field(default_factory=list, init=False, repr=False)
 
     def rank(
         self,
@@ -439,6 +468,7 @@ class LlmEvalLayer:
         focuses: List[object],
         top_k: int,
     ) -> List[ChunkEntry]:
+        self.trace_events.clear()
         if not chunks:
             return []
 
@@ -454,13 +484,29 @@ class LlmEvalLayer:
         else:
             candidates = list(chunks)
 
+        self.trace_events.append({
+            "event": "eval_layer_started", "stage": "final_eval",
+            "mode": "llm_tool", "model": self.model,
+            "input_chunk_count": len(chunks), "candidate_chunk_count": len(candidates),
+            "top_k": top_k, "timeout_s": self.timeout_s,
+        })
         try:
             selected = self._llm_rank(candidates, focuses, top_k)
         except Exception as e:
+            self.trace_events.append({
+                "event": "eval_layer_fallback", "stage": "final_eval",
+                "reason": "llm_call_failed", "error_type": type(e).__name__,
+                "fallback": "rule", "candidate_chunk_count": len(candidates),
+            })
             logger.warning("LlmEvalLayer: LLM failed (%s) → fallback RuleEvalLayer", e)
             return rule_layer.rank(chunks, focuses, top_k)
 
         if not selected:
+            self.trace_events.append({
+                "event": "eval_layer_fallback", "stage": "final_eval",
+                "reason": "empty_selection", "fallback": "rule",
+                "candidate_chunk_count": len(candidates),
+            })
             logger.warning("LlmEvalLayer: LLM returned 0 chunks → fallback RuleEvalLayer")
             return rule_layer.rank(chunks, focuses, top_k)
 
@@ -468,6 +514,11 @@ class LlmEvalLayer:
             "LlmEvalLayer: selected %d/%d (cap=%d) chunks",
             len(selected), len(candidates), top_k,
         )
+        self.trace_events.append({
+            "event": "eval_layer_selected", "stage": "final_eval",
+            "mode": "llm_tool", "candidate_chunk_count": len(candidates),
+            "selected_chunk_count": len(selected), "top_k": top_k,
+        })
         return selected
 
     def _llm_rank(
@@ -488,6 +539,10 @@ class LlmEvalLayer:
             timeout=self.timeout_s,
             _caller_tag="eval_layer.llm_tool",
             model=self.model,
+            max_retries=self.max_retries,
+            trace_callback=lambda item: self.trace_events.append({
+                **dict(item), "event": "model_call_attempt", "stage": "final_eval",
+            }),
             response_schema=_EVAL_LAYER_RESPONSE_SCHEMA,  # 结构强制（含 response_mime_type）
         )
         parsed = _normalize_eval_payload(parse_json_response(raw), top_k=top_k)

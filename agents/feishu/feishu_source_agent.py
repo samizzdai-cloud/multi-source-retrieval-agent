@@ -307,30 +307,20 @@ def _merge_doc_demands(batches: List[dict]) -> tuple:
 
 
 def _assign_doc_route_hints(doc_list: List[dict], *, min_block: int = 2) -> None:
-    """选择性分配 route_hint（block_api vs mcp）。
+    """Route normal Docx reads to Block API; MCP is discovery/fallback only.
 
-    策略（优先级高→低）：
-    0. personal_recent 生成的强制全走 mcp
-    1. multi-hit（被 2+ 个 sq 命中）→ block_api
-    2. 每个 sq 的 rank-1 doc → block_api
-    3. 保底：至少 min_block 篇走 block_api（按 score 降序补足）
-    4. 其余 → mcp
+    MCP remains the only document *search* path. Its text reader, however,
+    can omit structured Block content such as the tables required by P3. A
+    document's retrieval rank must not choose a lossy reader.  ``min_block``
+    remains accepted for backwards-compatible callers but has no role in the
+    correctness contract.
     """
-    block_keys: set = set()
-    for c in doc_list:
-        if "personal_recent" in (c.get("selected_query_types") or []):
-            continue
-        key = _candidate_doc_key(c)
-        if c.get("_sq_hit_count", 1) >= 2 or c.get("_is_top1", False):
-            block_keys.add(key)
-
-    # 保底：按 score 降序补足 min_block
-    if len(block_keys) < min_block:
-        for c in doc_list:
-            if len(block_keys) >= min_block:
-                break
-            key = _candidate_doc_key(c)
-            block_keys.add(key)
+    del min_block
+    block_keys = {
+        _candidate_doc_key(c)
+        for c in doc_list
+        if "personal_recent" not in (c.get("selected_query_types") or [])
+    }
 
     block_count = 0
     mcp_count = 0
@@ -595,6 +585,17 @@ class FeishuSourceAgent(SourceAgent):
                 if pool._executor is None:
                     pool._executor = self._executor
 
+    async def drain_inflight(self, timeout_s: float = 10.0) -> int:
+        """Include detached DocPool readers in the request cancellation gate."""
+        own_remaining = await super().drain_inflight(timeout_s=timeout_s)
+        pool_remaining = 0
+        if self._doc_pool is not None and hasattr(self._doc_pool, "drain_inflight"):
+            pool_remaining = await self._doc_pool.drain_inflight(timeout_s=timeout_s)
+        table_remaining = 0
+        if self._table_pool is not None and hasattr(self._table_pool, "drain_inflight"):
+            table_remaining = await self._table_pool.drain_inflight(timeout_s=timeout_s)
+        return own_remaining + pool_remaining + table_remaining
+
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         from .feishu_retrieve_llm_build import build_feishu_plan_only_agent
         return build_feishu_plan_only_agent()
@@ -633,12 +634,10 @@ class FeishuSourceAgent(SourceAgent):
         resolution = getattr(self, "_profile_resolution", None)
         for sq in sanitized:
             pack = resolution.fallback_pack if resolution is not None else None
-            aliases, expressions = pack.fallback_variants(sq.query) if pack is not None else ([], [])
-            sq.variants = aliases + expressions
-            sq.variant_origins = {
-                **{variant: "alias" for variant in aliases},
-                **{variant: "expression" for variant in expressions},
-            }
+            specs = pack.fallback_variant_specs(sq.query) if pack is not None else []
+            sq.variants = [variant for variant, _kind, _item_id in specs]
+            sq.variant_origins = {variant: kind for variant, kind, _item_id in specs}
+            sq.variant_origin_ids = {variant: item_id for variant, _kind, item_id in specs if item_id > 0}
         return sanitized
 
     def _enrich_sub_queries_with_variants(
@@ -740,6 +739,11 @@ class FeishuSourceAgent(SourceAgent):
     async def _execute_batch(
         self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
     ) -> None:
+        # Direct/Wiki table search dispatches through feishu_retrieve's async
+        # executor helper rather than SourceAgent._to_thread. Give that helper
+        # this request's registry so cancellation drain sees its real threads.
+        from tools.feishu.feishu_retrieve import IO_FUTURE_REGISTRY
+        IO_FUTURE_REGISTRY.set(self._inflight_futures)
         batch_started = time.perf_counter()
         await self._ensure_user_identity(sub_queries)
         if self._doc_pool is None:
@@ -829,6 +833,8 @@ class FeishuSourceAgent(SourceAgent):
                             "query_id": sq.sub_query_id, "query_type": sq.query_type,
                             "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
                             "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                            "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                            "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                         } for fallback_query in fallback_queries)
                         fallback_results = await asyncio.gather(*[
                             search_and_select_feishu_doc_candidates(
@@ -844,6 +850,8 @@ class FeishuSourceAgent(SourceAgent):
                                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                                 "query_type": qt, "fallback_origin": "profile",
                                 "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                                "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                                 "api_query": fallback_query,
                                 "primary_candidate_count": 0, "fallback_candidate_count": len(group),
                             })
@@ -883,6 +891,8 @@ class FeishuSourceAgent(SourceAgent):
                         "query_id": sq.sub_query_id, "query_type": sq.query_type,
                         "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
                         "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                        "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                        "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                     } for fallback_query in fallback_queries)
                     fallback_results = await asyncio.gather(*[
                         search_and_select_feishu_table_candidates(
@@ -905,6 +915,8 @@ class FeishuSourceAgent(SourceAgent):
                             "focus": sq.target_focus, "query_id": sq.sub_query_id,
                             "query_type": qt, "fallback_origin": "profile",
                             "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                            "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                            "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                             "api_query": fallback_query,
                             "primary_candidate_count": 0, "fallback_candidate_count": len(group),
                         })
@@ -1059,6 +1071,15 @@ class FeishuSourceAgent(SourceAgent):
                                 "[feishu] sheet read wall timeout %.1fs token=%s (abandoning)",
                                 _SHEET_READ_WALL_S, token[:16],
                             )
+                            self._trace_events.append({
+                                "event": "table_read_timeout", "source": self.source,
+                                "route": "sheet_api", "document_id": token,
+                                "document_type": doc_type,
+                                "wall_timeout_s": _SHEET_READ_WALL_S,
+                                "sync_io_may_continue": True,
+                                "focus_ids": list(cand.get("selected_focus_ids") or []),
+                                "query_ids": list(cand.get("selected_sub_query_ids") or []),
+                            })
                             chunks = []
                     elif doc_type == "BITABLE":
                         try:
@@ -1071,6 +1092,15 @@ class FeishuSourceAgent(SourceAgent):
                                 "[feishu] bitable read wall timeout %.1fs token=%s (abandoning)",
                                 _BITABLE_READ_WALL_S, token[:16],
                             )
+                            self._trace_events.append({
+                                "event": "table_read_timeout", "source": self.source,
+                                "route": "bitable_api", "document_id": token,
+                                "document_type": doc_type,
+                                "wall_timeout_s": _BITABLE_READ_WALL_S,
+                                "sync_io_may_continue": True,
+                                "focus_ids": list(cand.get("selected_focus_ids") or []),
+                                "query_ids": list(cand.get("selected_sub_query_ids") or []),
+                            })
                             chunks = []
                     else:
                         chunks = []
@@ -1260,14 +1290,55 @@ class FeishuSourceAgent(SourceAgent):
                          sq.sub_query_id, len(doc_selected), len(table_selected), len(uc_list), _elapsed_ms(started))
             return [_unified_to_chunk_entry(uc, sq.query, sq.target_focus, sq.sub_query_id) for uc in uc_list]
 
-        batches_result = await asyncio.gather(*[_execute_one(b) for b in prepared])
-        if table_list:
-            # Every request-owned table coroutine reaches its finally/event
-            # boundary before the source returns.  Sync HTTP work is separately
-            # tracked by SourceAgent._to_thread for quiescent retry checks.
-            await asyncio.gather(*table_read_tasks, return_exceptions=True)
-        for sq, chunks in zip(sub_queries, batches_result):
+        async def _tagged_execute(batch: dict) -> tuple[SubQuery, List[ChunkEntry]]:
+            return batch["sq"], await _execute_one(batch)
+
+        # Consume each completed read result immediately.  A large early doc
+        # can now trigger a bounded post-I/O Qwen generation while slower docs
+        # and table reads are still in flight; do not wait for the final
+        # cross-subquery gather merely to begin independent rerank work.
+        execute_tasks = [asyncio.create_task(_tagged_execute(batch)) for batch in prepared]
+        partial_read_observed: set[str] = set()
+        embedded_sheet_skip_observed: set[str] = set()
+        embedded_sheet_selection_observed: set[str] = set()
+        for completed in asyncio.as_completed(execute_tasks):
+            sq, chunks = await completed
             for c in chunks:
+                doc_id = str(c.metadata.get("doc_id") or "")
+                if (
+                    int(c.metadata.get("embedded_sheet_selection_count", 0) or 0) > 0
+                    and doc_id not in embedded_sheet_selection_observed
+                ):
+                    embedded_sheet_selection_observed.add(doc_id)
+                    self._trace_events.append({
+                        "event": "embedded_sheet_child_selection", "source": self.source,
+                        "document_id": doc_id,
+                        "selected_child_ids": list(c.metadata.get("embedded_sheet_selected_child_ids") or []),
+                        "selection_parent_count": int(c.metadata.get("embedded_sheet_selection_count", 0) or 0),
+                    })
+                if (
+                    int(c.metadata.get("embedded_sheet_skip_count", 0) or 0) > 0
+                    and doc_id not in embedded_sheet_skip_observed
+                ):
+                    embedded_sheet_skip_observed.add(doc_id)
+                    disposition = str(c.metadata.get("embedded_sheet_failure_disposition") or "")
+                    self._trace_events.append({
+                        "event": "embedded_sheet_unavailable", "source": self.source,
+                        "document_id": doc_id,
+                        "count": int(c.metadata.get("embedded_sheet_skip_count", 0) or 0),
+                        "reason": disposition or "invalid_or_transport_embed_failure",
+                        "children": list(c.metadata.get("embedded_sheet_failures") or []),
+                    })
+                if c.metadata.get("reader_partial") and doc_id not in partial_read_observed:
+                    partial_read_observed.add(doc_id)
+                    self._trace_events.append({
+                        "event": "partial_read", "source": self.source,
+                        "document_id": doc_id,
+                        "route": str(c.metadata.get("route") or ""),
+                        "failure_count": int(c.metadata.get("reader_failure_count", 0) or 0),
+                        "failure_types": list(c.metadata.get("reader_failure_types") or []),
+                        "transport_inconclusive": True,
+                    })
                 entry = ChunkEntry(
                     id=c.id, source=c.source, content=c.content,
                     preview_content=c.preview_content,
@@ -1277,7 +1348,16 @@ class FeishuSourceAgent(SourceAgent):
                 )
                 existing = chunk_pool.get(entry.id)
                 chunk_pool[entry.id] = existing.merge(entry) if existing else entry
-                await self._offer_chunk_for_context_eval(entry, chunk_pool)
+                await self._offer_chunk_for_context_eval(entry, chunk_pool, loop_n=loop_n)
+            await self._flush_rerank_generation_if_ready(chunk_pool, loop_n=loop_n)
+        if table_list:
+            # Every request-owned table coroutine reaches its finally/event
+            # boundary before the source returns.  Sync HTTP work is separately
+            # tracked by SourceAgent._to_thread for quiescent retry checks.
+            await asyncio.gather(*table_read_tasks, return_exceptions=True)
+        if self._doc_pool is not None and hasattr(self._doc_pool, "consume_observability_events"):
+            for event in self._doc_pool.consume_observability_events():
+                self._trace_events.append({**event, "source": self.source, "transport_inconclusive": True})
         logger.info("TIMING feishu.batch_total sub_queries=%d chunk_pool=%d ms=%.1f",
                      len(sub_queries), len(chunk_pool), _elapsed_ms(batch_started))
 
@@ -1369,6 +1449,8 @@ class FeishuSourceAgent(SourceAgent):
                             "query_id": sq.sub_query_id, "query_type": sq.query_type,
                             "api_query": fallback_query, "fallback": True, "fallback_origin": "profile",
                             "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                            "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                            "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                         } for fallback_query in fallback_queries)
                         fallback_results = await asyncio.gather(*[
                             self._to_thread(
@@ -1382,6 +1464,8 @@ class FeishuSourceAgent(SourceAgent):
                                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                                 "query_type": qt, "fallback_origin": "profile",
                                 "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
+                                "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
+                                "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
                                 "api_query": fallback_query,
                                 "primary_candidate_count": 0,
                                 "fallback_candidate_count": len(result.get("items", [])),

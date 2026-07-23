@@ -117,6 +117,11 @@ class PipelineConfig:
     # Stage 3 concurrency
     stage3_max_concurrency: int = 5  # max simultaneous block-fetch requests (QPS cap)
 
+    # Docx type-30 embeds use the Feishu Sheets API, not the Docx Block API
+    # nor the standalone TablePool.  Fetch their raw rows in an independent
+    # bounded pool; chunk construction remains ordered on the caller thread.
+    embedded_sheet_read_concurrency: int = 10
+
     # DocPool 模式：跳过 Stage 2 (BM25 candidate filter) + Stage 5 (BM25+embedding scoring)
     # Stage 3 (fetch blocks) + Stage 4 (chunking) 保留；评分由 DocPool.wait_and_score 完成
     skip_scoring: bool = False
@@ -127,3 +132,7 @@ class PipelineConfig:
     # 影响：lite 模式下 block_api 分流文档**只**得到正文文本 chunks，嵌入表/画板
     # 部分内容会缺失；对极速场景可接受。
     lite_block_only: bool = False
+
+    # Optional request-local collector for recoverable Stage-4 I/O failures.
+    # The caller owns the list; entries contain only IDs/types, never body text.
+    io_failure_sink: Optional[List[Dict[str, str]]] = None

@@ -25,8 +25,11 @@ import os
 from collections import defaultdict
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
+IO_FUTURE_REGISTRY: contextvars.ContextVar[Optional[Set[asyncio.Future]]] = contextvars.ContextVar(
+    "feishu_io_future_registry", default=None,
+)
 
 async def _exec_to_thread(
     executor: Optional[concurrent.futures.Executor],
@@ -43,7 +46,12 @@ async def _exec_to_thread(
     loop = asyncio.get_event_loop()
     ctx = contextvars.copy_context()
     func_call = functools.partial(ctx.run, fn, *args, **kwargs)
-    return await loop.run_in_executor(executor, func_call)
+    future = loop.run_in_executor(executor, func_call)
+    registry = IO_FUTURE_REGISTRY.get()
+    if registry is not None:
+        registry.add(future)
+        future.add_done_callback(registry.discard)
+    return await asyncio.shield(future)
 
 from dotenv import load_dotenv
 

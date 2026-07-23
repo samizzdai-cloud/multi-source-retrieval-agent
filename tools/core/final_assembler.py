@@ -180,6 +180,106 @@ def round_robin_fill(
     return out
 
 
+def enforce_focus_quota(
+    selected: List[ChunkEntry],
+    candidates: List[ChunkEntry],
+    focuses: List[Any],
+    final_top_k: int,
+    focus_quota: Dict[str, int],
+) -> tuple[List[ChunkEntry], List[Dict[str, Any]]]:
+    """Repair a final selector's coverage loss without re-judging evidence.
+
+    Global LLM/rule rankers may be excellent at ordering chunks yet still use a
+    fixed cap that drops an already judged focus.  This guard consumes only
+    ``critical``/``important`` candidates and their existing focus judgments;
+    it never promotes noise, fabricates a tier, or asks a second model to
+    repeat evaluation.  When the cap makes every required chunk impossible, it
+    emits an explicit unresolved event rather than silently evicting coverage.
+    """
+    if final_top_k <= 0:
+        return [], []
+    focus_ids = [str(getattr(focus, "focus_id", "") or "") for focus in focuses]
+    focus_ids = [focus_id for focus_id in focus_ids if focus_id]
+    critical_min = max(0, int(focus_quota.get("critical_min", 0)))
+    important_min = max(0, int(focus_quota.get("important_min", 0)))
+    required = {"critical": critical_min, "important": important_min}
+
+    def chunk_focuses(chunk: ChunkEntry) -> set[str]:
+        answered = set((chunk.metadata or {}).get("answered_focuses") or [])
+        return (answered or set(chunk.target_focuses or set())) & set(focus_ids)
+
+    def count_for(rows: List[ChunkEntry], focus_id: str, tier: str) -> int:
+        return sum(1 for chunk in rows if chunk.tier == tier and focus_id in chunk_focuses(chunk))
+
+    # Preserve selector order and remove duplicate/invalid output at the final
+    # boundary.  The candidates list remains the only backfill source.
+    picked: List[ChunkEntry] = []
+    picked_ids: set[str] = set()
+    for chunk in selected:
+        if chunk.id in picked_ids or chunk.tier not in {"critical", "important"}:
+            continue
+        if len(picked) >= final_top_k:
+            break
+        picked.append(chunk)
+        picked_ids.add(chunk.id)
+    ranked_candidates = sorted(
+        (chunk for chunk in candidates if chunk.tier in {"critical", "important"}),
+        key=lambda chunk: (_TIER_RANK.get(chunk.tier, 3), -(chunk.score or 0.0), chunk.id),
+    )
+    events: List[Dict[str, Any]] = []
+
+    def removable(chunk: ChunkEntry) -> bool:
+        for focus_id in chunk_focuses(chunk):
+            if count_for(picked, focus_id, str(chunk.tier)) <= required[str(chunk.tier)]:
+                return False
+        return True
+
+    for focus_id in focus_ids:
+        for tier in ("critical", "important"):
+            while count_for(picked, focus_id, tier) < required[tier]:
+                replacement = next(
+                    (chunk for chunk in ranked_candidates
+                     if chunk.id not in picked_ids and chunk.tier == tier
+                     and focus_id in chunk_focuses(chunk)),
+                    None,
+                )
+                if replacement is None:
+                    events.append({
+                        "event": "final_focus_quota", "action": "unmet_no_candidate",
+                        "focus_id": focus_id, "tier": tier,
+                    })
+                    break
+                if len(picked) < final_top_k:
+                    picked.append(replacement)
+                    picked_ids.add(replacement.id)
+                    events.append({
+                        "event": "final_focus_quota", "action": "backfill",
+                        "focus_id": focus_id, "tier": tier, "chunk_id": replacement.id,
+                    })
+                    continue
+                removable_rows = [chunk for chunk in picked if removable(chunk)]
+                if not removable_rows:
+                    events.append({
+                        "event": "final_focus_quota", "action": "unmet_cap",
+                        "focus_id": focus_id, "tier": tier,
+                    })
+                    break
+                evicted = max(
+                    removable_rows,
+                    key=lambda chunk: (_TIER_RANK.get(chunk.tier, 3), -(chunk.score or 0.0), chunk.id),
+                )
+                index = picked.index(evicted)
+                picked[index] = replacement
+                picked_ids.remove(evicted.id)
+                picked_ids.add(replacement.id)
+                events.append({
+                    "event": "final_focus_quota", "action": "replace_surplus",
+                    "focus_id": focus_id, "tier": tier,
+                    "chunk_id": replacement.id, "evicted_chunk_id": evicted.id,
+                })
+    return picked, events
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 3. LLM eval_layer（输入合约 + 输出合约 + 兜底）
 # ─────────────────────────────────────────────────────────────────────

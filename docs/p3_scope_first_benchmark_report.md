@@ -1,6 +1,6 @@
 # P3 v2 Scope-first Benchmark：运行问题与优化建议
 
-## 当前结论（更新至 2026-07-20）
+## 当前结论（更新至 2026-07-22）
 
 P3 试冻结尚未通过，不能把当前结果解释为“Gold Chain 构建错误”。六条
 `sufficient_evidence` case 中，只有单 chunk 基线 `v2_pilot_06` 达到稳定
@@ -8,6 +8,39 @@ P3 试冻结尚未通过，不能把当前结果解释为“Gold Chain 构建错
 Case07 为 0/3、Case08 为 1/3，仍不能报告完整的 upgrade correctness。接口和 I/O
 修复后的隔离复测中，两例各 1/1 正确输出 `upstream_evidence_needed`；这只能证明
 修复方向，不能替代正式 2/3 稳定性门槛。
+
+2026-07-22 的授权 live rerun 未能开始：环境 tenant policy 在请求发出前禁止将飞书
+检索正文发送给 DeepSeek/Qwen。该事件不构成 P3 失败、也没有新的 Feishu/模型 artifact；
+不得绕过该策略。当前本地合同基线为 107/107：Bitable/Sheet outer wall timeout 已写入
+body-free operational trace，dispatcher 的 `cancel_drain_timeout_s` 默认 10 秒，未收敛同步
+I/O 会使 runner 禁止 whole-case retry。真实 Case02 的 SDK/网络收敛仍需在策略恢复后 live 验证。
+
+同日的本地链路合同已推进至 107/107：partial admission 采用一次冻结 generation，零 refs
+只会标记 `admission_unavailable` 并 fail-open 给 plan-eval，不能重复提交或删除 chunk；global
+rank 后还有只消费既有 `critical/important` judgment 的 Focus quota guard，避免 fixed cap 静默
+丢失已判定 Focus。它不等同于 P3 Gold role 通过、更不等同于全局 replan；仍须以恢复后的 live
+RoleFunnel 验证 Case01、03--05。
+
+非 rerank 流式源现以 admission 的 chunk-count trigger 批量启动一次 partial eval，而不是逐
+文档调用模型；ContextBudget 仅保留为压力保护。Feishu deep-dive 仍在跨 sub-query pool 完成
+Qwen post-I/O rerank 后才进入 admission，因此“文档读完立即 eval”的增量 handoff 仍为待实现，
+不能将本次基类优化写成 Feishu deep-dive 已 live streaming。
+
+### 2026-07-22 Case01 authorized rerun
+
+`p3_scope_first_v2_runs_admission_refs_live` 的 Case01 为 0/1、205.09s、无 source timeout。
+它确认四个 Gold role 都已 candidate/read 命中（7 unique documents、185 unique chunks），排除
+空 dispatch/read 缺失。Qwen rerank 是 transport timeout 后 fail-open，不是语义淘汰；旧
+RoleFunnel 将该 fail-open 误记为 rerank 缺失，已在本地修复。随后 DeepSeek global eval 返回了
+混合 list JSON，旧兼容器回退 RuleEvalLayer，最终 6/7 chunks。当前本地代码已增加 Qwen group
+并发（上限 2）、fail-open 归因/冻结和 global JSON array recovery，112/112 通过；须重新运行
+Case01 才能把新代码与 live latency、Gold chain 结果关联。
+
+随后本地实现了 `deterministic_diversity_fallback`：当所有 partial-eval batch 都没有可用 refs，
+每 Focus 最多保留 18 条、按稳定 document lineage 轮转的候选进入 source plan-eval（两 Focus 理论
+上限 36，允许必要共享）。该动作不赋 tier、不制造 evidence，专门避免 185 条 fail-open chunk 把
+admission 故障转嫁为 source plan-eval 的上下文/时延压力。当前本地 113/113；需要新的 live Case01
+artifact 才能验证它没有损伤 Gold role 并实际降低 E2E。
 
 ## 统一入口与执行顺序
 
@@ -136,3 +169,62 @@ Postfix 产物在 `tests/artifacts/p3_scope_first_v2_runs_postfix/`。Case07 落
 `tests/artifacts/p3_scope_first_v2_runs_role_funnel_shortlist_guard/v2_pilot_01__run1__deep_dive.json` is a non-timeout 101.27s diagnostic. It reads 33 unique chunks, rerank retains 27, and the empty partial-eval response is now explicitly fail-open (`partial_eval_no_selection`) rather than deleting all 27. Plan-eval judges 8 and global eval retains 6.
 
 The formal one-run result is still fail: the `hypershell` brand-search click-growth role is the only missing final role. The new funnel proves every Case01 role exists at read and rerank; their first missing stage is `shortlist`. This removes candidate, Feishu read, and evidence-rerank threshold tuning from the immediate hypothesis set. The next gate is valid focus-group shortlist production and diversity validation, then repeated Case01 stability runs.
+
+### 2026-07-22 streamed-rerank / mixed-admission diagnostic
+
+- Verified artifact: `tests/artifacts/p3_scope_first_v2_runs_streamed_rerank_8s/v2_pilot_01__run1__deep_dive.json`. Case01 is still a one-run diagnostic failure, but E2E fell to **122.36s** with no transport error. Four Gold roles entered the funnel; three reached final.
+- The one missing role is the `hypershell` brand-search click-growth role. Its exact first missing stage is `shortlist`, after candidate, read and rerank success. Partial admission submitted 246 chunks but accepted only 9 model refs from two of four batches, then deleted the remaining 237. This is a faulty admission-union behavior, not a source read failure or a rerank-score calibration signal.
+- The corrective runtime now retains model-selected refs and fills unused per-Focus admission capacity with bounded deterministic document diversity. It assigns neither tier nor noise to those guard refs; source `plan_eval` remains the final source evidence judge. The required next run must record a continuous `read -> rerank -> shortlist -> plan_eval -> final` chain for the missing role before this case can enter 2/3 stability testing.
+- The artifact also reports one Qwen document group at 10.187s while its client timeout was configured to 8s. Treat that setting as unproven HTTP/socket behavior, not as the required outer wall deadline; Case02 cancellation/drain validation remains open.
+
+### 2026-07-22 Case01 admission-union Gate
+
+- `tests/artifacts/p3_scope_first_v2_runs_admission_union_guard/v2_pilot_01__run1__deep_dive.json` is a non-timeout diagnostic **pass 1/1**, 177.95s E2E. All four approved Gold roles are present in final evidence, including the former `hypershell` brand-search click-growth role.
+- The request had no consumable model admission refs. The deterministic diversity admission retained 52 of 67 rerank-retained chunks, then source plan-eval judged/retained the complete chain. This validates the new safety invariant—partial-eval omission cannot sever required evidence—but it is not evidence that the partial-eval model contract is healthy.
+- Case01 now needs two further independent runs for its 2/3 stability criterion. Before broad rerank calibration, verify that future artifacts keep the same first-missing-stage attribution and distinguish a Qwen wall timeout from semantic fail-open.
+
+### 2026-07-22 Case01 second diagnostic: source plan-eval deadline
+
+- `tests/artifacts/p3_scope_first_v2_runs_admission_union_guard_v2/v2_pilot_01__run1__deep_dive.json` is timing-inconclusive: 200.72s E2E and Feishu reached its 180s source timeout, while `cancel_drain.remaining_sync_io=0` and no Qwen wall-timeout occurred.
+- The model admission contract did produce 24 refs from 84 submitted chunks. Every Gold role survived candidate/read/rerank/shortlist, but none reached source `plan_eval` before the source deadline. This is a source-eval timing bottleneck, not a new semantic role-loss conclusion.
+- The subsequent configured calibration is generation trigger 60 (was 80) and per-group keep ratio 70% (was 80%). It introduces no global Qwen score threshold. The next valid live attempt must separately report Qwen generation count, retained pool, source plan-eval completion and first missing role stage.
+
+### 2026-07-22 trigger=60 / keep=70 diagnostic
+
+- `tests/artifacts/p3_scope_first_v2_runs_trigger60_keep70/v2_pilot_01__run1__deep_dive.json` finished in 123.75s with no transport timeout. It confirms the new Qwen generation trigger and 70% group retention are live, but it is a semantic diagnostic failure: only the action-plan Gold role reached final.
+- The two partial-eval batches took 20.27s and 29.71s and returned no refs; the deterministic fallback admitted 18 chunks. Affiliate and search-click roles were present after rerank but missing at shortlist. The source plan-eval took 26.55s and incorrectly concluded `upstream_evidence_needed` from that incomplete admission set.
+- The next change is a bounded high-lineage document/heading diversity guard. It preserves up to three distinct headings from each of the top three multi-query documents after broad coverage, remains tier-free, and does not use benchmark roles or cross-batch Qwen-score comparison. The next Case01 run must validate that this removes the two shortlist drops before any Case01 stability count changes.
+
+### 2026-07-22 partial-tier contract redesign (live Gate pending)
+
+- The bounded admission/heading-diversity strategy has been removed. Partial eval now emits complete Focus-local provisional tiers for every submitted `(focus_id, chunk_ref)` pair, with no selected-chunk quota and `max_output_tokens=None` at the product configuration layer. `plan_eval` remains the only final tier, evidence-chain, coverage, gap, replan and top-K judge.
+- A provider response may remove a chunk only when all of its submitted Focus pairs are explicitly `noise`. An all-noise Focus group must emit `reason=no_qualifying_chunks`. Empty/missing Focus groups, refs or pairs are body-free `partial_eval_contract_error` events and retain the affected chunks for `plan_eval`; they are neither noise nor evidence of upstream absence.
+- Funnel terminology is now `partial_tier_retained`. Historical `partial_shortlisted` artifacts remain immutable and cannot be compared as though they implemented the new contract.
+- Local regression is **125/125 passed**. The agent's first live dispatch attempt was blocked before external connection by sandbox `WinError 10013`; an escalated retry exceeded the local 60-second command window before producing an artifact. This is transport inconclusive. The user-side command below is the required live Case01 Gate.
+
+### 2026-07-22 partial-tier first live Gate
+
+- `tests/artifacts/p3_scope_first_v2_runs_partial_tier_live/v2_pilot_01__run1__deep_dive.json` is timing-inconclusive: E2E **202.05s**, a 180s source timeout, and clean cancel drain (`remaining_sync_io=0`). The source `plan_eval` began with 63 chunks but did not complete; this is not valid evidence of an upstream gap or a P3 semantic failure.
+- Partial itself failed safely rather than deleting evidence: its 92.34s response had zero groups/tier rows, two malformed shape signals, and 111 missing Focus/chunk pairs. All 63 chunks became `partial_eval_incomplete`; three Gold roles reached `partial_tier_retained` and first miss at `plan_eval`.
+- The next run adds lossless singleton-array normalization and body-free raw output-shape telemetry. It must establish whether DeepSeek collapsed `focus_groups`/`tiers` arrays or ignored the contract. No fallback shortlist or evidence-rerank threshold is reintroduced.
+
+### 2026-07-22 partial-tier shape v2: semantic chain passed, service reliability inconclusive
+
+- Artifact: `tests/artifacts/p3_scope_first_v2_runs_partial_tier_shape_v2/v2_pilot_01__run1__deep_dive.json`. The semantic Gold chain is complete for every required role, and partial returned valid Focus-local tier groups (88 and 142 tier decisions, no response-shape normalization). Source plan-eval completed in 30.70s and final post-selection global coverage remained `covered` for all three Focuses.
+- This is not a formal P3 pass. The request logged three Feishu table `ReadTimeout` failures, had two `rerank_wall_timeout` events, and the final DeepSeek `eval_layer.llm_tool` exhausted three empty-content attempts before deterministic RuleEvalLayer fallback. A preserved chain under fail-open/fallback proves evidence safety only; it cannot count as one of the required 2/3 stable runs.
+- Subsequent code records body-free DeepSeek per-attempt/fallback telemetry, Qwen timeout input/drain lineage, group-local Qwen fail-open, and explicit benchmark `inconclusive_reasons`. Future reports must state both `semantic_passed` and formal `passed`.
+
+### 2026-07-22 reliability-trace live verification
+
+- Fresh artifact: `tests/artifacts/p3_scope_first_v2_runs_reliability_trace_v1/v2_pilot_01__run1__deep_dive.json`, E2E 147.47s. Every Gold role completed the final chain and source plan-eval covered the single Focus, so `semantic_passed=true`.
+- Formal result remains `passed=false` and `inconclusive=true`: three Feishu table `ReadTimeout` failures, one Qwen `rerank_wall_timeout`, and one retried DeepSeek empty response occurred. New trace correctly records Qwen input 124 / 37,380 chars and clean `rerank_drain=0`, plus DeepSeek final-eval attempt 1 empty after 26.09s and attempt 2 success after 12.11s. The final eval used LLM selection (6/8), not Rule fallback.
+
+### 2026-07-22 Case02 partial-provider exception
+
+- `tests/artifacts/p3_scope_first_v2_runs_case02_io_v1/v2_pilot_02__run1__deep_dive.json` is not a valid Case02 retrieval verdict. A partial-eval provider response was non-JSON reasoning text; its `JSONDecodeError` escaped the batch gather and collapsed the whole Feishu source to zero chunks.
+- The defect is fixed as batch-local fail-open: malformed/exceptional partial output records a body-free `partial_eval_provider_error`, then follows ordinary incomplete-pair retention into source plan-eval. It cannot erase read evidence or be converted into `upstream_evidence_needed`. Future malformed bodies are no longer written to runtime logs/artifacts; the historical `io_v1` artifact is retained only as a restricted diagnostic. A fresh Case02 run is required.
+
+### 2026-07-22 Case02 io_v2
+
+- `tests/artifacts/p3_scope_first_v2_runs_case02_io_v2/v2_pilot_02__run1__deep_dive.json` live-verifies the repaired path: Feishu completed source evaluation with 12 retained chunks, all three Focuses covered, and all four Gold roles present through final evidence. No partial-provider exception or source timeout occurred.
+- It remains formal-inconclusive because final DeepSeek eval returned empty content on all three calls and RuleEvalLayer performed final ordering. Final ordering now has a two-attempt budget because it cannot alter evidence admission/coverage; after one retry it deterministically falls back rather than adding a third 20--30s tail call.

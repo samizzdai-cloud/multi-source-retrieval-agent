@@ -32,6 +32,10 @@ class RerankError(RuntimeError):
     """A recoverable provider or configuration failure."""
 
 
+class RerankWallTimeout(RerankError):
+    """The caller's wall deadline elapsed while sync HTTP may still drain."""
+
+
 @dataclass(frozen=True)
 class RerankSettings:
     api_key: str

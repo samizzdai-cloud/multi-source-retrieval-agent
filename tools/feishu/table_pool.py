@@ -93,15 +93,35 @@ class TablePool:
         self._bitable_struct_sem = asyncio.Semaphore(BITABLE_STRUCTURE_CONCURRENCY)
         self._sheet_read_sem = asyncio.Semaphore(SHEET_READ_CONCURRENCY)
         self._bitable_read_sem = asyncio.Semaphore(BITABLE_READ_CONCURRENCY)
+        # Detached reader tasks and executor futures are kept visible to the
+        # request cancellation gate; cancelling a waiter cannot stop HTTP in
+        # its underlying thread.
+        self._inflight_futures: Set[asyncio.Future] = set()
+        self._read_tasks: Set[asyncio.Task] = set()
 
     async def _to_thread(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """走注入 executor 的 to_thread；executor=None 时退回默认池。保留 contextvars 传播。"""
-        if self._executor is None:
-            return await asyncio.to_thread(fn, *args, **kwargs)
         loop = asyncio.get_event_loop()
         ctx = contextvars.copy_context()
         func_call = functools.partial(ctx.run, fn, *args, **kwargs)
-        return await loop.run_in_executor(self._executor, func_call)
+        future = loop.run_in_executor(self._executor, func_call)
+        self._inflight_futures.add(future)
+        future.add_done_callback(self._inflight_futures.discard)
+        return await asyncio.shield(future)
+
+    def _start_read_task(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._read_tasks.add(task)
+        task.add_done_callback(self._read_tasks.discard)
+
+    async def drain_inflight(self, timeout_s: float = 10.0) -> int:
+        pending: Set[asyncio.Future] = {
+            future for future in self._inflight_futures if not future.done()
+        } | {task for task in self._read_tasks if not task.done()}
+        if not pending:
+            return 0
+        _done, remaining = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
+        return len(remaining)
 
     @property
     def stats(self) -> Dict:
@@ -392,9 +412,9 @@ class TablePool:
                     to_read_bitable.append(payload)
 
         if to_read_sheet:
-            asyncio.create_task(self._read_sheet_batch(to_read_sheet))
+            self._start_read_task(self._read_sheet_batch(to_read_sheet))
         if to_read_bitable:
-            asyncio.create_task(self._read_bitable_batch(to_read_bitable))
+            self._start_read_task(self._read_bitable_batch(to_read_bitable))
         logger.info(
             "TIMING table_pool.submit parents=%d selected=%d new_sheet=%d new_bitable=%d ms=%.1f",
             len(candidates),
