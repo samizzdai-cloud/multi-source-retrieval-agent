@@ -647,29 +647,42 @@ class RetrieveAgent(BaseAgent):
             len(merged),
             (time.perf_counter() - merge_started) * 1000.0,
         )
-        operational_events.extend(snapshot_global_coverage(
-            merged, focuses, self.config.focus_quota, stage="merged_pre_global_eval",
-        ))
-        global_plan_eval = evaluate_merged_plan(
-            merged,
-            focuses,
-            self.config.focus_quota,
-            {result.source: result.retrieval_trace or [] for result in per_source},
-        )
-        operational_events.append({
-            **global_plan_eval.trace_event(), "resolution_id": resolution_id,
-        })
-        if global_plan_eval.decision == "continue":
-            # The decision is explicit but not yet executable: a global retry
-            # needs query-signature ownership so it cannot repeat completed
-            # source I/O.  Keep it visible instead of silently launching a
-            # second whole-source run.
+        active_source_names = [
+            result.source for result in per_source
+            if result.loops_used > 0 or result.top_chunks or result.retrieval_trace
+        ]
+        use_global_eval = self.config.eval_layer_active and len(active_source_names) > 1
+        single_source_deep_dive = self.config.eval_layer_active and len(active_source_names) <= 1
+        source_traces = {result.source: result.retrieval_trace or [] for result in per_source}
+        if single_source_deep_dive:
+            # A deep-dive request routed to one source already has a source
+            # plan_eval/eval_only verdict and source top-K. Do not reinterpret
+            # it with global quotas or a second global selector.
             operational_events.append({
-                "event": "global_replan_deferred",
-                "resolution_id": resolution_id,
-                "focus_ids": list(global_plan_eval.replan_focus_ids),
-                "reason": "query_signature_dedup_not_implemented",
+                "event": "global_eval_skipped", "resolution_id": resolution_id,
+                "reason": "single_active_source", "active_sources": active_source_names,
             })
+        else:
+            operational_events.extend(snapshot_global_coverage(
+                merged, focuses, self.config.focus_quota, stage="merged_pre_global_eval",
+            ))
+            global_plan_eval = evaluate_merged_plan(
+                merged, focuses, self.config.focus_quota, source_traces,
+            )
+            operational_events.append({
+                **global_plan_eval.trace_event(), "resolution_id": resolution_id,
+            })
+            if global_plan_eval.decision == "continue":
+                # The decision is explicit but not yet executable: a global retry
+                # needs query-signature ownership so it cannot repeat completed
+                # source I/O. Keep it visible instead of silently launching a
+                # second whole-source run.
+                operational_events.append({
+                    "event": "global_replan_deferred",
+                    "resolution_id": resolution_id,
+                    "focus_ids": list(global_plan_eval.replan_focus_ids),
+                    "reason": "query_signature_dedup_not_implemented",
+                })
         yield self._make_text_event(
             ctx,
             f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
@@ -682,7 +695,15 @@ class RetrieveAgent(BaseAgent):
         final_top_k = self.config.final_top_k(len(focuses))
         focus_quota = self.config.focus_quota
 
-        if self.config.eval_layer_active:
+        if single_source_deep_dive:
+            selected = list(merged)
+            assemble_path = "source_agent_single_source"
+            logger.info(
+                "TIMING retrieve.assemble candidates=%d picked=%d path=%s ms=%.1f",
+                len(merged), len(selected), assemble_path,
+                (time.perf_counter() - assemble_started) * 1000.0,
+            )
+        elif use_global_eval:
             eval_layer = build_eval_layer(
                 self.config.eval_layer_effective_mode,
                 model=self.config.eval_model_override or self.config.MODEL,
@@ -718,37 +739,36 @@ class RetrieveAgent(BaseAgent):
                 (time.perf_counter() - assemble_started) * 1000.0,
             )
             assemble_path = "rule"
-        # LLM global rank is ordering, not permission to silently break a
-        # Focus evidence quota.  This deterministic guard consumes only
-        # already judged evidence and records any cap-impossible gap.
-        selected, quota_events = enforce_focus_quota(
-            selected, merged, focuses, final_top_k, focus_quota,
-        )
-        operational_events.extend({
-            **event, "resolution_id": resolution_id,
-        } for event in quota_events)
-        final_global_plan_eval = evaluate_merged_plan(
-            selected,
-            focuses,
-            self.config.focus_quota,
-            {result.source: result.retrieval_trace or [] for result in per_source},
-        )
-        operational_events.append({
-            **final_global_plan_eval.trace_event(),
-            "stage": "final_post_selection",
-            "resolution_id": resolution_id,
-        })
+        if not single_source_deep_dive:
+            # Global selectors may order evidence, but a quota guard prevents
+            # them from silently dropping an already-judged routed Focus.
+            selected, quota_events = enforce_focus_quota(
+                selected, merged, focuses, final_top_k, focus_quota,
+            )
+            operational_events.extend({
+                **event, "resolution_id": resolution_id,
+            } for event in quota_events)
+            final_global_plan_eval = evaluate_merged_plan(
+                selected, focuses, self.config.focus_quota, source_traces,
+            )
+            operational_events.append({
+                **final_global_plan_eval.trace_event(),
+                "stage": "final_post_selection",
+                "resolution_id": resolution_id,
+            })
+        selection_cap = "source_agent" if single_source_deep_dive else str(final_top_k)
         yield self._make_text_event(
             ctx,
-            f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={final_top_k} total_ms={(time.monotonic() - start) * 1000:.0f}",
+            f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={selection_cap} total_ms={(time.monotonic() - start) * 1000:.0f}",
         )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log_observation(merged, per_source, focuses, elapsed_ms)
         payload = render_final_payload(query, selected, focuses)
-        operational_events.extend(snapshot_global_coverage(
-            selected, focuses, self.config.focus_quota, stage="final_post_global_eval",
-        ))
+        if not single_source_deep_dive:
+            operational_events.extend(snapshot_global_coverage(
+                selected, focuses, self.config.focus_quota, stage="final_post_global_eval",
+            ))
         if observer is not None:
             observer.observe_chunks("final", selected)
         operational_events.extend({
@@ -781,8 +801,8 @@ class RetrieveAgent(BaseAgent):
             },
         }
         logger.info(
-            "RetrieveAgent: done in %dms, picked=%d / merged=%d (cap=%d)",
-            elapsed_ms, len(selected), len(merged), final_top_k,
+            "RetrieveAgent: done in %dms, picked=%d / merged=%d (cap=%s)",
+            elapsed_ms, len(selected), len(merged), selection_cap,
         )
 
         yield self._make_event(ctx, payload, elapsed_ms=elapsed_ms, retrieval_trace=operational_trace)
@@ -846,11 +866,13 @@ def build_retrieve_agent(
     from tools.core import llm_contracts as _llm_contracts
     _llm_contracts.set_model(cfg.eval_model_override)
 
-    # 注入 DeepSeek thinking 配置 (flash 模型默认禁用 thinking)
-    eval_thinking = cfg.eval_thinking
-    if eval_thinking is not None:
-        _llm_contracts.set_thinking_config(eval_thinking.to_litellm_kwargs())
-    # else: 保持 _THINKING_CONFIG=None, build_llm_model() 返回普通字符串
+    # Eval-stage JSON contracts require an explicit provider setting.  Leaving
+    # this unset delegates to the provider default, which can emit a separate
+    # reasoning payload and make otherwise valid structured responses fail in
+    # the OpenAI-compatible transport parser.
+    from tools.core.models import THINKING_FLASH
+    eval_thinking = cfg.eval_thinking or THINKING_FLASH
+    _llm_contracts.set_thinking_config(eval_thinking.to_litellm_kwargs())
 
     # Patch ADK LiteLlm response_format: DeepSeek 只支持 json_object
     _llm_contracts._ensure_response_format_patch()

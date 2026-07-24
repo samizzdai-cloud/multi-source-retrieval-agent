@@ -219,6 +219,10 @@ class PlannedSubQuery:
     time_filter: Optional[str] = None                            # feishu / google 用
     query_type: Optional[str] = None                             # feishu / google 用
     author_filter: Optional[str] = None                          # feishu / google 用
+    # Program-owned fallback metadata. It is intentionally absent from the
+    # Global Planner JSON contract and can never become a primary query.
+    fallback_variants: List[str] = field(default_factory=list)
+    fallback_variant_origins: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

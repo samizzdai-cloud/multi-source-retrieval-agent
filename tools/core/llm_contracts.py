@@ -264,8 +264,8 @@ class PartialFocusTier(BaseModel):
     """One retained chunk's provisional tier for the enclosing Focus only.
 
     Partial evaluation is an admission filter: it emits only evidence that
-    survives to merged plan_eval.  Omitted submitted refs are explicit noise
-    for that Focus; an all-omitted Focus group must carry
+    survives to merged plan_eval. Omitted submitted refs are unselected for
+    that Focus, not a semantic noise verdict; an all-omitted Focus group must carry
     ``reason=no_qualifying_chunks``.
     """
     chunk_id: str
@@ -349,7 +349,7 @@ def build_partial_eval_model() -> Type[BaseModel]:
 
     Partial evaluation must not cap retained evidence. Each Focus group emits
     provisional ``critical`` / ``important`` refs; omitted submitted refs are
-    noise for that Focus. Only merged ``plan_eval`` owns final tier, coverage,
+    unselected for that Focus. Only merged ``plan_eval`` owns final tier, coverage,
     gap, replan, and top-K.
     """
     return create_model(  # type: ignore[call-overload]

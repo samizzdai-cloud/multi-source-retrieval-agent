@@ -440,6 +440,12 @@ def normalize_plan(
                 if sq is None:
                     out.rejected_count += 1
                     continue
+                # Program-owned post-parse metadata. It never expands the
+                # Planner JSON contract or becomes a normal primary query.
+                for variant in psq.fallback_variants:
+                    if variant and variant not in sq.variants:
+                        sq.variants.append(variant)
+                sq.variant_origins.update(psq.fallback_variant_origins)
                 normalized_list.append(sq)
 
             if normalized_list:

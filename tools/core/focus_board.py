@@ -36,6 +36,7 @@ class FocusState:
     important: int = 0
     noise: int = 0
     contributors: Set[str] = field(default_factory=set)      # 已贡献过 chunk 的 source 集合
+    reported_chunk_ids: Set[str] = field(default_factory=set)
     status: FocusStatus = "pending"                          # 状态机
 
 
@@ -107,7 +108,7 @@ class FocusBoard:
         return [fid for fid, s in self._states.items() if s.status != "satisfied"]
 
     def snapshot(self) -> Dict[str, Dict[str, object]]:
-        """plan_eval prompt 用：把整盘状态序列化为 LLM 可读 JSON-like dict。"""
+        """Return read-only operational state for trace/debugging only."""
         return {
             fid: {
                 "status": s.status,
@@ -132,15 +133,25 @@ class FocusBoard:
         """
         # 先按 focus_id 聚合本次新增计数，再分别取 lock 更新（避免长持锁）
         delta: Dict[str, Dict[str, int]] = {}
+        chunk_ids_by_focus: Dict[str, set[str]] = {}
         for c in chunks:
-            tier = getattr(c, "tier", None)
-            if tier not in ("critical", "important", "noise"):
-                continue
-            answered = list((getattr(c, "metadata", None) or {}).get("answered_focuses") or [])
-            focus_ids = answered or list(getattr(c, "target_focuses", set()) or set())
-            for fid in focus_ids:
-                if fid not in self._states:
+            metadata = getattr(c, "metadata", None) or {}
+            provisional = dict(metadata.get("partial_tier_by_focus") or {})
+            if provisional:
+                focus_tiers = provisional.items()
+            else:
+                tier = getattr(c, "tier", None)
+                answered = list(metadata.get("answered_focuses") or [])
+                focus_ids = answered or list(getattr(c, "target_focuses", set()) or set())
+                focus_tiers = ((fid, tier) for fid in focus_ids)
+            for fid, tier in focus_tiers:
+                if fid not in self._states or tier not in ("critical", "important", "noise"):
                     continue
+                chunk_id = str(getattr(c, "id", "") or "")
+                if chunk_id and chunk_id in self._states[fid].reported_chunk_ids:
+                    continue
+                if chunk_id:
+                    chunk_ids_by_focus.setdefault(fid, set()).add(chunk_id)
                 d = delta.setdefault(fid, {"critical": 0, "important": 0, "noise": 0})
                 d[tier] = d.get(tier, 0) + 1
 
@@ -152,6 +163,7 @@ class FocusBoard:
                 s.critical += d.get("critical", 0)
                 s.important += d.get("important", 0)
                 s.noise += d.get("noise", 0)
+                s.reported_chunk_ids.update(chunk_ids_by_focus.get(fid, set()))
                 s.contributors.add(source)
                 old_status = s.status
                 if old_status != "satisfied" and self._meets_quota(s):

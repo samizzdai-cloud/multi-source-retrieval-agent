@@ -154,7 +154,7 @@ class ChunkRefRegistry:
         out["tiers"] = tiers
 
         # Partial eval is a Focus-local admission filter.  It emits only
-        # critical/important refs; omitted refs are noise for that Focus.
+        # critical/important refs; omitted refs are unselected for that Focus.
         # Keep its provisional tiers separate because only plan_eval/eval_only
         # writes final tiers.
         partial_tiers: List[Dict[str, Any]] = []
@@ -527,7 +527,8 @@ def _build_partial_eval_prompt(
         "Reference contract: use only chunk_ref values (C1, C2, ...) printed in chunks_block; never "
         "output a canonical chunk ID. Return focus_groups, not a final top-K. For every Focus that has "
         "at least one chunk in this batch, output only the chunk_refs that are critical or important "
-        "for that Focus; do not output noise rows. Omitted submitted refs mean noise for that Focus. "
+        "for that Focus; do not output noise rows. Omitted submitted refs are unselected by this provisional admission "
+        "for that Focus, not a semantic noise verdict. "
         "A ref may occur in more than one Focus group only when it directly supports both. If no chunk "
         "for a Focus is critical or important, return that Focus group with tiers=[] and reason exactly "
         "no_qualifying_chunks. Otherwise reason must be empty. Do not cap retained evidence. This is a "
@@ -535,19 +536,21 @@ def _build_partial_eval_prompt(
         "The only allowed top-level key is focus_groups. Example: "
         "{\"focus_groups\":[{\"focus_id\":\"F1\",\"tiers\":[{\"chunk_id\":\"C1\",\"tier\":\"important\"}],\"reason\":\"\"}]}.\n"
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
-        f"observed_query_angles_block:\n{_partial_query_angles_block(focuses, chunks)}\n\n"
+        f"observed_query_lineage_block (audit context only; never a grouping or retention rule):\n{_partial_query_angles_block(focuses, chunks)}\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
         "Tier rubric: critical=direct decisive fact, metric, or conclusion for the Focus; "
         "important=direct but partial/complementary evidence. Omit a ref only when it does not answer this "
         "Focus, including entity/time/task mismatch. This is recall-first admission, not a precision ranking: "
         "return every direct answer-bearing ref, never only representative examples; when uncertain whether a "
-        "direct ref is important or noise, return it as important. Do not omit complementary evidence merely because it is "
+        "direct ref is important or unselected, return it as important. Do not omit complementary evidence merely because it is "
         "incomplete alone: evidence in different headings, tables, metrics, countries, time slices, or documents "
-        "must be assessed independently when it adds a distinct answer-bearing perspective. For every observed "
-        "query angle above that has candidate chunks in this "
-        "batch, assess its evidence independently: evidence from one angle must not make you omit direct or "
-        "complementary evidence for another angle. This is not a coverage verdict and does not require an output "
-        "for an angle with no qualifying chunk.\n"
+        "must be assessed independently when it adds a distinct answer-bearing perspective. A direct recommendation, "
+        "caution, or diagnosis that interprets the observed decision outcome is answer-bearing even when it contributes "
+        "no new metric. Illustrative admission: for a budget-shift Focus, a country result table and a direct "
+        "underperformance recommendation about those results are both retained; the recommendation is not a duplicate "
+        "merely because the table supplies the numbers. The observed query "
+        "lineage above is audit context only: do not group chunks by query, reserve an output per query, or use "
+        "one query's evidence as a reason to omit another chunk. This is not a coverage verdict.\n"
     )
 
 
@@ -582,7 +585,6 @@ def _build_plan_eval_prompt(
     min_loops: int,
     max_loops: int,
     source_top_k: int,
-    focus_status: Optional[Dict[str, Dict[str, Any]]] = None,
     partial_ledgers: Optional[List[Dict[str, Any]]] = None,
     refs: Optional[ChunkRefRegistry] = None,
 ) -> str:
@@ -601,12 +603,18 @@ def _build_plan_eval_prompt(
         f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}",
         f"source_top_k: {source_top_k}",
     ]
-    slim_status = _slim_focus_status_for_prompt(focus_status)
-    if slim_status:
-        parts.append(
-            "focus_status (跨源覆盖状态；status=satisfied 的 focus 不要再 replan):\n"
-            + json.dumps(slim_status, ensure_ascii=False)
-        )
+    parts.append(
+        "Semantic completion contract: Focus text is the only answer contract. Mark a Focus covered only when "
+        "the retained chunks jointly support every direct requirement and necessary comparison stated in that Focus. "
+        "A count of critical/important chunks, a top-K limit, or evidence for only one part of the Focus never proves "
+        "coverage. If a necessary premise is absent, return gap with query_refinement only when another source query "
+        "can reasonably retrieve it; otherwise return upstream_evidence_needed. Do not use query IDs or query wording "
+        "as coverage groups. When selecting final top-K, retain every direct complementary fact needed for the Focus; "
+        "do not replace a more direct channel, country, period, metric, or conclusion with a generic, aggregate, "
+        "or adjacent-source example merely because abstract coverage seems sufficient. Illustrative selection: for a "
+        "country-specific paid-budget decision, retain the country-level paid-performance table and its direct outcome "
+        "interpretation ahead of an otherwise related aggregate or another-channel summary."
+    )
     if partial_ledgers:
         # Canonical IDs are deliberately never sent to an LLM.  Translate the
         # internal per-batch ledger to this plan_eval request's C1/C2 refs so
@@ -772,7 +780,7 @@ class SourceAgent:
             name=f"{self.source}_partial_eval",
             model=build_llm_model(),
             instruction=("You are a Focus-local retrieval tier evaluator. For every supplied Focus, "
-                         "return only chunks that are critical or important; omission means noise. "
+                         "return only chunks that are critical or important; omission is unselected, not semantic noise. "
                          "Return only strict focus_groups JSON; do not select a top-K, decide coverage, "
                          "or replan."),
             output_schema=build_partial_eval_model(),
@@ -1107,26 +1115,18 @@ class SourceAgent:
                 logger.warning("[%s] loop=%d chunk_pool empty without partial evidence state → stop early", self.source, loop_n)
                 break
 
-            # P4: 读 FocusBoard 快照（如有）—— focus-aware plan_eval
             board = getattr(self, "_focus_board", None)
-            focus_status = board.snapshot() if board is not None else None
-
-            # P4: 若所有 targeted focus 都已被别的源 SATISFIED，提前 stop（跳过 plan_eval LLM）
-            if board is not None and focuses:
-                targeted_fids = {f.focus_id for f in focuses}
-                if targeted_fids and all(board.is_satisfied(fid) for fid in targeted_fids):
-                    logger.info(
-                        "[%s] loop=%d all %d targeted focuses externally satisfied → stop early",
-                        self.source, loop_n, len(targeted_fids),
-                    )
-                    break
+            targeted_fids = {f.focus_id for f in focuses}
+            io_saturated = bool(
+                board is not None and targeted_fids
+                and all(board.is_satisfied(fid) for fid in targeted_fids)
+            )
 
             registry = ChunkRefRegistry.build(list(chunk_pool.values()))
             pe_prompt = _build_plan_eval_prompt(
                 focuses, list(chunk_pool.values()),
                 loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
                 source_top_k=self._effective_source_top_k,
-                focus_status=focus_status,
                 partial_ledgers=self._partial_ledgers,
                 refs=registry,
             )
@@ -1171,6 +1171,12 @@ class SourceAgent:
 
             raw_decision = pe_out.get("decision", "stop")
             decision = enforce_loop_bounds(raw_decision, loop_n, min_loops, max_loops)
+            forced_stop_by_io_gate = bool(io_saturated and decision == "continue")
+            if forced_stop_by_io_gate:
+                # The board stops future I/O only. Current evidence still
+                # receives a semantic plan_eval; a continue cannot submit a
+                # new query and falls through to eval_only when it has no top-K.
+                decision = "stop"
             removed: List[str] = []
             if decision == "continue":
                 for cid in prunable_noise_ids:
@@ -1184,6 +1190,8 @@ class SourceAgent:
                 "decision": decision, "raw_decision": raw_decision,
                 "replan_query_count": len(pe_out.get("replan_queries") or []),
                 "active_chunk_count": len(chunk_pool), "removed_noise_count": len(removed),
+                "io_saturated": io_saturated,
+                "forced_stop_by_io_gate": forced_stop_by_io_gate,
                 "focus_decisions": list(pe_out.get("focus_decisions") or []),
                 "contract_normalizations": list(pe_out.get("contract_normalizations") or []),
                 "elapsed_ms": round((time.perf_counter() - plan_eval_started) * 1000.0, 1),
@@ -1593,8 +1601,9 @@ class SourceAgent:
         """Merge complete Focus-local partial tiers without selecting a top-K.
 
         A partial response is allowed to remove a chunk only after every
-        Focus/chunk pair submitted in its batch is omitted from a complete
-        Focus group. Omission is the contract's explicit ``noise`` result.
+        Focus/chunk pair submitted in its batch is unselected by a complete
+        Focus group. Omission is a provisional admission result, never a
+        semantic ``noise`` verdict.
         Missing groups, malformed refs, and task failures are contract
         underflow: retain the affected evidence for later merged plan_eval
         rather than inventing a fallback shortlist.
@@ -1647,7 +1656,7 @@ class SourceAgent:
             for focus_id in focus_ids
             if cid in submitted
         }
-        # A valid all-noise Focus has no tier rows, but it still has a group
+        # A valid no-qualifying Focus has no tier rows, but it still has a group
         # carrying reason=no_qualifying_chunks. Group presence, not tier
         # presence, proves the model evaluated that Focus.
         reported_focuses = {str(group["focus_id"]) for group in group_reasons}
@@ -1695,8 +1704,8 @@ class SourceAgent:
                 retained.add(cid)
                 chunk.metadata["partial_eval_status"] = "partial_eval_incomplete"
                 continue
-            # Omitted refs are the model's explicit noise decision for this
-            # Focus.  Only emitted critical/important rows enter downstream.
+            # Omitted refs are unselected for this provisional admission. Only
+            # emitted critical/important rows enter downstream plan_eval.
             non_noise = {
                 focus_id: tiers_by_pair[(cid, focus_id)]
                 for focus_id in expected
@@ -1706,7 +1715,7 @@ class SourceAgent:
             chunk.metadata["partial_answered_focuses"] = sorted(non_noise)
             if not non_noise:
                 removed_noise.add(cid)
-                chunk.metadata["partial_eval_status"] = "partial_noise"
+                chunk.metadata["partial_eval_status"] = "partial_unselected"
                 continue
             retained.add(cid)
             chunk.metadata["partial_eval_status"] = "partial_tiered"
@@ -1720,8 +1729,8 @@ class SourceAgent:
         for cid in removed_noise:
             chunk_pool.pop(cid, None)
 
-        # Carry every Focus-local partial result forward.  A previous version
-        # forwarded only all-noise groups, which hid the very complementary
+        # Carry every Focus-local partial result forward. A previous version
+        # forwarded only no-qualifying groups, which hid the very complementary
         # critical/important evidence that merged plan_eval needs to compare
         # across partial batches.  These remain provisional observations:
         # plan_eval still owns final tier, coverage, replan, and top-K.
@@ -1762,16 +1771,16 @@ class SourceAgent:
         self._trace_events.append({
             "event": "partial_tier_summary", "source": self.source, "loop": loop_n,
             "generation": generation, "submitted_count": len(submitted),
-            "tiered_retained_count": len(retained), "explicit_noise_count": len(removed_noise),
+            "tiered_retained_count": len(retained), "unselected_count": len(removed_noise),
             "incomplete_retained_count": len(incomplete), "focus_group_count": len(group_reasons),
         })
         return {
             "submitted_count": len(submitted),
             "retained_count": len(retained),
-            "removed_noise_count": len(removed_noise),
+            "unselected_count": len(removed_noise),
             "incomplete_count": len(incomplete),
-            # Per-pair omission is intentional noise; only a missing whole
-            # Focus group is incomplete.
+            # Per-pair omission is an explicit provisional unselected outcome;
+            # only a missing whole Focus group is incomplete.
             "missing_pair_count": 0,
         }
 
@@ -1894,8 +1903,17 @@ class SourceAgent:
         result = self._apply_partial_tier_outputs(
             outputs, chunk_pool, loop_n=loop_n, generation=generation,
         )
-        logger.info("[%s] loop=%d partial-tier explicit_noise=%d retained=%d incomplete=%d", self.source,
-                    loop_n, result["removed_noise_count"], len(chunk_pool), result["incomplete_count"])
+        # FocusBoard is an I/O-only gate. Report newly admitted provisional
+        # tiers as soon as they exist so unread/replan work can stop, while all
+        # chunks already in the pool still continue to plan_eval/eval_only.
+        board = getattr(self, "_focus_board", None)
+        if board is not None:
+            try:
+                await board.report(self.source, list(chunk_pool.values()))
+            except Exception as exc:
+                logger.warning("[%s] partial FocusBoard report failed: %s", self.source, exc)
+        logger.info("[%s] loop=%d partial-tier unselected=%d retained=%d incomplete=%d", self.source,
+                    loop_n, result["unselected_count"], len(chunk_pool), result["incomplete_count"])
 
     async def _offer_chunk_for_context_eval(
         self, entry: ChunkEntry, chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,

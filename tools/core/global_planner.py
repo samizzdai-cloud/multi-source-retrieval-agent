@@ -176,6 +176,22 @@ def _build_output_schema_block(enabled_sources: List[str]) -> str:
 （运行时字段，由 runner 自动分配/推断）。"""
 
 
+def _focus_limit_for_sources(
+    enabled_sources: List[str],
+    configured_max_focuses: int,
+) -> int:
+    """Return the bounded retrieval-task budget for this planner invocation.
+
+    A Focus is a retrieval subtask, so its budget grows with the number of
+    enabled sources. ``max_focuses`` remains a compatibility/configuration
+    ceiling; the product policy is one source -> two Focuses, then one extra
+    Focus per added source, capped at four.
+    """
+    active_sources = len({str(s).strip().lower() for s in enabled_sources if str(s).strip()})
+    configured_cap = max(1, int(configured_max_focuses))
+    return min(4, active_sources + 1, configured_cap)
+
+
 def _build_prompt(
     query: str,
     enabled_sources: List[str],
@@ -189,6 +205,7 @@ def _build_prompt(
     profiles_block = _build_source_profiles_block(enabled_sources, bailian_catalog)
     rules_block = _build_per_source_rules_block(enabled_sources, bailian_catalog)
     output_block = _build_output_schema_block(enabled_sources)
+    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses)
 
     # 共享段：feishu/google 都用到的时间推断 / 身份归属 / query_type 三段统一注入一次。
     # 仅当 enabled_sources 含 feishu 或 google 时才注入，避免给 bailian-only 调用读冗余。
@@ -205,11 +222,23 @@ def _build_prompt(
 
     diagnostic_coverage_rule = (
         "For a broad GTM conversion-diagnosis request that does not limit one stage, "
-        "the answer-task focus and its distinct evidence queries must cover verifiable "
+        "the retrieval Focus and its distinct source queries should cover verifiable "
         "acquisition/channel, paid efficiency, and on-site funnel or page-friction evidence. "
-        "These are evidence angles, not invented business entities.\n\n"
+        "Keep these queries under the same diagnostic Focus unless they are genuinely independent retrieval tasks.\n\n"
     )
-    return diagnostic_coverage_rule + f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
+    focus_contract_rule = (
+        "Focus task model (this overrides any conflicting wording below): user_query states the user's intent; "
+        "each Focus is one independent retrieval subtask that states what information must be found, not a rewrite "
+        "of the final decision, an answer contract, an evidence role, or a reasoning conclusion. For a composite "
+        "question, create the minimum number of non-overlapping Focuses whose source content portraits differ. "
+        "Do not split individual entities or metrics when one comparative retrieval task can find them together. "
+        "Each primary subquery belongs exclusively to its parent Focus and must retrieve that Focus's source-facing "
+        "content; it must not combine, substitute for, or route to another Focus. A retrieved document may naturally "
+        "overlap after retrieval, but the Planner must never use a cross-Focus query. Within one Focus, subqueries "
+        "must be distinct source-oriented expressions, not entity lists, generic companion queries, or synonym rewrites. "
+        "Do this self-check internally; do not add fields to JSON.\n\n"
+    )
+    return diagnostic_coverage_rule + focus_contract_rule + f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
 
 核心模型：focus 是回答 user query 的一个可独立验收的子任务，描述理想答案必须形成的判断、结论或结构化输出；它不是文档主题、定义词或单条检索词。sub_query 是为同一个 focus 取得不同证据的 API 请求；一个 focus 可以有多条 query，但它们必须角度不同且不可只是同义改写。
 
@@ -327,13 +356,14 @@ def _original_surface_anchors(query: str, *, limit: int = 6) -> List[str]:
 
 
 def _preserve_source_surface_anchors(original_query: str, focuses: List[PlannedFocus]) -> List[PlannedFocus]:
-    """Add one bounded lexical recall probe for cross-language source plans.
+    """Attach one bounded lexical fallback probe for cross-language source plans.
 
     A translated semantic query and a three-term literal probe serve different
     purposes.  The latter prevents an AND-like document search from losing an
     English table because its product/task wording was translated.  It only
     copies user-authored surfaces, is bounded to one probe per source/focus,
-    and leaves the planner's primary executable queries untouched.
+    and is not appended as a primary executable query. Source execution may
+    invoke it only after primary routes return zero candidates.
     """
     anchors = _original_surface_anchors(original_query)
     if not anchors:
@@ -359,7 +389,15 @@ def _preserve_source_surface_anchors(original_query: str, focuses: List[PlannedF
             if not probe or any(re.sub(r"\s+", " ", sq.query).casefold() == probe.casefold() for sq in queries):
                 continue
             target = next((sq for sq in queries if sq.query_type == "structured"), queries[0])
-            repaired_queries.append(replace(target, query=probe))
+            replacement = replace(
+                target,
+                fallback_variants=list(dict.fromkeys([*target.fallback_variants, probe])),
+                fallback_variant_origins={
+                    **target.fallback_variant_origins,
+                    probe: "original_surface",
+                },
+            )
+            repaired_queries[repaired_queries.index(target)] = replacement
         repaired.append(
             replace(focus, sub_queries=repaired_queries)
         )

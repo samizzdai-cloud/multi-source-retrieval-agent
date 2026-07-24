@@ -45,6 +45,15 @@ def _elapsed_ms(start: float) -> float:
     return (time.perf_counter() - start) * 1000.0
 
 
+def _doc_collect_timeout(preset: str, source_timeout_s: float) -> float:
+    """Return the per-document consumer deadline for the active preset."""
+    if preset == "lite":
+        return 6.0
+    if preset == "deep_dive":
+        return min(35.0, max(20.0, source_timeout_s * 0.70))
+    return min(18.0, max(12.0, source_timeout_s * 0.35))
+
+
 def _metadata_overlap(query: str, value: str) -> float:
     """Cheap audit signal only; never a parent filtering decision."""
     q = {item.casefold() for item in re.findall(r"[\w.-]+", query or "", flags=re.UNICODE) if len(item) > 1}
@@ -235,6 +244,31 @@ def _sanitize_feishu_sub_queries(
 
 def _candidate_doc_key(c: dict) -> str:
     return c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or ""
+
+
+def _original_surface_fallback_query(
+    sq: SubQuery,
+    *,
+    primary_doc_candidate_count: int,
+    primary_table_candidate_count: int,
+    current_doc_candidates: List[dict],
+    current_table_candidates: List[dict],
+) -> str:
+    """Return one original-surface probe only after both primary routes miss."""
+    if (
+        primary_doc_candidate_count != 0
+        or primary_table_candidate_count != 0
+        or current_doc_candidates
+        or current_table_candidates
+    ):
+        return ""
+    return next(
+        (
+            variant for variant in dict.fromkeys(sq.variants)
+            if sq.variant_origins.get(variant) == "original_surface"
+        ),
+        "",
+    )
 
 
 def _candidate_order_key(candidate: dict) -> tuple:
@@ -635,9 +669,21 @@ class FeishuSourceAgent(SourceAgent):
         for sq in sanitized:
             pack = resolution.fallback_pack if resolution is not None else None
             specs = pack.fallback_variant_specs(sq.query) if pack is not None else []
-            sq.variants = [variant for variant, _kind, _item_id in specs]
-            sq.variant_origins = {variant: kind for variant, kind, _item_id in specs}
-            sq.variant_origin_ids = {variant: item_id for variant, _kind, item_id in specs if item_id > 0}
+            existing_variants = list(sq.variants)
+            existing_origins = dict(sq.variant_origins)
+            existing_ids = dict(sq.variant_origin_ids)
+            sq.variants = list(dict.fromkeys([
+                *existing_variants,
+                *(variant for variant, _kind, _item_id in specs),
+            ]))
+            sq.variant_origins = {
+                **existing_origins,
+                **{variant: kind for variant, kind, _item_id in specs},
+            }
+            sq.variant_origin_ids = {
+                **existing_ids,
+                **{variant: item_id for variant, _kind, item_id in specs if item_id > 0},
+            }
         return sanitized
 
     def _enrich_sub_queries_with_variants(
@@ -753,12 +799,10 @@ class FeishuSourceAgent(SourceAgent):
         # 单 doc 超时必须小于 source 总预算，但不能短到把已命中的 Block API
         # 文档（实测 16s）在完整 chunk 化前丢弃。lite 继续优先时延；其他 preset
         # 使用 source budget 的受限比例，保留后续 eval 的时间。
-        if self._preset == "lite":
-            per_doc_timeout = 6.0
-        elif self._preset == "deep_dive":
-            per_doc_timeout = min(25.0, max(16.0, self.cfg.source_timeout_s * 0.45))
-        else:
-            per_doc_timeout = min(18.0, max(12.0, self.cfg.source_timeout_s * 0.35))
+        # A consumer deadline only controls waiting; the synchronous Block API
+        # reader continues. Deep-dive leaves enough room for an already-started,
+        # relevant document to finish and enter the current evidence pool.
+        per_doc_timeout = _doc_collect_timeout(self._preset, self.cfg.source_timeout_s)
 
         # ── lite 模式：极简 MCP-only 路径（无 table）────────
         if self._preset == "lite":
@@ -797,6 +841,7 @@ class FeishuSourceAgent(SourceAgent):
         # ── Doc track：每个 sq 的 doc_candidates 一就绪即 submit ────
         async def _prepare_doc_one(sq: SubQuery) -> dict:
             t0 = time.perf_counter()
+            primary_doc_candidate_count = 0
             qt, focus_text, owner_ids = sq_ctx[sq.sub_query_id]
             if qt == "personal_recent":
                 try:
@@ -807,6 +852,7 @@ class FeishuSourceAgent(SourceAgent):
                         owner_ids=owner_ids, sort_rule="EDIT_TIME",
                     )
                     doc_cands = raw_result.get("items", [])
+                    primary_doc_candidate_count = len(doc_cands)
                     for rank, cand in enumerate(doc_cands, start=1):
                         cand["selected_focus_ids"] = [sq.target_focus]
                         cand["selected_sub_query_ids"] = [sq.sub_query_id]
@@ -826,8 +872,12 @@ class FeishuSourceAgent(SourceAgent):
                         sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
                         executor=self._executor,
                     )
+                    primary_doc_candidate_count = len(doc_cands)
                     if not doc_cands and sq.variants:
-                        fallback_queries = list(dict.fromkeys(sq.variants))[:2]
+                        fallback_queries = [
+                            variant for variant in dict.fromkeys(sq.variants)
+                            if sq.variant_origins.get(variant) != "original_surface"
+                        ][:2]
                         self._trace_events.extend({
                             "event": "query", "source": self.source, "focus": sq.target_focus,
                             "query_id": sq.sub_query_id, "query_type": sq.query_type,
@@ -862,11 +912,13 @@ class FeishuSourceAgent(SourceAgent):
             logger.info("TIMING feishu.prepare_doc sub_query_id=%s doc=%d ms=%.1f",
                          sq.sub_query_id or "unknown", len(doc_cands), _elapsed_ms(t0))
             return {"sq": sq, "query_type": qt, "focus_text": focus_text,
-                    "doc_candidates": doc_cands}
+                    "doc_candidates": doc_cands,
+                    "primary_doc_candidate_count": primary_doc_candidate_count}
 
         # ── Table track：每 sq 独立跑 search + structure + read ──
         async def _prepare_table_one(sq: SubQuery) -> dict:
             t0 = time.perf_counter()
+            primary_table_candidate_count = 0
             qt, focus_text, _ = sq_ctx[sq.sub_query_id]
             if qt != "structured":
                 return {"sq": sq, "table_candidates": []}
@@ -884,8 +936,12 @@ class FeishuSourceAgent(SourceAgent):
                     child_rerank_top_n=self.cfg.table_child_rerank_top_n,
                     child_rerank_instruct=self.cfg.table_child_rerank_instruct,
                 )
+                primary_table_candidate_count = len(table_cands)
                 if not table_cands and sq.variants:
-                    fallback_queries = list(dict.fromkeys(sq.variants))[:2]
+                    fallback_queries = [
+                        variant for variant in dict.fromkeys(sq.variants)
+                        if sq.variant_origins.get(variant) != "original_surface"
+                    ][:2]
                     self._trace_events.extend({
                         "event": "query", "source": self.source, "focus": sq.target_focus,
                         "query_id": sq.sub_query_id, "query_type": sq.query_type,
@@ -926,7 +982,8 @@ class FeishuSourceAgent(SourceAgent):
                 table_cands = []
             logger.info("TIMING feishu.prepare_table sub_query_id=%s table=%d ms=%.1f",
                          sq.sub_query_id or "unknown", len(table_cands), _elapsed_ms(t0))
-            return {"sq": sq, "table_candidates": table_cands}
+            return {"sq": sq, "table_candidates": table_cands,
+                    "primary_table_candidate_count": primary_table_candidate_count}
 
         # ── Doc track 跑完即 submit；与 table track 并发 ────────
         async def _doc_track() -> Tuple[List[dict], List[dict], Dict[str, List[str]]]:
@@ -1008,6 +1065,108 @@ class FeishuSourceAgent(SourceAgent):
         (doc_prepared, early_doc_list, doc_ids_by_sq), (table_prepared, table_list, table_ids_by_sq) = (
             await asyncio.gather(_doc_track(), _table_track())
         )
+
+        # A cross-language original-surface probe is a last-resort recovery
+        # path, never a Planner primary query.  Do not run it from either
+        # independent track above: it is eligible only after both primary
+        # source routes for this subquery have produced zero candidates.
+        table_prepared_by_sq = {item["sq"].sub_query_id: item for item in table_prepared}
+        surface_doc_prepared: List[dict] = []
+        surface_table_prepared: List[dict] = []
+        for doc_item in doc_prepared:
+            sq = doc_item["sq"]
+            table_item = table_prepared_by_sq.get(sq.sub_query_id, {})
+            doc_primary_count = int(doc_item.get("primary_doc_candidate_count") or 0)
+            table_primary_count = int(table_item.get("primary_table_candidate_count") or 0)
+            fallback_query = _original_surface_fallback_query(
+                sq,
+                primary_doc_candidate_count=doc_primary_count,
+                primary_table_candidate_count=table_primary_count,
+                current_doc_candidates=list(doc_item.get("doc_candidates") or []),
+                current_table_candidates=list(table_item.get("table_candidates") or []),
+            )
+            if not fallback_query:
+                continue
+            qt, focus_text, owner_ids = sq_ctx[sq.sub_query_id]
+            self._trace_events.append({
+                "event": "query", "source": self.source, "focus": sq.target_focus,
+                "query_id": sq.sub_query_id, "query_type": sq.query_type,
+                "api_query": fallback_query, "fallback": True,
+                "fallback_origin": "original_surface",
+                "fallback_reason": "primary_doc_and_table_zero_candidates",
+                "primary_doc_candidate_count": doc_primary_count,
+                "primary_table_candidate_count": table_primary_count,
+            })
+
+            async def _surface_doc() -> List[dict]:
+                if qt == "personal_recent":
+                    return []
+                return await search_and_select_feishu_doc_candidates(
+                    fallback_query, token=self._uat, time_filter=sq.time_filter, page_size=4,
+                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                    sub_query_id=sq.sub_query_id, owner_ids=owner_ids,
+                    executor=self._executor,
+                )
+
+            async def _surface_table() -> List[dict]:
+                if qt != "structured":
+                    return []
+                return await search_and_select_feishu_table_candidates(
+                    fallback_query, token=self._uat, page_size=3,
+                    query_type=qt, focus_id=sq.target_focus, focus_text=focus_text,
+                    sub_query_id=sq.sub_query_id, table_pool=self._table_pool,
+                    direct_limit=3, wiki_limit=3, executor=self._executor,
+                    child_rerank_enabled=self.cfg.table_child_rerank_enabled,
+                    child_rerank_model=self.cfg.table_child_rerank_model,
+                    child_rerank_timeout_s=self.cfg.table_child_rerank_timeout_s,
+                    child_rerank_top_n=self.cfg.table_child_rerank_top_n,
+                    child_rerank_instruct=self.cfg.table_child_rerank_instruct,
+                )
+
+            try:
+                fallback_docs, fallback_tables = await asyncio.gather(_surface_doc(), _surface_table())
+            except Exception as exc:
+                logger.warning("[feishu] original-surface fallback failed for %r: %s", fallback_query, exc)
+                fallback_docs, fallback_tables = [], []
+            doc_item["doc_candidates"] = list(fallback_docs)
+            if fallback_docs:
+                surface_doc_prepared.append(doc_item)
+            if table_item:
+                table_item["table_candidates"] = list(fallback_tables)
+                if fallback_tables:
+                    surface_table_prepared.append(table_item)
+            self._trace_events.append({
+                "event": "source_fallback", "source": self.source,
+                "focus": sq.target_focus, "query_id": sq.sub_query_id,
+                "query_type": sq.query_type, "api_query": fallback_query,
+                "fallback": True, "fallback_origin": "original_surface",
+                "fallback_reason": "primary_doc_and_table_zero_candidates",
+                "primary_doc_candidate_count": doc_primary_count,
+                "primary_table_candidate_count": table_primary_count,
+                "fallback_doc_candidate_count": len(fallback_docs),
+                "fallback_table_candidate_count": len(fallback_tables),
+            })
+        if surface_doc_prepared:
+            surface_docs, surface_doc_ids = _merge_doc_demands(surface_doc_prepared)
+            for sq_id, ids in surface_doc_ids.items():
+                doc_ids_by_sq[sq_id] = ids
+            if surface_docs and self._doc_pool is not None:
+                _assign_doc_route_hints(surface_docs, min_block=2)
+                try:
+                    await self._doc_pool.submit_and_read(
+                        surface_docs, query="__original_surface_fallback__",
+                    )
+                except Exception as exc:
+                    logger.warning("[feishu] original-surface doc submit failed: %s", exc)
+        if surface_table_prepared:
+            _trim_table_parents(surface_table_prepared, target=6, min_per_sq=2)
+            surface_tables, surface_table_ids = _merge_table_demands(surface_table_prepared)
+            for sq_id, ids in surface_table_ids.items():
+                table_ids_by_sq[sq_id] = ids
+            existing_table_ids = {_candidate_doc_key(item) for item in table_list}
+            table_list.extend(
+                item for item in surface_tables if _candidate_doc_key(item) not in existing_table_ids
+            )
         logger.debug("TIMING feishu.batch_prepare_search sub_queries=%d ms=%.1f",
                      len(sub_queries), _elapsed_ms(prepare_started))
 
