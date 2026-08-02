@@ -1,11 +1,10 @@
 {
-  "purpose": "P3 resource-first benchmark corpus. These are explicitly selected Feishu documents, not search results.",
+  "data_policy": "synthetic placeholder only; pass a local private inventory for live Feishu resource export",
   "documents": [
-    {"document_id": "WL4Kdhr8fow1PjxgaN6chr9Fnlf", "title": "Nubia Z80 U GTM方案策划", "url": "https://<tenant>.feishu.cn/<redacted>"},
-    {"document_id": "CLJndoJj5o0kh2xLldQc52LDnEb", "title": "Weekly meeting 10.29", "url": "https://<tenant>.feishu.cn/<redacted>"},
-    {"document_id": "PbD8dNl0wooNiIxA9pRcszu6nHS", "title": "HYPERSHELL 业务总结报告 (2026-06-15 ~2026-06-21)", "url": "https://<tenant>.feishu.cn/<redacted>"},
-    {"document_id": "OvjXdowbkoFv05xIbJycL13PnSc", "title": "Hypershell 新品 GTM 深度研究报告", "url": "https://<tenant>.feishu.cn/<redacted>"},
-    {"document_id": "DjfpdwVtooCJgUxSVuWcd0M5nib", "title": "全球消费级外骨骼机器人市场深度研究与出海GTM战略白皮书", "url": "https://<tenant>.feishu.cn/<redacted>"},
-    {"document_id": "ZbIVdQkDtoDeGBxADjCcTTIonpd", "title": "REDMAGIC 业务总结报告 (2026-06-15 ~ 2026-06-21)", "url": "https://<tenant>.feishu.cn/<redacted>"}
+    {
+      "document_id": "example-document-id",
+      "title": "Synthetic example document",
+      "url": "https://example.invalid/replace-with-local-document"
+    }
   ]
 }

@@ -936,6 +936,20 @@ def build_retrieve_agent(
     )
 
 
+def _resolve_feishu_uat(sc: SourceConfig) -> str:
+    """Resolve the Feishu UAT, refreshing only for the project-env path."""
+    # Explicit SDK injection stays caller-owned.  The standard project-env
+    # path gets automatic OAuth rotation before a source touches Feishu.
+    if sc.feishu_uat or not sc.load_from_env:
+        return sc.get("feishu_uat", "FEISHU_UAT")
+
+    from feishu_read_tool.oauth_tokens import FeishuOAuthError, ensure_valid_project_access_token
+    try:
+        return ensure_valid_project_access_token()
+    except FeishuOAuthError as exc:
+        raise RuntimeError(f"Feishu OAuth token lifecycle failed: {exc}") from exc
+
+
 def _build_feishu_source_agent(
     sa_cfg: SourceAgentConfig, sc: SourceConfig, preset: str = "balanced",
 ) -> SourceAgent:
@@ -944,7 +958,7 @@ def _build_feishu_source_agent(
     from tools.feishu.feishu_doc_pool import FeishuDocPool
     from tools.feishu.table_pool import TablePool
 
-    uat = sc.get("feishu_uat", "FEISHU_UAT")
+    uat = _resolve_feishu_uat(sc)
 
     doc_pool = None
     table_pool = None

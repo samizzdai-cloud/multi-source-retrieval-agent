@@ -1,0 +1,22 @@
+# Synthetic schema example only. Copy to a local ignored file and replace every
+# placeholder with documents your OAuth user is authorized to read.
+presets: [balanced]
+enabled_sources: [google]
+corpus:
+  ExampleDoc:
+    name: Synthetic example document
+    url: https://example.invalid/document
+    doc_id_substr: example-document-id
+    kind: google_doc
+test_cases:
+  - test_id: synthetic_google_q1
+    target: ExampleDoc
+    question_type: factual_simple
+    query: What does the synthetic example document state?
+    ground_truth: Synthetic fixture only; no live assertion.
+    expected:
+      target_doc_id_substr: example-document-id
+      key_anchors_in_subquery: [synthetic]
+      answer_must_contain: [Synthetic]
+      critical_present: false
+      must_reject: false

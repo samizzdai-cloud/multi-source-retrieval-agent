@@ -79,11 +79,11 @@ class AgentConfig:
 
     # ── Planner / Eval 模型分离接口 ────────────────────────────
     # 两类模型可独立配置；留空都用 dataclass 默认值
-    #   planner_model:  global_planner v2.2 LLM，默认 deepseek/deepseek-v4-pro
+    #   planner_model:  global_planner v2.2 LLM，默认 deepseek/deepseek-v4-flash
     #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 deepseek/deepseek-v4-flash
     planner_model: str = ""               # 空 → GlobalPlannerConfig.model 默认
     eval_model: str = ""                  # 空 → RetrieveConfig.MODEL 默认
-    # DeepSeek thinking 模式配置；空则使用预设 (planner=THINKING_PRO, eval=THINKING_FLASH)
+    # DeepSeek thinking 模式配置；空则使用预设（planner 与 eval 均显式禁用 thinking）。
     planner_thinking: Optional[ThinkingConfig] = None
     eval_thinking: Optional[ThinkingConfig] = None
 
@@ -275,15 +275,16 @@ class ThinkingConfig:
 
 
 # ── 预设 thinking 配置 ──────────────────────────────────────────
-THINKING_PRO = ThinkingConfig(enabled=True, effort="high")     # global_planner
-THINKING_FLASH = ThinkingConfig(enabled=False)                  # source agents
+# Retrieval pipeline 的 planner 与所有 eval 阶段共用此配置。保留
+# ThinkingConfig 的启用能力仅供显式、受控的离线工作流使用，不能成为运行时默认。
+THINKING_FLASH = ThinkingConfig(enabled=False)
 
 
 @dataclass
 class GlobalPlannerConfig:
     """Global planner（v2.2）行为配置。模型在此切换，不走 env。
 
-    - ``model``: 默认 ``deepseek/deepseek-v4-pro``（通过 ADK LiteLlm）。
+    - ``model``: 默认 ``deepseek/deepseek-v4-flash``（通过 ADK LiteLlm）。
       历史 Gemini 选项 ``gemini-3.5-flash`` / ``gemini-3-flash-preview`` /
       ``gemini-3.1-flash-lite`` 仍受支持。
     - ``thinking_config``: 结构化 planner 默认关闭 thinking。部分 DeepSeek
@@ -291,7 +292,7 @@ class GlobalPlannerConfig:
     - ``fallback_to_v1``: 整盘失败时是否回落到老 query_planner + 各源 plan_only_LLM。
     - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2。
     """
-    model: str = "deepseek/deepseek-v4-pro"
+    model: str = "deepseek/deepseek-v4-flash"
     thinking_config: Optional[ThinkingConfig] = field(default_factory=lambda: THINKING_FLASH)
     timeout_s: float = 15.0
     max_focuses: int = 6
@@ -478,6 +479,9 @@ class SourceAgentConfig:
         "entity, time period, metric, channel, and task alignment. Penalize generic templates, "
         "system tables, and merely related topics. Do not infer content absent from metadata."
     )
+    # When True, FocusBoard SATISFIED (critical≥2) gates plan_eval's "continue" decision.
+    # Set False to let plan_eval autonomously decide whether to replan.
+    allow_focusboard_early_stop: bool = True
     min_loops: int = 1
     max_loops: int = 1
     source_timeout_s: float = 25.0         # SourceAgent 整体软超时
@@ -761,6 +765,7 @@ class RetrieveConfig:
                       "final_top_k_per_focus": 5,
                       "source_overrides": {
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0,
+                                      "allow_focusboard_early_stop": False,
                                       "rerank_enabled": True,
                                       # deep_dive 给 table chunk 更宽松的读取预算（8 vs balanced 6）。
                           },

@@ -386,7 +386,7 @@ async def main(
 
 def _parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument("--cases-file", default=str(Path(__file__).parent / "google_test_cases.yaml"))
+    p.add_argument("--cases-file", default=str(Path(__file__).parent / "google_test_cases.example.yaml"))
     p.add_argument("--presets", default="balanced")
     p.add_argument("--cases", default=None, help="Comma-separated test_ids to run")
     p.add_argument("--resume", action="store_true", help="Skip cases already cached")

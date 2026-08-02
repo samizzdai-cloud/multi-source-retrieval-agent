@@ -1,0 +1,10 @@
+{
+  "version": "public-synthetic-v1",
+  "description": "Synthetic examples only. Supply a local private dataset for live evaluation.",
+  "distribution": {"synthetic": 3},
+  "queries": [
+    {"id": 1, "query": "What is the reported synthetic metric?", "difficulty": "easy", "query_type_expected": "data", "project": "synthetic"},
+    {"id": 2, "query": "Compare the two synthetic options using documented evidence.", "difficulty": "medium", "query_type_expected": "mixed", "project": "synthetic"},
+    {"id": 3, "query": "Which source is required to resolve the synthetic gap?", "difficulty": "hard", "query_type_expected": "concept", "project": "synthetic"}
+  ]
+}

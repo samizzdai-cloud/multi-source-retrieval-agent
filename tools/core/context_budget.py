@@ -15,14 +15,24 @@ from tools.core.models import ChunkEntry
 # These limits define the actual source-evaluation prompt surface. The batcher
 # must budget this rendered preview, not the full caller payload.
 DOCUMENT_PROMPT_CHARS = 300
+CONCEPT_PROMPT_CHARS = 1_200  # diagnosis/analysis chunks need more context
 TABLE_PROMPT_CHARS = 2_000
 _TABLE_MARKERS = ("| --- |", "| --- ", "Bitable:", "Sheet:", "Excel:")
 
 
-def prompt_preview_text(chunk: ChunkEntry) -> str:
-    """Return the body window exposed to source-evaluation prompts."""
+def prompt_preview_text(chunk: "ChunkEntry") -> str:
+    """Return the body window exposed to source-evaluation prompts.
+
+    Concept/diagnostic query chunks receive a larger window (1200 chars)
+    because their key conclusions often sit beyond the 300-char document
+    default.  Table chunks already get 2000 chars via markdown detection.
+    """
     text = (chunk.preview_content or chunk.content or "").replace("\n", " ").strip()
-    limit = TABLE_PROMPT_CHARS if any(marker in (chunk.content or "") for marker in _TABLE_MARKERS) else DOCUMENT_PROMPT_CHARS
+    if any(marker in (chunk.content or "") for marker in _TABLE_MARKERS):
+        limit = TABLE_PROMPT_CHARS
+    else:
+        query_types = set((chunk.metadata or {}).get("selected_query_types") or [])
+        limit = CONCEPT_PROMPT_CHARS if "concept" in query_types else DOCUMENT_PROMPT_CHARS
     return text if len(text) <= limit else text[:limit] + "..."
 
 

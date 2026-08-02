@@ -364,6 +364,28 @@ def _focuses_block(focuses: List[Focus]) -> str:
     return "\n".join(f"- {f.focus_id}: {f.text}" for f in focuses)
 
 
+def _profile_eval_block(profile_resolution: object | None) -> str:
+    """Render matched Profile entities/expressions for eval context."""
+    if profile_resolution is None:
+        return ""
+    entities = getattr(profile_resolution, "exact_entity_matches", ()) or ()
+    expressions = getattr(profile_resolution, "exact_expression_matches", ()) or ()
+    if not entities and not expressions:
+        return ""
+    lines = ["Profile-known terms (treat chunks containing these with higher relevance):"]
+    for e in entities:
+        name = e.get("name", "")
+        aliases = e.get("aliases", [])[:2]
+        alias_str = f" (aka {', '.join(aliases)})" if aliases else ""
+        lines.append(f"  entity: {name}{alias_str}")
+    for e in expressions:
+        name = e.get("name", "")
+        variants = e.get("variants", [])[:3]
+        var_str = f" ↔ {' | '.join(variants)}" if variants else ""
+        lines.append(f"  expr: {name}{var_str}")
+    return "\n".join(lines) + "\n"
+
+
 def _chunks_block(
     chunks: List[ChunkEntry],
     max_chars: int = 300,
@@ -385,9 +407,17 @@ def _chunks_block(
         # Keep the rendered prompt body aligned with ContextBudget.
         snippet = prompt_preview_text(c)
         meta = c.metadata or {}
+        heading = meta.get("heading_path") or ""
+        # ── debug: log preview for diagnosis/budget chunks ──
+        heading_lower = heading.lower()
+        if any(kw in heading_lower for kw in ("next step", "lifetime budget", "diagnosis", "audience performance", "country performance")):
+            qtypes = meta.get("selected_query_types") or []
+            logger.info(
+                "PREVIEW_DEBUG chunk=%s heading=%r chars=%d preview_chars=%d qtypes=%s snippet_head=%r",
+                c.id[-30:], heading, len(c.content or ""), len(snippet), qtypes, snippet[:120],
+            )
         route = meta.get("route") or meta.get("route_hint") or ""
         source_label = meta.get("source_name") or ""
-        heading = meta.get("heading_path") or ""
         modified = (
             meta.get("modified_time")
             or meta.get("modifiedTime")
@@ -478,13 +508,23 @@ def _build_plan_only_prompt(
 
 def _build_eval_only_prompt(
     focuses: List[Focus], chunks: List[ChunkEntry], source_top_k: int, refs: Optional[ChunkRefRegistry] = None,
+    profile_resolution: object | None = None,
 ) -> str:
+    profile_block = _profile_eval_block(profile_resolution)
     return (
         "required_response_format: JSON object\n\n"
         "Reference contract: every top_k_chunk_ids item and every tiers[].chunk_id must be "
         "the chunk_ref (C1, C2, ...) printed in chunks_block. Never output a canonical chunk ID.\n\n"
+        f"{profile_block}"
         f"focuses_block:\n{_focuses_block(focuses)}\n\n"
         f"current_date: {date.today().isoformat()}\n\n"
+        "Evidence analysis: (1) Entity alignment — verify the chunk describes the exact "
+        "entity/channel the Focus names. (2) Cognitive level — factual metrics chunks "
+        "supply raw data; interpretive/analysis chunks supply diagnosis and conclusions. "
+        "When the Focus asks for judgment or diagnosis, retain at least one interpretive "
+        "chunk where one exists; it is not redundant with a data table about the same topic. "
+        "(3) Refinement — among same-entity same-level chunks, prefer the one most directly "
+        "focused on the Focus question.\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
         f"source_top_k: {source_top_k}"
     )
@@ -519,11 +559,14 @@ def _build_partial_eval_prompt(
     chunks: List[ChunkEntry],
     batch_id: str,
     refs: Optional[ChunkRefRegistry] = None,
+    profile_resolution: object | None = None,
 ) -> str:
     refs = refs or ChunkRefRegistry.build(chunks)
+    profile_block = _profile_eval_block(profile_resolution)
     return (
         f"required_response_format: JSON object\n"
         f"batch_id: {batch_id}\n"
+        f"{profile_block}"
         "Reference contract: use only chunk_ref values (C1, C2, ...) printed in chunks_block; never "
         "output a canonical chunk ID. Return focus_groups, not a final top-K. For every Focus that has "
         "at least one chunk in this batch, output only the chunk_refs that are critical or important "
@@ -587,16 +630,19 @@ def _build_plan_eval_prompt(
     source_top_k: int,
     partial_ledgers: Optional[List[Dict[str, Any]]] = None,
     refs: Optional[ChunkRefRegistry] = None,
+    profile_resolution: object | None = None,
 ) -> str:
     """构建 plan_eval 用户消息。
 
     focus_status 经 ``_slim_focus_status_for_prompt`` 裁剪后注入——只让 LLM
     看到"是否已被别源覆盖"与"哪些源贡献过"，**不**暴露 quota 计数。
     """
+    profile_block = _profile_eval_block(profile_resolution)
     parts = [
         "required_response_format: JSON object",
         "Reference contract: every top_k_chunk_ids item and every tiers[].chunk_id must be the "
         "chunk_ref (C1, C2, ...) printed in chunks_block. Never output a canonical chunk ID.",
+        profile_block,
         f"focuses_block:\n{_focuses_block(focuses)}",
         f"current_date: {date.today().isoformat()}",
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}",
@@ -604,16 +650,27 @@ def _build_plan_eval_prompt(
         f"source_top_k: {source_top_k}",
     ]
     parts.append(
-        "Semantic completion contract: Focus text is the only answer contract. Mark a Focus covered only when "
-        "the retained chunks jointly support every direct requirement and necessary comparison stated in that Focus. "
-        "A count of critical/important chunks, a top-K limit, or evidence for only one part of the Focus never proves "
-        "coverage. If a necessary premise is absent, return gap with query_refinement only when another source query "
-        "can reasonably retrieve it; otherwise return upstream_evidence_needed. Do not use query IDs or query wording "
-        "as coverage groups. When selecting final top-K, retain every direct complementary fact needed for the Focus; "
-        "do not replace a more direct channel, country, period, metric, or conclusion with a generic, aggregate, "
-        "or adjacent-source example merely because abstract coverage seems sufficient. Illustrative selection: for a "
-        "country-specific paid-budget decision, retain the country-level paid-performance table and its direct outcome "
-        "interpretation ahead of an otherwise related aggregate or another-channel summary."
+        "Evidence analysis framework — apply these three checks before selecting top-K:\n"
+        "1. Entity alignment: does this chunk describe the exact entity/channel/product that "
+        "the Focus names? A heading like 'Lifetime Budget' is not enough — verify whether it "
+        "is the same channel (e.g. Meta Ads vs Google Ads), the same product, and the same "
+        "period or stage that the Focus requires. A mismatched entity cannot answer the Focus "
+        "even if its metrics are dense.\n"
+        "2. Cognitive level: does the Focus ask for facts (what happened) or for judgment "
+        "(why / whether to act / what to do)? Factual/metric chunks supply raw data — they can "
+        "satisfy a facts-only Focus. When the Focus requires judgment or diagnosis, factual "
+        "chunks are a necessary premise but cannot substitute for interpretive/analysis chunks "
+        "that interpret those facts and form a conclusion. They occupy different positions "
+        "in the reasoning chain and are not redundant with one another.\n"
+        "3. Evidence-chain refinement: when several chunks target the same entity at the same "
+        "cognitive level, prefer the one most directly focused on the Focus question — the one "
+        "that has already synthesised, filtered, or interpreted toward a conclusion, rather "
+        "than the broadest or most data-dense overview. A narrower, conclusion-oriented chunk "
+        "often carries more evidentiary weight than a wider survey.\n"
+        "Coverage rule: mark a Focus covered only when the retained chunks jointly satisfy "
+        "every distinct requirement stated in that Focus, including both factual premises and "
+        "judgment-level conclusions where the Focus demands them. A count of critical/important "
+        "chunks or a top-K limit never proves coverage."
     )
     if partial_ledgers:
         # Canonical IDs are deliberately never sent to an LLM.  Translate the
@@ -1129,6 +1186,7 @@ class SourceAgent:
                 source_top_k=self._effective_source_top_k,
                 partial_ledgers=self._partial_ledgers,
                 refs=registry,
+                profile_resolution=getattr(self, "_profile_resolution", None),
             )
             plan_eval_started = time.perf_counter()
             self._trace_events.append({
@@ -1171,7 +1229,11 @@ class SourceAgent:
 
             raw_decision = pe_out.get("decision", "stop")
             decision = enforce_loop_bounds(raw_decision, loop_n, min_loops, max_loops)
-            forced_stop_by_io_gate = bool(io_saturated and decision == "continue")
+            forced_stop_by_io_gate = bool(
+                self.cfg.allow_focusboard_early_stop
+                and io_saturated
+                and decision == "continue"
+            )
             if forced_stop_by_io_gate:
                 # The board stops future I/O only. Current evidence still
                 # receives a semantic plan_eval; a continue cannot submit a
@@ -1324,8 +1386,14 @@ class SourceAgent:
         registry = ChunkRefRegistry.build(list(chunk_pool.values()))
         eval_prompt = _build_eval_only_prompt(
             focuses, list(chunk_pool.values()), self._effective_source_top_k, refs=registry,
+            profile_resolution=getattr(self, "_profile_resolution", None),
         )
         eval_out = await _run_llm_agent(self.eval_only, eval_prompt)
+        self._trace_events.append({
+            "event": "llm_timing", "source": self.source,
+            "stage": "eval_only", "input_chunk_count": len(chunk_pool),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
+        })
         eval_out, malformed_refs = registry.resolve_eval_output(eval_out)
         if malformed_refs:
             self._trace_events.append({"event": "eval_contract_error", "source": self.source,
@@ -1827,6 +1895,7 @@ class SourceAgent:
             registry = ChunkRefRegistry.build(batch)
             prompt = _build_partial_eval_prompt(
                 focuses, batch, f"{self.source}:loop{loop_n}:batch{label}", refs=registry,
+                profile_resolution=getattr(self, "_profile_resolution", None),
             )
             started = time.perf_counter()
             async with partial_semaphore:
@@ -1972,6 +2041,7 @@ class SourceAgent:
 
         async def _evaluate() -> Dict[str, Any]:
             registry = ChunkRefRegistry.build(batch)
+            llm_started = time.perf_counter()
             try:
                 output = await _run_llm_agent(
                     self.partial_eval,
@@ -1980,6 +2050,7 @@ class SourceAgent:
                         chunks=batch,
                         batch_id=batch_id,
                         refs=registry,
+                        profile_resolution=getattr(self, "_profile_resolution", None),
                     ),
                 )
             except Exception as exc:
@@ -1996,6 +2067,8 @@ class SourceAgent:
             self._trace_events.append({
                 "event": "partial_eval_response_shape", "source": self.source,
                 "batch_id": batch_id,
+                "loop": loop_n, "generation": generation,
+                "elapsed_ms": round((time.perf_counter() - llm_started) * 1000.0, 1),
                 "focus_group_count": len(focus_groups),
                 "tier_count": len(partial_tiers),
                 "non_noise_tier_count": sum(1 for item in partial_tiers if item.get("tier") != "noise"),

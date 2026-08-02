@@ -240,7 +240,7 @@ def _build_prompt(
     )
     return diagnostic_coverage_rule + focus_contract_rule + f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
 
-核心模型：focus 是回答 user query 的一个可独立验收的子任务，描述理想答案必须形成的判断、结论或结构化输出；它不是文档主题、定义词或单条检索词。sub_query 是为同一个 focus 取得不同证据的 API 请求；一个 focus 可以有多条 query，但它们必须角度不同且不可只是同义改写。
+核心模型：focus 是 user_query 意图的拆解，每个 focus 是一个可独立验收的检索子任务。user_query 是为适配各源检索特征（关键词匹配/语义检索/MCP）而构建的面向检索结果画像的描述——它精准刻画要检索的目标内容，而非泛主题或答案改写。sub_query 是为同一个 focus 取得不同证据的 API 请求；一个 focus 可以有多条 query，但它们必须角度不同且不可只是同义改写。
 
 user_query：「{query}」
 current_date：{now_str}（"今年" = {today.year} 年；focus 中的"今年/本年/this year" 必须替换为实际年份）
@@ -272,15 +272,15 @@ session_context：{session_context or "无"}
   4. user_query 的实体、缩写、指标、地区、日期、产品状态（如新品/老品）和诊断/预测词必须原样留在相关 focus 或 query；不得引入任何示例品牌或业务实体。
   5. 预测、判断、估算这类问题通常只能有 **一个** focus：该 focus 是要形成的最终预测/判断；
      销售现状、历史趋势、库存、渠道明细、预测模型是这个 focus 的不同证据面，必须作为同一 focus 下
-     角度不同的 query，而不是拆成多个“获取数据”的 focus。只有两个结论能被用户独立验收时才可拆 focus。
-
+     角度不同的 query，而不是拆成多个"获取数据"的 focus。只有两个结论能被用户独立验收时才可拆 focus。
 ## 数量约束（硬要求）
 
-  · focuses 总数 ≤ {cfg.max_focuses}；简单任务通常 1 个，只有答案需要不同、可独立验收的结论时才拆分。
+  · focuses 总数 ≤ {focus_limit}（已按启用源数量自动计算，这是硬上限）；简单任务通常 1 个，只有证据角度不同、需独立检索策略时才拆分。
   · 同一 focus + source 可有多条不同证据角度的 sub_query；禁止只因别名、
     大小写、翻译或同义表达不同而重复检索。别名/表达替换交由零结果 fallback。
-  · 各源 sub_queries 数量遵从其专属规则的预算（google 有明确预算；feishu/bailian
-    无显式上限但保持少而精）
+  · 各源 sub_queries 数量遵从其专属规则的预算（google 有明确预算；feishu ≤3 条、
+    bailian ≤2 条，均不可超过）
+  · 同一 focus 的 sub_query 总数不可超过 3 条
   · 若两个候选 focus 可被同一条 sub_query 覆盖 → 合并
 
 {output_block}
@@ -458,7 +458,7 @@ def _parse_global_plan(
         focus_content = str(item.get("focus_content") or "").strip()
         if not focus_content:
             continue
-        sqs_raw = item.get("sub_queries") or []
+        sqs_raw = (item.get("sub_queries") or [])[:3]
         sub_queries: List[PlannedSubQuery] = []
         seen_source_queries: set[tuple[str, str]] = set()
         for sq_item in sqs_raw:
@@ -556,11 +556,12 @@ def plan_global(
         )
         raise PlannerFailure(reason="json_parse", detail=str(e)) from e
 
+    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses)
     plan = _parse_global_plan(
         raw_obj,
         original_query=query,
         enabled_sources=enabled_sources,
-        max_focuses=cfg.max_focuses,
+        max_focuses=focus_limit,
     )
 
     elapsed = (time.perf_counter() - started) * 1000.0

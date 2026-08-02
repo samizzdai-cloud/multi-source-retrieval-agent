@@ -26,8 +26,8 @@ tests/artifacts/
 .eval_output/
 .test_output/
 .spec_organized/
-test_*/
-test_*
+/test_*/
+/test_*
 docs/session_logs/
 google_workspace_tool/test_results/
 
@@ -59,6 +59,9 @@ optimize_results/
 # Eval cache and live output directories
 eval/cache_*/
 eval/live_*/
+
+# Private release checks (body-free summaries only; never commit live evidence)
+tests/artifacts/release_e2e/
 
 # Temp docs
 docs/temp_plan.md

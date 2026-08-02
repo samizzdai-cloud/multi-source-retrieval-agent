@@ -13,12 +13,13 @@ import json
 import os
 import requests
 import concurrent.futures
+import time
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 load_dotenv()
 
-FEISHU_MCP_ENDPOINT = os.getenv("FEISHU_MCP_ENDPOINT", "https://open.feishu.cn/mcp")
+FEISHU_MCP_ENDPOINT = os.getenv("FEISHU_MCP_ENDPOINT", "https://mcp.feishu.cn/mcp")
 FEISHU_DIRECT_SEARCH_URL = "https://open.feishu.cn/open-apis/suite/docs-api/search/object"
 FEISHU_WIKI_SEARCH_URL = "https://open.feishu.cn/open-apis/wiki/v2/nodes/search"
 FEISHU_UAT = os.getenv("FEISHU_UAT")
@@ -42,6 +43,35 @@ _WIKI_MIN_INTERVAL = 0.35             # ≈2.8 QPS, safely below burst-9 thresho
 _wiki_cache = {}
 _wiki_cache_lock = threading.Lock()
 _WIKI_CACHE_TTL = 2.0  # seconds
+
+# ``search-doc`` is invoked by primary sub-queries and by zero-result variant
+# fallbacks.  They must share one process-wide in-flight budget: a fallback is
+# ordinary work, not a reason to burst past the primary request limit.  This
+# is deliberately a concurrency cap, not a QPS claim; the UAT pressure probe
+# established burst capacity but not a tenant-wide sustained-rate contract.
+MCP_SEARCH_MAX_CONCURRENCY = max(
+    1, int(os.getenv("FEISHU_MCP_SEARCH_MAX_CONCURRENCY", "6"))
+)
+_MCP_SEARCH_SEM = threading.BoundedSemaphore(MCP_SEARCH_MAX_CONCURRENCY)
+
+
+def _post_mcp_search(payload: Dict[str, Any], headers: Dict[str, str]):
+    """Send one MCP ``search-doc`` request under the shared in-flight cap.
+
+    The semaphore is intentionally held only for the network call.  JSON
+    parsing and caller-side normalization are local CPU work and must not keep
+    another remote request from using a released slot.
+    """
+    queued_at = time.perf_counter()
+    with _MCP_SEARCH_SEM:
+        wait_ms = (time.perf_counter() - queued_at) * 1000.0
+        logger.debug(
+            "TIMING feishu.mcp_search_slot max_concurrency=%d wait_ms=%.1f",
+            MCP_SEARCH_MAX_CONCURRENCY, wait_ms,
+        )
+        return requests.post(
+            FEISHU_MCP_ENDPOINT, headers=headers, json=payload, timeout=15,
+        )
 
 # Wiki obj_type → doc_type 映射（仅保留支持的类型）
 _WIKI_OBJ_TYPE_MAP = {
@@ -180,7 +210,7 @@ def search_feishu_hybrid(
             "X-Lark-MCP-Allowed-Tools": "search-doc",
         }
         try:
-            resp = requests.post(FEISHU_MCP_ENDPOINT, headers=headers, json=payload, timeout=15)
+            resp = _post_mcp_search(payload, headers)
             resp.raise_for_status()
             content = resp.json().get("result", {}).get("content", [])
             raw = content[0].get("text", "") if content else ""
@@ -376,7 +406,7 @@ def search_feishu_mcp_pure(
         "X-Lark-MCP-Allowed-Tools": "search-doc",
     }
     try:
-        resp = requests.post(FEISHU_MCP_ENDPOINT, headers=mcp_headers, json=payload, timeout=15)
+        resp = _post_mcp_search(payload, mcp_headers)
         resp.raise_for_status()
         content = resp.json().get("result", {}).get("content", [])
         raw = content[0].get("text", "") if content else ""

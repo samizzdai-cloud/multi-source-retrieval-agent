@@ -78,6 +78,8 @@ def _merge_agent_config(base: AgentConfig, request: RetrieveRequest) -> AgentCon
             gemini_fallback_model=merged_source.gemini_fallback_model,
             planner_model=base.planner_model,
             eval_model=base.eval_model,
+            planner_thinking=base.planner_thinking,
+            eval_thinking=base.eval_thinking,
             google_credentials_path=merged_source.google_credentials_path,
             google_token_path=merged_source.google_token_path,
             load_from_env=merged_source.load_from_env,

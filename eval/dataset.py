@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_PATH = Path(__file__).parent / "eval_queries.json"
+_DEFAULT_PATH = Path(__file__).parent / "eval_queries.example.json"
 
 
 def load_queries(

@@ -1185,6 +1185,13 @@ class FeishuSourceAgent(SourceAgent):
 
         table_chunks_by_token: Dict[str, List[UnifiedChunk]] = {}
         table_events: Dict[str, asyncio.Event] = {}
+        # The reader itself has a hard wall budget.  A consumer must never use
+        # the document collector's much larger budget merely because an event
+        # was not signalled after that reader has already timed out.
+        table_wait_timeout_s = min(
+            doc_pool_timeout,
+            max(float(self.cfg.feishu_sheet_read_wall_s), float(self.cfg.feishu_bitable_read_wall_s)) + 1.0,
+        )
 
         if table_list:
             from feishu_read_tool.sheet_reader import read_sheets
@@ -1211,6 +1218,11 @@ class FeishuSourceAgent(SourceAgent):
             # 会继续在 worker 中跑完，但结果会被丢弃。
             _SHEET_READ_WALL_S = float(self.cfg.feishu_sheet_read_wall_s)
             _BITABLE_READ_WALL_S = float(self.cfg.feishu_bitable_read_wall_s)
+            # This execution path reads tables directly so it must retain the
+            # TablePool's request-wide concurrency limits rather than relying
+            # only on the 24-worker source executor.
+            sheet_read_sem = getattr(self._table_pool, "_sheet_read_sem", None) or asyncio.Semaphore(6)
+            bitable_read_sem = getattr(self._table_pool, "_bitable_read_sem", None) or asyncio.Semaphore(6)
             table_read_tasks: List[asyncio.Task[None]] = []
 
             async def _read_table_one(cand: dict) -> None:
@@ -1221,10 +1233,11 @@ class FeishuSourceAgent(SourceAgent):
                 try:
                     if doc_type == "SHEET":
                         try:
-                            chunks = await asyncio.wait_for(
-                                self._to_thread(read_sheets, rq, [cand], self._uat),
-                                timeout=_SHEET_READ_WALL_S,
-                            )
+                            async with sheet_read_sem:
+                                chunks = await asyncio.wait_for(
+                                    self._to_thread(read_sheets, rq, [cand], self._uat),
+                                    timeout=_SHEET_READ_WALL_S,
+                                )
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "[feishu] sheet read wall timeout %.1fs token=%s (abandoning)",
@@ -1242,10 +1255,11 @@ class FeishuSourceAgent(SourceAgent):
                             chunks = []
                     elif doc_type == "BITABLE":
                         try:
-                            chunks = await asyncio.wait_for(
-                                self._to_thread(read_bitables, rq, [cand], self._uat),
-                                timeout=_BITABLE_READ_WALL_S,
-                            )
+                            async with bitable_read_sem:
+                                chunks = await asyncio.wait_for(
+                                    self._to_thread(read_bitables, rq, [cand], self._uat),
+                                    timeout=_BITABLE_READ_WALL_S,
+                                )
                         except asyncio.TimeoutError:
                             logger.warning(
                                 "[feishu] bitable read wall timeout %.1fs token=%s (abandoning)",
@@ -1297,6 +1311,12 @@ class FeishuSourceAgent(SourceAgent):
                             score=0.0, confidence_tier=uc.confidence_tier, metadata=meta,
                         ))
                     table_chunks_by_token[token] = normalized
+                    self._trace_events.append({
+                        "event": "table_read", "source": self.source,
+                        "route": "sheet_api" if doc_type == "SHEET" else "bitable_api",
+                        "document_id": token, "document_type": doc_type,
+                        "chunk_count": len(normalized), "elapsed_ms": round(read_ms, 1),
+                    })
                     logger.debug("TIMING feishu.table_read token=%s type=%s chunks=%d ms=%.1f",
                                 token[:16], doc_type, len(normalized), read_ms)
                 except Exception as e:
@@ -1385,7 +1405,7 @@ class FeishuSourceAgent(SourceAgent):
                         try:
                             done, _ = await asyncio.wait(
                                 {evt_task, sat_task},
-                                timeout=doc_pool_timeout,
+                                timeout=table_wait_timeout_s,
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                         finally:
@@ -1399,7 +1419,7 @@ class FeishuSourceAgent(SourceAgent):
                             logger.warning("[feishu] table wait timeout token=%s", tid[:16])
                     else:
                         try:
-                            await asyncio.wait_for(evt.wait(), timeout=doc_pool_timeout)
+                            await asyncio.wait_for(evt.wait(), timeout=table_wait_timeout_s)
                         except asyncio.TimeoutError:
                             logger.warning("[feishu] table wait timeout token=%s", tid[:16])
                     collected.extend(table_chunks_by_token.get(tid, []))
@@ -1516,7 +1536,16 @@ class FeishuSourceAgent(SourceAgent):
             await asyncio.gather(*table_read_tasks, return_exceptions=True)
         if self._doc_pool is not None and hasattr(self._doc_pool, "consume_observability_events"):
             for event in self._doc_pool.consume_observability_events():
-                self._trace_events.append({**event, "source": self.source, "transport_inconclusive": True})
+                # Successful document-read timing is diagnostic data, not a
+                # transport degradation. Preserve the inconclusive marker only
+                # for actual deadline/failure paths.
+                is_transport_gap = str(event.get("event") or "") in {
+                    "consumer_deadline", "block_api_failed", "mcp_fallback_failed",
+                }
+                self._trace_events.append({
+                    **event, "source": self.source,
+                    **({"transport_inconclusive": True} if is_transport_gap else {}),
+                })
         logger.info("TIMING feishu.batch_total sub_queries=%d chunk_pool=%d ms=%.1f",
                      len(sub_queries), len(chunk_pool), _elapsed_ms(batch_started))
 

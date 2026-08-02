@@ -409,7 +409,36 @@ class FeishuDocPool:
                 collected_by_doc[doc_id] = doc_chunks
 
             if not newly_done and pending:
-                await asyncio.sleep(0.15)
+                # Every submitted document has an Event. Polling at 150ms
+                # added a deterministic tail to each sub-query waiter even
+                # when its last document had already completed. Wait directly
+                # on completion, but wake at the earliest consumer deadline.
+                wait_s = max(0.0, deadline - time.monotonic())
+                if per_doc_timeout is not None:
+                    remaining_per_doc = [
+                        max(0.0, per_doc_timeout - (time.monotonic() - submit_t))
+                        for doc_id in pending
+                        if (submit_t := self._doc_submit_times.get(doc_id)) is not None
+                    ]
+                    if remaining_per_doc:
+                        wait_s = min(wait_s, min(remaining_per_doc))
+                waiters = [
+                    asyncio.create_task(event.wait())
+                    for doc_id in pending
+                    if (event := self._doc_ready_events.get(doc_id)) is not None and not event.is_set()
+                ]
+                if not waiters:
+                    # A missing event is considered ready on the next pass;
+                    # yield once rather than spinning.
+                    await asyncio.sleep(0)
+                    continue
+                try:
+                    await asyncio.wait(waiters, timeout=wait_s, return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    for waiter in waiters:
+                        if not waiter.done():
+                            waiter.cancel()
+                    await asyncio.gather(*waiters, return_exceptions=True)
 
         if pending:
             logger.warning(
@@ -500,6 +529,12 @@ class FeishuDocPool:
                             ))
                         self._doc_chunks[doc_id] = chunks
                         self._doc_read_failures[doc_id] = []
+                        self._reader_events.append({
+                            "event": "document_read", "document_id": doc_id,
+                            "route": "block_api", "outcome": "success",
+                            "attempts": attempt + 1, "chunk_count": len(chunks),
+                            "elapsed_ms": round(_elapsed_ms(doc_started), 1),
+                        })
                         self._done.add(doc_id)
                         self._reading.discard(doc_id)
                         evt = self._doc_ready_events.get(doc_id)
@@ -541,6 +576,12 @@ class FeishuDocPool:
                             })
                             return
                         self._doc_chunks[doc_id] = []
+                        self._reader_events.append({
+                            "event": "document_read", "document_id": doc_id,
+                            "route": "block_api", "outcome": "failed",
+                            "attempts": 3, "chunk_count": 0,
+                            "elapsed_ms": round(_elapsed_ms(doc_started), 1),
+                        })
                         self._done.add(doc_id)
                         self._reading.discard(doc_id)
                         evt = self._doc_ready_events.get(doc_id)
@@ -587,6 +628,12 @@ class FeishuDocPool:
                         max_chunk_tokens=800,
                     )
                     self._doc_chunks[doc_id] = chunks
+                    self._reader_events.append({
+                        "event": "document_read", "document_id": doc_id,
+                        "route": "mcp", "outcome": "success",
+                        "attempts": attempt + 1, "chunk_count": len(chunks),
+                        "elapsed_ms": round(_elapsed_ms(doc_started), 1),
+                    })
                     logger.info("DocPool: mcp done %s → %d chunks", doc_id[:16], len(chunks))
                     logger.info(
                         "TIMING doc_pool.read_mcp doc=%s chunks=%d ms=%.1f",
