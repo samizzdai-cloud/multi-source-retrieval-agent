@@ -64,27 +64,86 @@ scopes and failure handling.
 中文：复制 `.env.example` 后只在本地填写密钥；OAuth 命令会写入被忽略的 `.env`，
 运行时会在即将过期时自动刷新 UAT。
 
-## Feishu-only usage / 仅飞书调用
+## Embed from another root agent / 供外部 Root Agent 接入
+
+The small public contract is deliberately split into a construction object and
+a request object. An upstream root agent usually needs only these two inputs:
+
+| Object | Required fields | Use it for |
+| --- | --- | --- |
+| `AgentConfig` | `preset`, `sources`, and either local env loading or credentials | Stable runtime policy and source access. |
+| `RetrieveRequest` | `user_query` | One retrieval turn; optionally override only its preset, source list, or credentials. |
+
+For a local deployment managed by the repository, use `load_from_env=True`.
+It reads the project `.env`, checks the Feishu OAuth token, and refreshes it
+when needed. This is the quickest integration path:
 
 ```python
 import asyncio
 from retrieve_agent_client import config, request, invoke_retrieve_agent
 
-async def main():
-    result = await invoke_retrieve_agent(
+async def retrieve_for_parent(user_query: str):
+    return await invoke_retrieve_agent(
         config(preset="balanced", sources=["feishu"], load_from_env=True),
-        request(user_query="What were this week's sales and net revenue?"),
+        request(user_query=user_query),
     )
-    for chunk in result.chunks:
-        print(chunk["source_tool"], chunk["chunk_id"], chunk["heading_path"])
 
-asyncio.run(main())
+result = asyncio.run(retrieve_for_parent("What were this week's sales and net revenue?"))
+for chunk in result.chunks:
+    print(chunk["source_tool"], chunk["chunk_id"], chunk["heading_path"])
 ```
 
-`AgentConfig` is the public construction entry point. `RetrieveRequest` can
-override only the preset, enabled sources, or caller-owned credentials for one
-request. Use `RetrieveConfig` and `SourceAgentConfig` when embedding the agent
-and deliberately changing advanced runtime behavior.
+中文：外部 Root Agent 的最小接入只需要传 `AgentConfig`（运行策略和凭证来源）和
+`RetrieveRequest(user_query=...)`（单次请求）。本地项目部署使用
+`load_from_env=True`，即可复用本项目 OAuth 的自动刷新链路。
+
+### Credential ownership and one-call overrides / 凭证归属与单次覆盖
+
+If the parent owns the credential, inject it explicitly and keep environment
+loading off. Explicit `feishu_uat` is intentionally **not** auto-refreshed:
+the parent must rotate it before the call. This avoids silently writing a
+parent-owned token into the repository's `.env`.
+
+```python
+from retrieve_agent_client import config, request, invoke_retrieve_agent
+
+parent_config = config(
+    preset="balanced",
+    sources=["feishu"],
+    feishu_uat=parent_owned_uat,
+    load_from_env=False,
+)
+result = await invoke_retrieve_agent(
+    parent_config,
+    request(
+        user_query=user_query,
+        preset_override="lite",                 # optional for this turn
+        enabled_sources_override=["feishu"],    # optional safety fence
+    ),
+)
+```
+
+The call returns `RetrieveInvocationResult`:
+
+| Field | Contract for the parent |
+| --- | --- |
+| `chunks` | Retrieval chunks. Check `source_tool`, `chunk_id`, `heading_path`, `source_url`, `score`, and `confidence_tier` before answer synthesis. |
+| `metadata` | Retrieval payload excluding `chunks`, including the structured trace when emitted. |
+| `progress_events` | User-visible progress text emitted during the run. |
+| `raw_payload` | Original structured retrieval payload for an audited integration. |
+
+`invoke_retrieve_agent()` builds a fresh ADK agent and in-memory runner for
+one call, then closes it. It is the safest simple boundary for a parent that
+does not share a runner. A parent already hosted on Google ADK can instead
+mount a long-lived child using `build_retrieve_agent_with_config()` and own the
+runner/session lifecycle itself. For advanced policy (source timeouts, loop
+limits, profile controls, rerank/table walls), construct `RetrieveConfig` plus
+`SourceConfig` and call `retrieve_agent.build_retrieve_agent()` directly.
+
+中文：显式传入 `feishu_uat` 时，token 属于上游，程序不会刷新或写入 `.env`；上游
+必须自行轮换。`invoke_retrieve_agent()` 是“一次调用、一套 runner”的简单边界；如
+外部 Root Agent 已托管 ADK，可用 `build_retrieve_agent_with_config()` 挂载长期 child
+agent 并自行管理 session。
 
 ## Configuration / 配置说明
 
@@ -97,6 +156,12 @@ and deliberately changing advanced runtime behavior.
 | `GlobalPlannerConfig` | Planner model, timeout, Focus limit, v1 fallback, and A/B `force_v1`. |
 | `.env` | Local credentials and root-agent runtime defaults. |
 
+At the public boundary, do not pass planner prompts, raw chunks, or private
+document identifiers as configuration. The parent passes the user query; this
+agent produces traceable chunks. Advanced tuning belongs to the explicit
+internal configuration objects above, so a preset cannot be accidentally
+changed by a prompt field.
+
 Default planner and eval model: `deepseek/deepseek-v4-flash`. Thinking is
 explicitly disabled by default for both structured planner and eval calls.
 
@@ -108,9 +173,13 @@ not a sustained-QPS guarantee.
 
 | Preset | Source loop | Rerank/eval behavior | Intended use |
 | --- | --- | --- | --- |
-| `lite` | One loop | No eval layer; narrow fast path | Low-latency exploration |
-| `balanced` | One loop | Feishu post-I/O rerank; rule evaluation | Default production trade-off |
-| `deep_dive` | Up to two loops | Feishu rerank and LLM-tool eval layer | Ambiguous or broad retrieval |
+| `lite` | One loop | No final eval layer; Feishu uses the narrow MCP/block path | Low-latency exploration |
+| `balanced` | One loop | Feishu post-I/O rerank; rule final selection | Default production trade-off |
+| `deep_dive` | Up to two loops | Feishu rerank; source plan-eval loop; LLM-tool final eval only when more than one source is active | Ambiguous or broad retrieval |
+
+All presets still retain source-level planning and evidence admission. “No final
+eval layer” does not mean “no planner/eval-model call anywhere in the source
+chain”; it means the top-level final selector is not the LLM eval layer.
 
 ### Profile behavior / Profile 逻辑
 
@@ -136,10 +205,14 @@ Run the body-free Feishu-only smoke check after configuring local credentials:
 
 ```powershell
 python scripts/verify_feishu_release_e2e.py
+# Optional: run one preset against the same redacted release smoke query.
+python scripts/verify_feishu_release_e2e.py --preset lite
+# Optional diagnostic override; omit it to retain the preset's own source wall.
+python scripts/verify_feishu_release_e2e.py --preset deep_dive --source-timeout-s 45
 ```
 
-It checks OAuth status, forces `balanced` + `feishu` + Flash models with
-thinking disabled, and writes only a redacted JSON summary under
+It checks OAuth status, forces the selected preset + `feishu` + Flash models
+with thinking disabled, and writes only a redacted JSON summary under
 `tests/artifacts/release_e2e/`. Success means non-empty Feishu chunks and a
 trace containing planner/source activity. It reports MCP/Block route counts,
 latency, and error categories, but never stores token values, query text,

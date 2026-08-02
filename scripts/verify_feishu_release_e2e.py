@@ -41,6 +41,12 @@ class _ErrorLabelCapture(logging.Handler):
         message = record.getMessage()
         if MCP_PROTOCOL_RE.search(message):
             self.labels["mcp_protocol_error"] += 1
+        elif "_mcp_call pure failed" in message:
+            self.labels["mcp_search_call_error"] += 1
+        elif "native_primary candidates=0" in message:
+            self.labels["mcp_zero_candidates"] += 1
+        elif "source_error" in message:
+            self.labels["source_error"] += 1
         elif record.levelno >= logging.ERROR:
             self.labels[f"log_{record.levelname.lower()}"] += 1
 
@@ -63,8 +69,9 @@ def _event_summary(trace: Mapping[str, Any]) -> tuple[dict[str, int], dict[str, 
 
 
 def build_body_free_summary(
-    *, query: str, elapsed_s: float, raw_payload: Mapping[str, Any], trace: Mapping[str, Any], log_errors: Mapping[str, int],
+    *, query: str, preset: str = "balanced", elapsed_s: float, raw_payload: Mapping[str, Any], trace: Mapping[str, Any], log_errors: Mapping[str, int],
     runner_event_count: int = 0, state_delta_key_counts: Mapping[str, int] | None = None,
+    source_timeout_s: float | None = None,
 ) -> dict[str, Any]:
     chunks = [item for item in raw_payload.get("chunks", []) if isinstance(item, Mapping)]
     payload_shape = {
@@ -91,11 +98,12 @@ def build_body_free_summary(
         "schema": "feishu_release_e2e_summary_v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
         "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
-        "preset": "balanced",
+        "preset": preset,
         "enabled_sources": ["feishu"],
         "planner_model": "deepseek/deepseek-v4-flash",
         "eval_model": "deepseek/deepseek-v4-flash",
         "thinking": "disabled",
+        "source_timeout_s": source_timeout_s,
         "e2e_elapsed_s": round(elapsed_s, 3),
         "chunk_count": len(chunks),
         "chunk_source_counts": dict(chunk_sources),
@@ -116,29 +124,41 @@ def build_body_free_summary(
     }
 
 
-async def run_check(query: str) -> dict[str, Any]:
+async def run_check(
+    query: str,
+    *,
+    preset: str = "balanced",
+    source_timeout_s: float | None = None,
+) -> dict[str, Any]:
     from google.adk.runners import InMemoryRunner
     from google.genai import types as genai_types
-    from feishu_read_tool.oauth_tokens import token_status
+    from feishu_read_tool.oauth_tokens import ensure_valid_project_access_token, token_status
     from retrieve_agent import build_retrieve_agent
     from tools.core.models import RetrieveConfig, SourceAgentConfig, SourceConfig, THINKING_FLASH
 
     status = token_status()
     if not status.get("access_token_present"):
         raise RuntimeError("Feishu OAuth access token is not configured")
+    # Resolve once before module construction, then use explicit injection for
+    # this release probe.  This removes ambiguity between a refreshed .env and
+    # module-level environment snapshots without exposing the credential.
+    uat = ensure_valid_project_access_token()
+    if not uat:
+        raise RuntimeError("Feishu OAuth access token could not be resolved")
 
-    cfg = RetrieveConfig(
-        preset="balanced",
-        enabled_sources=["feishu"],
-        source_configs={"feishu": SourceAgentConfig(source_timeout_s=45.0)},
+    source_configs = (
+        {"feishu": SourceAgentConfig(source_timeout_s=source_timeout_s)}
+        if source_timeout_s is not None
+        else {}
     )
+    cfg = RetrieveConfig(preset=preset, enabled_sources=["feishu"], source_configs=source_configs)
     cfg.global_planner.model = "deepseek/deepseek-v4-flash"
     cfg.global_planner.thinking_config = THINKING_FLASH
     cfg.eval_model_override = "deepseek/deepseek-v4-flash"
     cfg.eval_thinking = THINKING_FLASH
     agent = build_retrieve_agent(
         config=cfg,
-        source_config=SourceConfig(load_from_env=True),
+        source_config=SourceConfig(feishu_uat=uat, load_from_env=False),
         name=f"release_feishu_{uuid.uuid4().hex[:8]}",
     )
     runner = InMemoryRunner(agent=agent, app_name="release_feishu_e2e")
@@ -173,27 +193,53 @@ async def run_check(query: str) -> dict[str, Any]:
         await agent.aclose()
     return build_body_free_summary(
         query=query,
+        preset=preset,
         elapsed_s=time.monotonic() - started,
         raw_payload=raw_payload,
         trace=trace,
         log_errors=capture.labels,
         runner_event_count=runner_event_count,
         state_delta_key_counts=state_delta_key_counts,
+        source_timeout_s=cfg.effective_config_for("feishu").source_timeout_s,
     )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Feishu-only body-free release E2E check")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "tests" / "artifacts" / "release_e2e")
+    parser.add_argument("--preset", choices=("lite", "balanced", "deep_dive"), default="balanced")
+    parser.add_argument(
+        "--source-timeout-s",
+        type=float,
+        help="Optional Feishu source wall in seconds. Omit to preserve the selected preset.",
+    )
+    parser.add_argument(
+        "--query-artifact",
+        type=Path,
+        help="Local JSON artifact with a string 'query' field; its body is never written to output.",
+    )
     args = parser.parse_args()
+    if args.source_timeout_s is not None and args.source_timeout_s <= 0:
+        parser.error("--source-timeout-s must be positive")
+    query = SMOKE_QUERY
+    if args.query_artifact is not None:
+        try:
+            artifact = json.loads(args.query_artifact.read_text(encoding="utf-8"))
+            query = artifact["query"]
+            if not isinstance(query, str) or not query.strip():
+                raise ValueError("query must be a non-empty string")
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+            parser.error(f"invalid --query-artifact: {type(exc).__name__}")
     try:
-        summary = asyncio.run(run_check(SMOKE_QUERY))
+        summary = asyncio.run(run_check(
+            query, preset=args.preset, source_timeout_s=args.source_timeout_s,
+        ))
     except Exception as exc:
         summary = {
             "schema": "feishu_release_e2e_summary_v1",
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "query_sha256": hashlib.sha256(SMOKE_QUERY.encode("utf-8")).hexdigest(),
-            "preset": "balanced", "enabled_sources": ["feishu"],
+            "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            "preset": args.preset, "enabled_sources": ["feishu"],
             "error_counts": {f"runtime_{type(exc).__name__}": 1},
             "checks": {"nonempty_chunks": False, "feishu_only": False,
                        "planner_and_source_trace": False, "no_mcp_protocol_error": False},
