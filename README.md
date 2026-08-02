@@ -4,33 +4,91 @@ An evidence-oriented retrieval agent for enterprise knowledge sources. It plans 
 query, retrieves from enabled sources, reads the selected documents, and returns
 traceable chunks rather than an ungrounded answer.
 
-> **Release status.** The public release verifies that the Feishu-only execution
-> path is runnable. It does **not** claim a stable P3/Gold benchmark pass: live
-> Feishu document reads and provider calls still have workload-dependent tails.
+> **Release status.** Feishu is the currently verified live source. The Google
+> Workspace connector is implemented, but its live integration tests and
+> production hardening are still pending.
 
 中文说明见每节后的 `中文` 段落。
 
 ## What it does / 能力
 
 ```mermaid
-flowchart LR
-  Q[Request] --> P[Profile resolution]
-  P --> GP[Global Planner]
-  GP --> FS[Feishu Source Agent]
-  FS --> R[MCP search / Block / Table read]
-  R --> RR[Post-I/O rerank and evaluation]
-  RR --> O[Chunks + retrieval_trace]
+flowchart TD
+  R["Root-agent request"] --> PR["Profile resolution\nExact vocabulary plus optional shadow expansion"]
+  PR --> GP["Global Planner"]
+  GP --> F["Focus[]\nSource-agnostic evidence tasks"]
+  F --> D["Source dispatcher\nRoutes each Focus to its enabled target sources"]
+  F --> FB["FocusBoard\nCross-source coverage and I/O stop signal"]
+
+  subgraph SRC["Enabled SourceAgents run concurrently"]
+    direction LR
+    FS["Feishu\nMCP search + Block/Table APIs"]
+    GS["Google Workspace\nDrive / Docs / Sheets / Gmail"]
+    XS["Other connectors\nBailian, Notion, native API, or MCP"]
+  end
+  D --> FS
+  D --> GS
+  D --> XS
+
+  subgraph LOOP["Per-source evidence loop"]
+    direction LR
+    SQ["Source-scoped Subquery[]\nExecutable search/read instructions"]
+    IO["Candidates → bounded document/table I/O"]
+    RR["Post-I/O rerank"]
+    PE["partial_eval\nBatch-local provisional admission"]
+    PEV["plan_eval\nMulti-loop: stop or request source-local replan"]
+    EO["eval_only\nFinal source tiers and top chunks"]
+    SQ --> IO --> RR --> PE
+    PE -->|"lite / balanced finalization"| EO
+    PE -->|"deep_dive loop"| PEV
+    PEV -->|"continue: new source-local Subquery"| SQ
+    PEV -->|"stop or bounded fallback"| EO
+  end
+  FS --> SQ
+  GS --> SQ
+  XS --> SQ
+  PE -. "provisional tiers only" .-> FB
+  FB -. "coverage / I-O control" .-> PEV
+
+  EO --> M["Merge, focus quota, optional cross-source final eval"]
+  M --> O["Chunks + retrieval_trace"]
 ```
 
-- `lite`, `balanced`, and `deep_dive` are preset contracts, not arbitrary
-  parameter bundles.
-- Sources are explicit. A Feishu-only request cannot silently dispatch Google
-  or Bailian retrieval.
-- Returned chunks carry source metadata and a separate `retrieval_trace` for
-  planning, candidate, read, and judgment observations.
+`Focus` and `Subquery` have different ownership:
 
-中文：系统先生成有界 Focus/Subquery，再按启用 source 检索、读取并在 I/O 后做
-重排/评估；结果是可追踪的 chunks，而非直接生成答案。
+- A **Focus** is a global, source-agnostic evidence task produced once for the
+  request. It defines *what evidence is needed* and which sources may work on
+  it. The same Focus can be routed to Feishu, Google, and another connector;
+  subqueries never cross from one Focus into another.
+- A **Subquery** is a source-scoped executable instruction. It defines *how a
+  particular SourceAgent searches and reads* its connector, such as an MCP
+  search expression, a Drive query, or a table filter.
+- `FocusBoard` receives only compact provisional coverage signals after
+  `partial_eval`. It coordinates future I/O/loop decisions across sources; it
+  neither shares document bodies between SourceAgents nor makes the final
+  semantic answer decision.
+
+`lite`, `balanced`, and `deep_dive` are preset contracts, not arbitrary
+parameter bundles. Sources are explicit: a Feishu-only request cannot silently
+dispatch Google, Bailian, or another connector. Returned chunks carry source
+metadata and a separate `retrieval_trace` for planner, candidate, read,
+rerank, and judgment observations.
+
+中文：`Focus` 是全局的“需要什么证据”的任务，可被多个 source 并发处理；
+`Subquery` 是单个 source 的可执行搜索/读取指令。`partial_eval` 先为大候选池生成
+临时证据信号，`FocusBoard` 只据此协调跨 source 的后续 I/O 与 loop；最终证据选择仍在
+source 的 `eval_only` 和合并阶段完成。Google Workspace 已接入架构，真实环境测试和完善
+仍待完成；新的 connector 可按相同 SourceAgent/API/MCP 适配契约接入。
+
+### Connector extension / Connector 扩展
+
+The architecture is deliberately connector-neutral after dispatch. A new
+connector implements a SourceAgent adapter that accepts routed `Focus` and
+source-scoped `Subquery`, then emits candidates, bounded reads, normalized
+chunks, and trace events. Its transport can be a native REST/SDK API, a remote
+MCP tool, or a local MCP server. Registering the adapter and its credential
+configuration makes it eligible for the same planner, FocusBoard, merge, and
+observability contracts; it still needs connector-specific live validation.
 
 ## Quick start / 快速开始
 
