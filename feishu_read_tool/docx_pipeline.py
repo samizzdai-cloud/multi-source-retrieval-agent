@@ -961,6 +961,9 @@ def run_rag_pipeline(
             heading_path=chunk.heading_path,
             relevance_score=0.0,
             token_count=chunk.token_count,
+            metadata={key: chunk.metadata[key] for key in (
+                "source_kind", "embedded_sheet_id", "embedded_block_id",
+            ) if key in (chunk.metadata or {})},
         ))
 
     # ── Stage 6-7: Return scored_chunks (unclipped) ─────────────────────────

@@ -59,7 +59,7 @@ async def _retrieve(
     cfg.global_planner.model = planner_model
     cfg.global_planner.thinking_config = THINKING_FLASH
     cfg.global_planner.timeout_s = 45.0
-    cfg.eval_model_override = "deepseek/deepseek-v4-flash"
+    cfg.eval_model_override = "deepseek/deepseek-flash"
     cfg.eval_thinking = THINKING_FLASH
     agent = build_retrieve_agent(
         config=cfg, source_config=SourceConfig(load_from_env=True),
@@ -191,7 +191,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path, default=ROOT / "tests/artifacts/p3_scope_first_v2/07_promoted_benchmark.json")
     parser.add_argument("--case-id", default="v2_pilot_01")
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--models", nargs="+", default=["deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro"])
+    parser.add_argument("--models", nargs="+", default=["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"])
     parser.add_argument("--presets", nargs="+", default=["lite", "balanced", "deep_dive"])
     parser.add_argument("--source-timeout", type=float, default=180.0)
     parser.add_argument("--resume", action="store_true")

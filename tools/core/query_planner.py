@@ -235,6 +235,7 @@ def plan_query(
         response_text = call_llm(
             prompt,
             max_tokens=1024,
+            use_provider_output_limit=True,
             timeout=15.0,
             _caller_tag="query_planner",
             model=_planner_model,

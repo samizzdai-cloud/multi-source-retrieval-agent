@@ -17,6 +17,33 @@ from tools.core.rerank import RankedItem, RerankError, RerankSettings
 
 
 class TierNormalizationTests(unittest.TestCase):
+    def test_replanning_keeps_focus_and_receives_source_rules_and_budget(self):
+        from agents.feishu.feishu_source_agent import FeishuSourceAgent
+        from tools.core.models import RetrieveConfig
+
+        config = RetrieveConfig(preset="balanced", enabled_sources=["feishu"])
+        source = FeishuSourceAgent(cfg=config.effective_config_for("feishu"), uat="fixture")
+        focus = Focus("focus_0", "核实品牌当前站点状态并寻找增长依据", ["feishu", "bailian"])
+        prompt = _build_plan_eval_prompt(
+            [focus], [], loop_n=2, min_loops=1, max_loops=3, source_top_k=12,
+            queries_per_focus=source.cfg.sub_queries_per_focus,
+            source_query_rules=source._source_query_rules_block(),
+        )
+        self.assertIn(focus.text, prompt)
+        self.assertIn("replan_queries_per_focus_limit: 2", prompt)
+        self.assertIn("Feishu 专属规则", prompt)
+        self.assertNotIn("具体时间点请并入 query", prompt)
+        self.assertEqual(source._compute_sub_query_total_cap(4), 8)
+        self.assertEqual(focus.targets, ["feishu", "bailian"])
+
+    def test_feishu_plan_eval_requires_query_array_for_both_decisions(self):
+        from agents.feishu.feishu_retrieve_llm_build import build_feishu_plan_eval_agent
+
+        agent = build_feishu_plan_eval_agent(12)
+        self.assertIn("replan_queries", agent.output_schema.model_json_schema()["required"])
+        self.assertIn('decision=continue', agent.instruction)
+        self.assertIn('replan_queries_per_focus_limit', agent.instruction)
+
     def test_malformed_tier_items_are_ignored_without_aborting_evaluation(self):
         tiers = [
             "critical",
@@ -204,10 +231,49 @@ class TierNormalizationTests(unittest.TestCase):
 
 
 class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_source_eval_reduces_oversized_input_in_bounded_batches(self):
+        agent = SourceAgent.__new__(SourceAgent)
+        agent.source = "test"
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=10000))
+        agent._effective_source_top_k = 1
+        agent._current_focus_lookup = {"F1": Focus("F1", "objective")}
+        agent._trace_events = []
+        agent.eval_only = object()
+        agent._request_token_estimate = lambda _agent, prompt: prompt.count("- chunk_ref=") * 1000 + 100
+        pool = {str(i): ChunkEntry(id=str(i), source="test", content=f"EVIDENCE_{i}", target_focuses={"F1"}) for i in range(10)}
+        seen = []
+
+        async def evaluate(_agent, prompt):
+            seen.append(prompt)
+            return {"top_k_chunk_ids": ["C1"], "tiers": [{
+                "chunk_id": "C1", "tier": "important", "relevance": 0.9, "answered_focuses": ["F1"],
+            }]}
+
+        with patch("agents.source_agent_base._run_llm_agent", side_effect=evaluate):
+            selected = await agent._eval_only_snapshot([Focus("F1", "objective")], pool)
+        self.assertEqual(len(selected), 1)
+        self.assertTrue(all(agent._request_token_estimate(None, prompt) <= 10000 for prompt in seen))
+        for i in range(10):
+            self.assertTrue(any(f"EVIDENCE_{i}" in prompt for prompt in seen))
+        self.assertTrue(any(e["event"] == "source_eval_budget_reduction" for e in agent._trace_events))
+
+    async def test_many_short_chunks_do_not_trigger_partial_by_count(self):
+        agent = SourceAgent.__new__(SourceAgent)
+        agent.source = "test"
+        agent.cfg = SourceAgentConfig()
+        agent.partial_eval = object()
+        agent._partial_pending_tasks = []
+        agent._partial_submitted_ids = set()
+        pool = {str(i): ChunkEntry(id=str(i), source="test", content="short", target_focuses={"F1"}) for i in range(241)}
+        with patch("agents.source_agent_base._run_llm_agent", new_callable=AsyncMock) as evaluate:
+            await agent._partial_eval_if_needed([Focus("F1", "objective")], pool, loop_n=1)
+        evaluate.assert_not_awaited()
+        self.assertEqual(len(pool), 241)
+
     async def test_partial_provider_json_error_fails_open_without_aborting_source(self):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=3000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -216,6 +282,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         pool = {
             f"c{i}": ChunkEntry(id=f"c{i}", source="test", content=f"body {i}",
                                  preview_content=f"preview {i}", target_focuses={"F1"})
@@ -236,7 +303,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         """Missing Focus groups are a contract underflow, never all-noise."""
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=3000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -245,6 +312,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         pool = {
             f"c{i}": ChunkEntry(id=f"c{i}", source="test", content=f"body {i}",
                                  preview_content=f"preview {i}", target_focuses={"F1"})
@@ -265,7 +333,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_partial_tiers_remove_unselected_refs(self):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=3000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -274,6 +342,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         rows = [
             ChunkEntry(
                 id=f"test:doc-{i % 3}:chunk-{i}", source="test", content=f"body {i}",
@@ -300,7 +369,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_no_qualifying_requires_a_reason_and_is_carried_to_plan_eval(self):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=3000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -309,6 +378,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         rows = [
             ChunkEntry(id=f"c{i}", source="test", content="body", preview_content="preview", target_focuses={"F1"})
             for i in range(2)
@@ -326,7 +396,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
         agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(
-            trigger_chunk_count=2, batch_chunk_limit=2,
+            input_token_budget=3000,
         ))
         agent._trace_events = []
         agent._partial_ledgers = []
@@ -336,6 +406,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         rows = [
             ChunkEntry(id="test:doc-0:chunk-0", source="test", content="body 0",
                        preview_content="preview 0", target_focuses={"F1"}),
@@ -363,7 +434,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
     async def test_partial_schema_rejects_explicit_noise_row(self):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=3000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -372,6 +443,7 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_submitted_ids = set()
         agent._partial_generation = 0
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         rows = [
             ChunkEntry(id=f"c{i}", source="test", content="body", preview_content="preview", target_focuses={"F1"})
             for i in range(2)
@@ -387,10 +459,10 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         error = next(event for event in agent._trace_events if event["event"] == "partial_eval_contract_error")
         self.assertGreater(error["malformed_chunk_refs"], 0)
 
-    async def test_streaming_admission_waits_for_chunk_trigger_not_one_document(self):
+    async def test_streaming_admission_waits_for_input_budget(self):
         agent = SourceAgent.__new__(SourceAgent)
         agent.source = "test"
-        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(trigger_chunk_count=2))
+        agent.cfg = SourceAgentConfig(eval_shortlist=EvalShortlistConfig(input_token_budget=10000))
         agent._trace_events = []
         agent._partial_ledgers = []
         agent._partial_pending_tasks = []
@@ -400,8 +472,10 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         agent._partial_generation = 0
         agent._current_focus_lookup = {"F1": Focus("F1", "objective")}
         agent.partial_eval = object()
+        agent._partial_prompt_tokens = lambda _focuses, _chunks: agent._context_budget().flush_threshold
         first = ChunkEntry(id="c1", source="test", content="body", preview_content="preview", target_focuses={"F1"})
         second = ChunkEntry(id="c2", source="test", content="body", preview_content="preview", target_focuses={"F1"})
+        agent._partial_prompt_tokens = lambda _focuses, chunks: len(chunks) * 2000
         pool = {"c1": first}
         with patch("agents.source_agent_base._run_llm_agent", new=AsyncMock(return_value={
             "focus_groups": [{"focus_id": "F1", "reason": "", "tiers": [
@@ -418,12 +492,37 @@ class PartialTierGenerationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_llm.await_count, 1)
         self.assertEqual(agent._partial_generation, 1)
         generation = next(event for event in agent._trace_events if event["event"] == "partial_eval_generation")
-        self.assertEqual(generation["trigger"], "chunk_count")
+        self.assertEqual(generation["trigger"], "input_token_ratio")
         self.assertEqual(set(pool), {"c1", "c2"})
         self.assertEqual({chunk.metadata["partial_eval_status"] for chunk in pool.values()}, {"partial_tiered"})
 
 
 class RerankFailOpenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_content_modes_preserve_doc_pool_embedded_tables(self):
+        for mode, expected in (("all", {"doc", "table"}), ("table_pool_only", {"table"}), ("off", set())):
+            agent = SourceAgent.__new__(SourceAgent)
+            agent.source = "feishu"
+            agent.cfg = SourceAgentConfig(rerank_enabled=True, content_rerank_mode=mode)
+            agent._trace_events = []
+            pool = {
+                "doc": ChunkEntry(id="doc", source="feishu", content="document table", target_focuses={"F1"},
+                                  metadata={"reader_pool": "doc", "content_type": "table_md"}),
+                "table": ChunkEntry(id="table", source="feishu", content="independent", target_focuses={"F1"},
+                                    metadata={"content_type": "sheet"}),
+            }
+            seen = set()
+
+            def rank(_query, items, *, settings):
+                seen.update(item[0] for item in items)
+                return [RankedItem(item_id=item[0], relevance_score=1, batch_index=0, rank=i) for i, item in enumerate(items)]
+
+            with patch("agents.source_agent_base.RerankSettings.from_env", return_value=RerankSettings("key", "workspace")), patch(
+                "agents.source_agent_base.rerank_items", side_effect=rank,
+            ):
+                await agent._rerank_new_chunks([Focus("F1", "conversion")], pool, loop_n=1)
+            self.assertEqual(seen, expected)
+            self.assertIn("doc", pool)
+
     async def test_default_rerank_pressure_and_keep_ratio_are_calibrated(self):
         cfg = SourceAgentConfig()
         self.assertEqual(cfg.rerank_trigger_chunk_count, 60)

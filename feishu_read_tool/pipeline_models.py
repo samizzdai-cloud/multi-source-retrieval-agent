@@ -60,6 +60,7 @@ class ChunkResult:
     heading_path:    str
     relevance_score: float            # 0-10
     token_count:     int
+    metadata:        Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

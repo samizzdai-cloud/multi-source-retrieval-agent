@@ -34,10 +34,10 @@ def test_batcher_estimates_the_same_window_as_source_eval() -> None:
     assert estimate_chunk_tokens(table) < 2_500
 
 
-def test_batcher_caps_items_for_structured_output_budget() -> None:
+def test_batcher_uses_token_budget_without_chunk_cap() -> None:
     chunks = [ChunkEntry(id=str(i), source="feishu", content="short") for i in range(241)]
     batches = split_chunks(chunks, ContextBudget())
-    assert [len(batch) for batch in batches] == [80, 80, 80, 1]
+    assert [len(batch) for batch in batches] == [241]
     assert [c.id for batch in batches for c in batch] == [str(i) for i in range(241)]
 
 
@@ -49,6 +49,16 @@ def test_cross_source_eval_uses_preview_not_full_content() -> None:
 
 
 class ContextBudgetTests(unittest.TestCase):
+    def test_trigger_is_forty_percent_of_usable_input(self):
+        budget = ContextBudget()
+        self.assertEqual(budget.usable_tokens, 576784)
+        self.assertEqual(budget.flush_threshold, int(budget.usable_tokens * 0.4))
+
+    def test_serialized_prompt_budget_can_split_few_large_chunks(self):
+        chunks = [ChunkEntry(id=str(i), source="feishu", content="body") for i in range(5)]
+        batches = split_chunks(chunks, ContextBudget(hard_ceiling=1000), prompt_tokens=lambda batch: len(batch) * 200)
+        self.assertEqual([len(batch) for batch in batches], [2, 2, 1])
+
     def test_document_preview(self):
         test_document_preview_preserves_original_chunk()
 
@@ -62,10 +72,10 @@ class ContextBudgetTests(unittest.TestCase):
         test_cross_source_eval_uses_preview_not_full_content()
 
     def test_output_shape_batch_limit(self):
-        test_batcher_caps_items_for_structured_output_budget()
+        test_batcher_uses_token_budget_without_chunk_cap()
 
     def test_global_llm_eval_uses_deepseek_default(self):
-        self.assertEqual(LlmEvalLayer().model, "deepseek/deepseek-v4-flash")
+        self.assertEqual(LlmEvalLayer().model, "deepseek/deepseek-flash")
 
     def test_global_llm_eval_recovers_top_level_tier_list(self):
         payload = _normalize_eval_payload([

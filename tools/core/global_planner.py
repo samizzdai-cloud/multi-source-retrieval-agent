@@ -42,7 +42,7 @@ _RESPONSE_SCHEMA: dict = {
                             "type": "object",
                             "properties": {
                                 "target_source": {"type": "string"},
-                                "query":         {"type": "string"},
+                                "query":         {"type": "string", "description": "把所属 Focus 适配为目标 source 的 Search/MCP API 请求，遵循该源的查询优化规则与预算，定位目标 chunks 所在材料。"},
                                 "tags":          {"type": "array", "items": {"type": "string"}},
                                 "indexes":       {"type": "array", "items": {"type": "string"}},
                                 "time_filter":   {"type": "string"},
@@ -157,11 +157,11 @@ def _build_output_schema_block(enabled_sources: List[str]) -> str:
   "focuses": [
     {{
       "focus_id": "focus_0",                          // 必须形如 focus_0/focus_1 顺序编号
-      "focus_content": "一个可独立验收的回答子任务：保留用户实体/限定，并说明要形成什么判断或输出",
+      "focus_content": "研究任务描述；【必须项】完成该任务必需的信息与证据；【可选补充】有价值但不阻塞完成的信息（没有则省略）",
       "sub_queries": [
         {{
           "target_source": "<{sources_repr} 之一>",   // 越权值会被 runner 丢弃
-           "query": "为该 focus 取得一类证据的 API 检索串",
+           "query": "将所属 Focus 适配为目标 source 的 Search/MCP API 请求，定位目标 chunks 所在材料",
 {bailian_fields}
           "time_filter": "feishu/google 可用；bailian 恒 null",
           "query_type": "feishu/google：structured|concept|personal_recent；bailian/notion null",
@@ -179,16 +179,17 @@ def _build_output_schema_block(enabled_sources: List[str]) -> str:
 def _focus_limit_for_sources(
     enabled_sources: List[str],
     configured_max_focuses: int,
+    preset: str = "balanced",
 ) -> int:
     """Return the bounded retrieval-task budget for this planner invocation.
 
-    A Focus is a retrieval subtask, so its budget grows with the number of
-    enabled sources. ``max_focuses`` remains a compatibility/configuration
-    ceiling; the product policy is one source -> two Focuses, then one extra
-    Focus per added source, capped at four.
+    Global capacity is bounded by source capacity and the configured ceiling.
+    A shared Focus counts once globally and once for each assigned source.
     """
     active_sources = len({str(s).strip().lower() for s in enabled_sources if str(s).strip()})
     configured_cap = max(1, int(configured_max_focuses))
+    if preset in {"balanced", "deep_dive"}:
+        return min(4 * max(1, active_sources), configured_cap)
     return min(4, active_sources + 1, configured_cap)
 
 
@@ -199,13 +200,15 @@ def _build_prompt(
     bailian_catalog: Optional[BailianIndexCatalog],
     session_context: str = "",
     profile_context: str = "",
+    preset: str = "balanced",
 ) -> str:
     today = date.today()
     now_str = today.isoformat()
     profiles_block = _build_source_profiles_block(enabled_sources, bailian_catalog)
     rules_block = _build_per_source_rules_block(enabled_sources, bailian_catalog)
     output_block = _build_output_schema_block(enabled_sources)
-    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses)
+    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses, preset)
+    query_limit = 2 if preset in {"balanced", "deep_dive"} else 3
 
     # 共享段：feishu/google 都用到的时间推断 / 身份归属 / query_type 三段统一注入一次。
     # 仅当 enabled_sources 含 feishu 或 google 时才注入，避免给 bailian-only 调用读冗余。
@@ -220,27 +223,17 @@ def _build_prompt(
             + "\n"
         )
 
-    diagnostic_coverage_rule = (
-        "For a broad GTM conversion-diagnosis request that does not limit one stage, "
-        "the retrieval Focus and its distinct source queries should cover verifiable "
-        "acquisition/channel, paid efficiency, and on-site funnel or page-friction evidence. "
-        "Keep these queries under the same diagnostic Focus unless they are genuinely independent retrieval tasks.\n\n"
-    )
-    focus_contract_rule = (
-        "Focus task model (this overrides any conflicting wording below): user_query states the user's intent; "
-        "each Focus is one independent retrieval subtask that states what information must be found, not a rewrite "
-        "of the final decision, an answer contract, an evidence role, or a reasoning conclusion. For a composite "
-        "question, create the minimum number of non-overlapping Focuses whose source content portraits differ. "
-        "Do not split individual entities or metrics when one comparative retrieval task can find them together. "
-        "Each primary subquery belongs exclusively to its parent Focus and must retrieve that Focus's source-facing "
-        "content; it must not combine, substitute for, or route to another Focus. A retrieved document may naturally "
-        "overlap after retrieval, but the Planner must never use a cross-Focus query. Within one Focus, subqueries "
-        "must be distinct source-oriented expressions, not entity lists, generic companion queries, or synonym rewrites. "
-        "Do this self-check internally; do not add fields to JSON.\n\n"
-    )
-    return diagnostic_coverage_rule + focus_contract_rule + f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
+    source_focus_budget = "每个 source 最多承接 4 个 Focus（共享 Focus 在每个承接源各计一次）" if preset in {"balanced", "deep_dive"} else "各源承接数不超过全局 Focus 上限"
+    return f"""你是多源检索系统的全局规划器。输出严格 JSON，不要解释。
 
-核心模型：focus 是 user_query 意图的拆解，每个 focus 是一个可独立验收的检索子任务。user_query 是为适配各源检索特征（关键词匹配/语义检索/MCP）而构建的面向检索结果画像的描述——它精准刻画要检索的目标内容，而非泛主题或答案改写。sub_query 是为同一个 focus 取得不同证据的 API 请求；一个 focus 可以有多条 query，但它们必须角度不同且不可只是同义改写。
+## Focus 与 Subquery 的职责
+- user_query 是用户原始业务诉求，不能因平台检索方式而改变。
+- Focus 是围绕原始诉求、可独立验收的研究任务：说明要查明什么信息、需要什么证据、支持什么判断，并保留对象、范围、时间与任务间的承接关系。
+- 先从原始诉求确定必须完成的信息需求，只为这些需求创建 Focus。仅用于丰富答案的背景、既有做法、历史效果或参考方法，应作为相关 Focus 的可选补充，不单独创建必查任务。
+- 可按研究方向、逻辑维度、业务、品牌或产品解耦为多个 Focus。拆分依据是独立的信息需求与验收维度，不是词的数量、搜索表达数量或平台数量；不要为凑满预算而拆分，也不要机械按每个指标拆分。
+- 同一个 Focus 可以由多个 source 共享，其业务含义保持稳定；各源分别生成适配自身 Search API/MCP 的 Subquery。
+- Subquery 是属于一个 Focus、一个 source 的可执行请求（query 及必要参数）。先理解能支撑该 Focus 的目标内容会表达什么，再结合平台的关键词/语义检索能力进行转译，而不是摘抄 Focus 或预先编造答案。
+- 同一 Focus 下的多条 Subquery 可以寻找同类证据，只要检索表达或路径有实际召回价值。每条保留明确归属；实际召回的同一文档或 chunk 可以支持多个 Focus，由后续评估确认。
 
 user_query：「{query}」
 current_date：{now_str}（"今年" = {today.year} 年；focus 中的"今年/本年/this year" 必须替换为实际年份）
@@ -265,23 +258,24 @@ session_context：{session_context or "无"}
 ## Focus 质量要求
 
   1. 诊断/原因/排查问题：focus 必须保留诊断目标与结果，例如“定位 CVR 低的漏斗、流量和页面摩擦证据”；禁止改写为“CVR 定义”或泛泛“优化策略”。
-     query 应面向会出现在证据中的结果词/规范指标词：可保留原缩写，同时补一个必要的规范指标或漏斗表达（如“转化率”“渠道漏斗”“站点漏斗”），
-     不是无边界同义词扩展，也不能加入未出现的业务实体。
   2. 预测/判断问题：focus 必须保留对象、目标时间和结果指标，并区分现有诊断证据与缺失的上游预测输入。
-  3. 指定表格/渠道输出问题：一个 focus 覆盖完整输出任务；排列顺序和列字段属于答案格式，不要按每个渠道拆成 focus。
-  4. user_query 的实体、缩写、指标、地区、日期、产品状态（如新品/老品）和诊断/预测词必须原样留在相关 focus 或 query；不得引入任何示例品牌或业务实体。
-  5. 预测、判断、估算这类问题通常只能有 **一个** focus：该 focus 是要形成的最终预测/判断；
-     销售现状、历史趋势、库存、渠道明细、预测模型是这个 focus 的不同证据面，必须作为同一 focus 下
-     角度不同的 query，而不是拆成多个"获取数据"的 focus。只有两个结论能被用户独立验收时才可拆 focus。
+  3. user_query 的实体、缩写、指标、地区、日期、产品状态（如新品/老品）和诊断/预测词必须原样留在相关 focus 或 query；不得引入任何示例品牌或业务实体。
+  4. 对复合诊断或建议问题，区分当前状态核实和改进依据等可独立验收的检索任务，比如一个复杂问题的不同逻辑|方面|对象|产品等维度去独立验收。
+     一个 Focus 若需要超过 2个query以上才能覆盖多个独立任务，应拆分，保留它们的对象、时间与承接关系。
+     这里的前提是包含多个独立任务；仅为同一任务更换检索表达，不因此拆 Focus。
+  5. 请求新建议时，核实用户所需的业务现状和约束，由 AnswerAgent 综合形成建议。已有策略、历史复盘、实验成效与参考方法默认为可选补充，只有用户明确要求查找这些内容时才作为必须项；不得将“提出建议”改写为“必须找到已有建议或历史效果”。
+  6. 在每个 focus_content 中显式用【必须项】突出验收条件：来自用户明确要求，或完成其诉求不可缺少的信息；不是列举所有可能相关的指标、报表或分析方法。
+     有价值但不影响完成任务的内容，用【可选补充】单独标注（无则省略）。不要把自行联想到的明细、工具或验证手段升级为必须项，也不要把用户明确要求降为可选。必须项已满足时，不应因缺少可选补充而继续检索。
+     输出前逐项核对必须项与原始诉求的必要关系：缺少它是否确实无法完成用户任务？仅能让建议更丰富的历史实验、复盘、画像或逐环节诊断不是自动必需，不能因为资料可能存在就创建独立必查任务。
+
 ## 数量约束（硬要求）
 
-  · focuses 总数 ≤ {focus_limit}（已按启用源数量自动计算，这是硬上限）；简单任务通常 1 个，只有证据角度不同、需独立检索策略时才拆分。
-  · 同一 focus + source 可有多条不同证据角度的 sub_query；禁止只因别名、
-    大小写、翻译或同义表达不同而重复检索。别名/表达替换交由零结果 fallback。
-  · 各源 sub_queries 数量遵从其专属规则的预算（google 有明确预算；feishu ≤3 条、
-    bailian ≤2 条，均不可超过）
-  · 同一 focus 的 sub_query 总数不可超过 3 条
-  · 若两个候选 focus 可被同一条 sub_query 覆盖 → 合并
+  · focuses 总数 ≤ {focus_limit}（按 preset 与配置上限计算）；这是上限，按实际可独立验收的任务分配。
+  · 同一 focus + source 的 sub_query 用于优化该源的 API 召回，去除完全重复请求，不要求每条承担不同业务任务。
+  · 同一 focus + source 每轮最多 {query_limit} 条 sub_query，同时遵从更小的源专属预算。
+  · {source_focus_budget}；全局总数和源级承接数分别计数。
+  · 若两个候选 Focus 的研究目标与验收要求相同则合并；只共用对象、来源、检索词或部分资料时，不据此合并独立任务。
+  · 用户并列要求不同对象各自的分析时，分别保留对象、交付任务和业务时间要求。只有用户明确要求比较或借鉴时，才在 Focus 中建立跨对象依赖。
 
 {output_block}
 """
@@ -442,6 +436,7 @@ def _parse_global_plan(
     original_query: str,
     enabled_sources: List[str],
     max_focuses: int,
+    max_queries_per_source: int = 2,
 ) -> GlobalPlan:
     if not isinstance(raw, dict):
         raise PlannerFailure(reason="schema", detail=f"top-level not dict: {type(raw).__name__}")
@@ -458,15 +453,17 @@ def _parse_global_plan(
         focus_content = str(item.get("focus_content") or "").strip()
         if not focus_content:
             continue
-        sqs_raw = (item.get("sub_queries") or [])[:3]
+        sqs_raw = item.get("sub_queries") or []
         sub_queries: List[PlannedSubQuery] = []
         seen_source_queries: set[tuple[str, str]] = set()
+        source_counts: Dict[str, int] = {}
         for sq_item in sqs_raw:
             psq = _parse_planned_sub_query(sq_item, enabled_set)
             key = (psq.target_source, re.sub(r"\s+", " ", psq.query).strip().casefold()) if psq is not None else None
-            if psq is not None and key not in seen_source_queries:
+            if psq is not None and key not in seen_source_queries and source_counts.get(psq.target_source, 0) < max_queries_per_source:
                 sub_queries.append(psq)
                 seen_source_queries.add(key)
+                source_counts[psq.target_source] = source_counts.get(psq.target_source, 0) + 1
         out.append(
             PlannedFocus(focus_id=focus_id, focus_content=focus_content, sub_queries=sub_queries)
         )
@@ -495,6 +492,7 @@ def plan_global(
     bailian_catalog: Optional[BailianIndexCatalog] = None,
     session_context: str = "",
     profile_context: str = "",
+    preset: str = "balanced",
 ) -> GlobalPlan:
     """一次 LLM 调用产 ``GlobalPlan``。失败抛 ``PlannerFailure``。
 
@@ -517,6 +515,7 @@ def plan_global(
         bailian_catalog=bailian_catalog,
         session_context=session_context,
         profile_context=profile_context,
+        preset=preset,
     )
 
     started = time.perf_counter()
@@ -529,6 +528,7 @@ def plan_global(
         raw_text = call_llm(
             prompt,
             max_tokens=2048,
+            use_provider_output_limit=True,
             timeout=cfg.timeout_s,
             _caller_tag="global_planner_v2",
             model=cfg.model,
@@ -556,12 +556,13 @@ def plan_global(
         )
         raise PlannerFailure(reason="json_parse", detail=str(e)) from e
 
-    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses)
+    focus_limit = _focus_limit_for_sources(enabled_sources, cfg.max_focuses, preset)
     plan = _parse_global_plan(
         raw_obj,
         original_query=query,
         enabled_sources=enabled_sources,
         max_focuses=focus_limit,
+        max_queries_per_source=2 if preset in {"balanced", "deep_dive"} else 3,
     )
 
     elapsed = (time.perf_counter() - started) * 1000.0

@@ -41,7 +41,7 @@ def parse_sheet_token(token: str) -> tuple[str, str]:
 
     Args:
         token: Sheet Token，格式为 {spreadsheet_token}_{sheet_id}
-               示例: "PZ64sJ5FRh45cJtNbEBcyJdDnQg_fgvTJC"
+               示例: "SyntheticSpreadsheetToken001_sheet1"
 
     Returns:
         (spreadsheet_token, sheet_id) 元组
@@ -50,8 +50,8 @@ def parse_sheet_token(token: str) -> tuple[str, str]:
         ValueError: Token 格式不符合预期
 
     Examples:
-        >>> parse_sheet_token("PZ64sJ5FRh45cJtNbEBcyJdDnQg_fgvTJC")
-        ('PZ64sJ5FRh45cJtNbEBcyJdDnQg', 'fgvTJC')
+        >>> parse_sheet_token("SyntheticSpreadsheetToken001_sheet1")
+        ('SyntheticSpreadsheetToken001', 'sheet1')
     """
     # Block payloads occasionally carry copy/paste whitespace or invisible
     # separators around an otherwise valid ``spreadsheet_sheet`` token.  Tokens

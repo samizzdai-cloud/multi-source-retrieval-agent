@@ -103,7 +103,7 @@ def evaluate_merged_plan(
             if row.get("status") == "covered"
         ]
         quota_covered = critical >= critical_min and important >= important_min
-        if evidence and (covered_by_source or quota_covered):
+        if evidence and (covered_by_source or (not source_rows and quota_covered)):
             status, gap_type = "covered", "none"
             reason = "merged retained evidence has source-evaluated Focus provenance"
         else:

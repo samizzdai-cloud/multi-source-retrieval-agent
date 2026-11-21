@@ -72,7 +72,7 @@ def fetch_doc_markdown(
     ── INPUT SCHEMA ────────────────────────────────────────────────────────────
     必填：
       doc_id (str): 文档 ID 或文档完整 URL（MCP 支持自动解析）。
-                    例：'WPrSdlm7LokNMTx0wBfcBiZnn0a'
+                    例：'<document_token>'
                     或：'https://<tenant>.feishu.cn/docx/<document_token>'
                     注意：不能传文章标题。
 

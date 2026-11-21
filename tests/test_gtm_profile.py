@@ -69,6 +69,37 @@ class GTMProfileTests(unittest.TestCase):
         ))
         self.assertIsInstance(self.repo.build_pack("Hypershell 5.20-5.26 新品销量"), object)
 
+    def test_contiguous_chinese_matches_exact_profile_expressions(self):
+        for term in ("库存", "销量"):
+            self.assertTrue(self.repo.apply_patch(
+                {"action": "add_expression", "type": "expression", "name": term, "variants": ""},
+                trace_supported=True,
+            ))
+        pack = self.repo.resolve("nubia最近的库存和销量", ProfileRerankConfig()).planner_pack
+        self.assertEqual({item["name"] for item in pack.expressions}, {"库存", "销量"})
+
+    def test_reviewed_product_alias_is_bounded_and_does_not_expand_brand_queries(self):
+        for name, kind in (("Hypershell", "brand"), ("nubia", "brand"), ("Z80 Ultra", "product"),
+                           ("REDMAGIC", "brand"), ("Z70 Ultra", "product")):
+            self.assertTrue(self.repo.apply_patch(
+                {"action": "add_entity", "type": "entity", "name": name, "kind": kind}, trace_supported=True,
+            ))
+        self.assertFalse(self.repo.validate_patch(
+            {"action": "add_alias", "type": "alias", "alias": "Z80U"}, trace_supported=True,
+        ))
+        self.assertTrue(self.repo.add_reviewed_product_alias("Z80 Ultra", "Z80 U"))
+        self.assertTrue(self.repo.add_reviewed_product_alias("Z80 Ultra", "Z80U"))
+        for product in ("Z80 Ultra", "Z70 Ultra", "nubia"):
+            self.assertFalse(self.repo.add_reviewed_product_alias(product, "z80u"))
+        self.assertFalse(self.repo.add_reviewed_product_alias("nubia", "Nubia OEM"))
+        self.assertFalse(GTMProfileRepository(self.repo.path, scope="other")
+                         .add_reviewed_product_alias("Z80 Ultra", "Z80U Pro"))
+        for spelling in ("Z80 Ultra", "Z80 U", "Z80U"):
+            pack = self.repo.resolve(f"Hypershell 和 nubia 的{spelling}转化", ProfileRerankConfig())
+            self.assertEqual(pack.planner_pack.entities[0]["name"], "Z80 Ultra")
+        for query in ("nubia 当前核心产品", "REDMAGIC XZ80UPRO"):
+            self.assertNotIn("Z80 Ultra", {item["name"] for item in self.repo.build_pack(query).entities})
+
     def test_callback_rejects_sku_generic_and_unsupported_patch(self):
         for name in ("SKU-A123", "data", "report"):
             self.assertFalse(self.repo.apply_patch(

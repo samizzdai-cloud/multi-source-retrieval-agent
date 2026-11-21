@@ -1,4 +1,5 @@
 google-adk
+litellm
 google-genai
 python-dotenv
 requests

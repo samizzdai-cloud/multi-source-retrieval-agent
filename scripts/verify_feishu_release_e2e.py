@@ -39,8 +39,11 @@ class _ErrorLabelCapture(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         message = record.getMessage()
-        if MCP_PROTOCOL_RE.search(message):
+        mcp_call = "mcp" in record.name.lower() or "mcp" in record.funcName.lower() or "mcp" in message.lower()
+        if mcp_call and MCP_PROTOCOL_RE.search(message):
             self.labels["mcp_protocol_error"] += 1
+        elif record.funcName == "_process_io_task" and "unauthorized" in message.lower():
+            self.labels["optional_doc_enrichment_unauthorized"] += 1
         elif "_mcp_call pure failed" in message:
             self.labels["mcp_search_call_error"] += 1
         elif "native_primary candidates=0" in message:
@@ -100,8 +103,8 @@ def build_body_free_summary(
         "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
         "preset": preset,
         "enabled_sources": ["feishu"],
-        "planner_model": "deepseek/deepseek-v4-flash",
-        "eval_model": "deepseek/deepseek-v4-flash",
+        "planner_model": "deepseek/deepseek-flash",
+        "eval_model": "deepseek/deepseek-flash",
         "thinking": "disabled",
         "source_timeout_s": source_timeout_s,
         "e2e_elapsed_s": round(elapsed_s, 3),
@@ -152,9 +155,9 @@ async def run_check(
         else {}
     )
     cfg = RetrieveConfig(preset=preset, enabled_sources=["feishu"], source_configs=source_configs)
-    cfg.global_planner.model = "deepseek/deepseek-v4-flash"
+    cfg.global_planner.model = "deepseek/deepseek-flash"
     cfg.global_planner.thinking_config = THINKING_FLASH
-    cfg.eval_model_override = "deepseek/deepseek-v4-flash"
+    cfg.eval_model_override = "deepseek/deepseek-flash"
     cfg.eval_thinking = THINKING_FLASH
     agent = build_retrieve_agent(
         config=cfg,

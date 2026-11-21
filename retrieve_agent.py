@@ -39,7 +39,7 @@ from tools.core.models import (
     SourceConfig,
 )
 from tools.core.query_planner import plan_query
-from tools.core.global_planner import PlannerFailure, plan_global
+from tools.core.global_planner import PlannerFailure, plan_global, _focus_limit_for_sources
 from tools.core.planner_runner import (
     NormalizedPlan,
     build_default_validators,
@@ -54,10 +54,12 @@ from tools.core.final_assembler import (
     assemble_final_chunks,
     enforce_focus_quota,
     render_final_payload,
+    render_handoff_summary,
 )
 from tools.core.evidence_role_funnel import current as current_role_funnel
 from tools.core.global_coverage import snapshot_global_coverage
 from tools.core.global_plan_eval import evaluate_merged_plan
+from tools.core.retrieval_progress import progress_sink, report_progress, retrieval_deadline
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +170,12 @@ def _prepare_plan(
         return attach(_normalize_v1_to_plan(query, available_sources, catalog))
 
     # 路径 2：v2 LLM
+    profile_context = profile_resolution.planner_prompt_block()
+    if profile_context:
+        brands = [str(row["name"]) for row in profile_resolution.planner_pack.entities
+                  if row.get("kind") == "brand" and row.get("name")]
+        brand_suffix = ": " + ", ".join(json.dumps(name, ensure_ascii=False) for name in brands) if brands else ""
+        report_progress(f"已成功加载业务理解profile{brand_suffix}")
     try:
         plan = plan_global(
             query=query,
@@ -175,7 +183,8 @@ def _prepare_plan(
             cfg=gp_cfg,
             bailian_catalog=catalog,
             session_context="",
-            profile_context=profile_resolution.planner_prompt_block(),
+            profile_context=profile_context,
+            preset=config.preset,
         )
     except PlannerFailure as e:
         if gp_cfg.fallback_to_v1:
@@ -188,7 +197,10 @@ def _prepare_plan(
         raise
 
     validators = build_default_validators(bailian_catalog=catalog, enabled_sources=available_sources)
-    normalized = normalize_plan(plan, validators, enabled_sources=available_sources)
+    normalized = normalize_plan(
+        plan, validators, enabled_sources=available_sources,
+        max_focuses_per_source=4 if config.preset in {"balanced", "deep_dive"} else None,
+    )
 
     # 路径 3：整盘语义偏差 —— 所有 source 都没拿到任何 pre_planned sub_query
     all_empty = all(not v for v in normalized.pre_planned_by_source.values())
@@ -281,6 +293,8 @@ def _is_near_duplicate(a: ChunkEntry, b: ChunkEntry) -> bool:
 
     meta_a = a.metadata or {}
     meta_b = b.metadata or {}
+    if a.source == "feishu" and set(meta_a.get("answered_focuses") or []) != set(meta_b.get("answered_focuses") or []):
+        return False
     heading_a = _normalize_dedupe_heading(str(meta_a.get("heading_path", "") or ""))
     heading_b = _normalize_dedupe_heading(str(meta_b.get("heading_path", "") or ""))
     if heading_a and heading_b and heading_a != heading_b:
@@ -423,6 +437,9 @@ async def _dispatch_sources(
             logger.info("[%s] no focus routed, skip", name)
             return SourceAgentResult(source=name, top_chunks=[], loops_used=0, elapsed_s=0.0)
         timeout_s = agent.cfg.source_timeout_s
+        deadline = retrieval_deadline.get()
+        if deadline is not None:
+            timeout_s = max(0.0, min(timeout_s, deadline - asyncio.get_running_loop().time()))
         # P4: 把 focus_board 注入 source_agent（plan_eval focus-aware 用）
         if focus_board is not None:
             setattr(agent, "_focus_board", focus_board)
@@ -431,6 +448,7 @@ async def _dispatch_sources(
             "[%s] dispatch: focuses=%d pre_planned_sq=%d replan_focuses=%d",
             name, len(fs), len(pre_planned or []), len(replan or []),
         )
+        source_deadline = retrieval_deadline.set(asyncio.get_running_loop().time() + timeout_s)
         try:
             result = await asyncio.wait_for(
                 agent.run(
@@ -442,7 +460,10 @@ async def _dispatch_sources(
             )
         except asyncio.TimeoutError:
             logger.warning("[%s] timed out after %.1fs", name, timeout_s)
+            report_progress(f"{name} · 源检索已超时。")
             drain_timeout_s = agent.cfg.cancel_drain_timeout_s
+            if deadline is not None:
+                drain_timeout_s = max(0.0, min(drain_timeout_s, deadline - asyncio.get_running_loop().time()))
             remaining = await agent.drain_inflight(timeout_s=drain_timeout_s)
             result = _timeout_result(name, agent, timeout_s)
             result.retrieval_trace.append({
@@ -452,6 +473,7 @@ async def _dispatch_sources(
             return result
         except Exception as e:
             logger.exception("[%s] failed: %s", name, e)
+            report_progress(f"{name} · 源检索失败（{type(e).__name__}）。")
             return SourceAgentResult(
                 source=name, top_chunks=[], loops_used=0, elapsed_s=timeout_s,
                 retrieval_trace=[{
@@ -460,6 +482,7 @@ async def _dispatch_sources(
                 }],
             )
         finally:
+            retrieval_deadline.reset(source_deadline)
             if focus_board is not None:
                 setattr(agent, "_focus_board", None)
             setattr(agent, "_profile_resolution", None)
@@ -515,10 +538,12 @@ class RetrieveAgent(BaseAgent):
 
         enabled = list(self.sources.keys())
         logger.info("RetrieveAgent: query=%r, sources=%s", query, enabled)
-        yield self._make_text_event(
-            ctx,
-            f"[retrieve] start preset={self.config.preset} sources={','.join(enabled)}",
-        )
+        if progress_sink.get() is not None:
+            budgets = "、".join(f"{'飞书' if name == 'feishu' else name}（最多 {agent.cfg.max_loops} 轮）"
+                                for name, agent in self.sources.items())
+            yield self._make_text_event(ctx, f"允许检索源：{budgets} · {self.config.preset}")
+        else:
+            yield self._make_text_event(ctx, f"[retrieve] start preset={self.config.preset} sources={','.join(enabled)}")
 
         # 1. Global plan (v2.2: global_planner + planner_runner)
         plan_started = time.perf_counter()
@@ -560,10 +585,16 @@ class RetrieveAgent(BaseAgent):
             normalized.rejected_count,
             (time.perf_counter() - plan_started) * 1000.0,
         )
-        yield self._make_text_event(
-            ctx,
-            f"[retrieve] plan focuses={len(focuses)} total_ms={(time.monotonic() - start) * 1000:.0f}",
-        )
+        if progress_sink.get() is not None:
+            lines = [
+                f"- {focus.focus_id} · {focus.text} · {', '.join(focus.targets or enabled)}"
+                for focus in focuses
+            ]
+            yield self._make_text_event(ctx, "检索规划\n\n" + "\n".join(lines))
+        else:
+            yield self._make_text_event(
+                ctx, f"[retrieve] plan focuses={len(focuses)} total_ms={(time.monotonic() - start) * 1000:.0f}",
+            )
 
         # 2. Dispatch（每源超时独立走 SourceAgent.cfg.source_timeout_s）
         # P4: 实例化 FocusBoard，跨源共享 focus 满足状态（plan_eval focus-aware 与早停依赖）
@@ -583,6 +614,19 @@ class RetrieveAgent(BaseAgent):
             "resolution_id": resolution_id,
             "warning": warning,
         } for warning in normalized.validation_warnings]
+        planner_trace.append({
+            "event": "retrieval_policy", "resolution_id": resolution_id,
+            "preset": self.config.preset,
+            "focus_limit": _focus_limit_for_sources(enabled, self.config.global_planner.max_focuses, self.config.preset),
+            "sources": {name: {
+                "focus_limit": 4 if self.config.preset in {"balanced", "deep_dive"} else None,
+                "max_loops": agent.cfg.max_loops,
+                "queries_per_focus": agent.cfg.sub_queries_per_focus,
+                "content_rerank_mode": agent.cfg.content_rerank_mode,
+                "partial_eval_trigger_ratio": agent.cfg.eval_shortlist.trigger_ratio,
+                "late_document_collection": hasattr(agent, "_doc_pool") and agent._doc_pool is not None,
+            } for name, agent in self.sources.items()},
+        })
         profile_resolution = normalized.profile_resolution
         if profile_resolution is not None:
             planner_trace.append({
@@ -630,11 +674,12 @@ class RetrieveAgent(BaseAgent):
             len(self.sources),
             (time.perf_counter() - dispatch_started) * 1000.0,
         )
-        source_counts = ", ".join(f"{r.source}:{len(r.top_chunks)}" for r in per_source)
-        yield self._make_text_event(
-            ctx,
-            f"[retrieve] dispatch sources={len(self.sources)} chunks=({source_counts}) total_ms={(time.monotonic() - start) * 1000:.0f}",
-        )
+        if progress_sink.get() is None:
+            source_counts = ", ".join(f"{r.source}:{len(r.top_chunks)}" for r in per_source)
+            yield self._make_text_event(
+                ctx,
+                f"[retrieve] dispatch sources={len(self.sources)} chunks=({source_counts}) total_ms={(time.monotonic() - start) * 1000:.0f}",
+            )
 
         # 3. Merge
         merge_started = time.perf_counter()
@@ -683,15 +728,16 @@ class RetrieveAgent(BaseAgent):
                     "focus_ids": list(global_plan_eval.replan_focus_ids),
                     "reason": "query_signature_dedup_not_implemented",
                 })
-        yield self._make_text_event(
-            ctx,
-            f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
-        )
+        if progress_sink.get() is None:
+            yield self._make_text_event(
+                ctx, f"[retrieve] merge merged_chunks={len(merged)} total_ms={(time.monotonic() - start) * 1000:.0f}",
+            )
 
         # 3b. 出口选择：
         # - lite/balanced: 只走规则装填，不触发 final assembler LLM
         # - deep_dive: 跳过 final assembler，直接走 eval_layer
         assemble_started = time.perf_counter()
+        report_progress("整理跨源证据链…" if use_global_eval else "整理最终证据链…")
         final_top_k = self.config.final_top_k(len(focuses))
         focus_quota = self.config.focus_quota
 
@@ -757,10 +803,11 @@ class RetrieveAgent(BaseAgent):
                 "resolution_id": resolution_id,
             })
         selection_cap = "source_agent" if single_source_deep_dive else str(final_top_k)
-        yield self._make_text_event(
-            ctx,
-            f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={selection_cap} total_ms={(time.monotonic() - start) * 1000:.0f}",
-        )
+        if progress_sink.get() is None:
+            yield self._make_text_event(
+                ctx,
+                f"[retrieve] assemble path={assemble_path} picked={len(selected)} cap={selection_cap} total_ms={(time.monotonic() - start) * 1000:.0f}",
+            )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
         _log_observation(merged, per_source, focuses, elapsed_ms)
@@ -827,6 +874,8 @@ class RetrieveAgent(BaseAgent):
             if elapsed_ms is not None
             else f"[retrieve] done chunks={len(chunks)}"
         )
+        if progress_sink.get() is not None:
+            summary = render_handoff_summary(chunks)
         return Event(
             invocation_id=ctx.invocation_id,
             author=self.name,
@@ -837,6 +886,7 @@ class RetrieveAgent(BaseAgent):
             ),
             actions=EventActions(state_delta={
                 "retrieval_result": result_json,
+                **({"web_stage_timeout": None} if progress_sink.get() is not None else {}),
                 # Body-free, evaluation/governance-only companion state.  It
                 # is deliberately outside retrieval_result so AnswerAgent sees
                 # the stable full-chunk contract unchanged.
@@ -853,6 +903,8 @@ def build_retrieve_agent(
     config: Optional[RetrieveConfig] = None,
     source_config: Optional[SourceConfig] = None,
     name: str = "retrieve_v1",
+    *,
+    defer_feishu_oauth: bool = False,
 ) -> RetrieveAgent:
     """按配置装配 SourceAgent 字典。"""
     cfg = config or RetrieveConfig(enabled_sources=["bailian"])
@@ -905,7 +957,9 @@ def build_retrieve_agent(
                 allowed_indexes=allowed,
             )
         elif src == "feishu":
-            sources[src] = _build_feishu_source_agent(sa_cfg, sc, preset=cfg.preset)
+            sources[src] = _build_feishu_source_agent(
+                sa_cfg, sc, preset=cfg.preset, uat="" if defer_feishu_oauth else None,
+            )
         elif src == "google":
             # OAuth is lazy: agent construction and mock smoke must work with
             # no credentials or Google auth extras installed.
@@ -952,13 +1006,15 @@ def _resolve_feishu_uat(sc: SourceConfig) -> str:
 
 def _build_feishu_source_agent(
     sa_cfg: SourceAgentConfig, sc: SourceConfig, preset: str = "balanced",
+    *, uat: str | None = None,
 ) -> SourceAgent:
     """构造 FeishuSourceAgent，并注入 FeishuDocPool / TablePool。"""
     from agents.feishu.feishu_source_agent import FeishuSourceAgent
     from tools.feishu.feishu_doc_pool import FeishuDocPool
     from tools.feishu.table_pool import TablePool
 
-    uat = _resolve_feishu_uat(sc)
+    deferred = uat == ""
+    uat = _resolve_feishu_uat(sc) if uat is None else uat
 
     doc_pool = None
     table_pool = None
@@ -967,7 +1023,7 @@ def _build_feishu_source_agent(
         # sheet/bitable/whiteboard/comments 扩展 API（节省 99991400 共享桶预算）
         doc_pool = FeishuDocPool(uat=uat, lite_block_only=(preset == "lite"))
         table_pool = TablePool(uat=uat)
-    else:
+    elif not deferred:
         logger.warning("FeishuSourceAgent: FEISHU_UAT empty, proceeding without pools")
 
     return FeishuSourceAgent(

@@ -89,6 +89,8 @@ class FeishuDocPool:
         # doc_id → 首次 submit 进入 _reading 的 monotonic 时间戳；
         # 供 wait_and_collect 的 per_doc_timeout 计算单 doc 等待上限
         self._doc_submit_times: Dict[str, float] = {}
+        self._block_read_started: Dict[str, float] = {}
+        self._block_read_start_events: Dict[str, asyncio.Event] = {}
         # Reserved for failures that invalidate the document's own Block API
         # payload. A type-30 embed is not such a failure: its unavailability
         # must never discard otherwise readable Docx text/native-grid blocks.
@@ -96,6 +98,8 @@ class FeishuDocPool:
         self._doc_skipped_embeds: Dict[str, List[dict]] = {}
         self._doc_embed_selections: Dict[str, List[dict]] = {}
         self._consumer_deadlines: Dict[str, dict] = {}
+        self._requested_docs: Dict[str, None] = {}
+        self._delivered_docs: Set[str] = set()
         self._reader_events: List[dict] = []
         # ``wait_and_collect`` may stop waiting on a slow synchronous reader,
         # but a thread cannot be cancelled safely. Keep explicit ownership so
@@ -148,6 +152,40 @@ class FeishuDocPool:
 
     def _get_doc_id(self, candidate: dict) -> str:
         return candidate.get("id", candidate.get("document_id", candidate.get("doc_id", "")))
+
+    def begin_collection(self) -> None:
+        """Start request-local delivery tracking while retaining reader caches."""
+        self._requested_docs.clear()
+        self._delivered_docs.clear()
+
+    async def collect_undelivered(self, timeout_s: float = 0.0) -> "List[UnifiedChunk]":
+        doc_ids = [did for did in self._requested_docs if did not in self._delivered_docs]
+        if not doc_ids:
+            return []
+        ready_ids = [did for did in doc_ids if self._doc_ready_events[did].is_set()]
+        if not ready_ids and timeout_s > 0:
+            waiters = [asyncio.create_task(self._doc_ready_events[did].wait()) for did in doc_ids]
+            try:
+                await asyncio.wait(waiters, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+            ready_ids = [did for did in doc_ids if self._doc_ready_events[did].is_set()]
+        doc_ids = ready_ids
+        if not doc_ids:
+            return []
+        # Already-completed readers are collected even for a non-blocking call.
+        return await self.wait_and_collect(doc_ids, total_timeout=0.01)
+
+    def pending_delivery_ids(self) -> List[str]:
+        return [did for did in self._requested_docs if did not in self._delivered_docs]
+
+    def _consumer_budget_start(self, doc_id: str) -> Optional[float]:
+        if self._doc_route.get(doc_id) in {"block_api", "mcp_fallback"}:
+            return self._block_read_started.get(doc_id)
+        return self._doc_submit_times.get(doc_id)
 
     def _merge_doc_meta(self, existing: Optional[dict], candidate: dict) -> dict:
         existing = dict(existing or {})
@@ -224,7 +262,9 @@ class FeishuDocPool:
                     selected_ids.append(doc_id)
                     selected_seen.add(doc_id)
                 # 缓存 meta
-                self._doc_meta[doc_id] = self._merge_doc_meta(self._doc_meta.get(doc_id), c)
+                existing_meta = self._doc_meta.get(doc_id) if doc_id in self._requested_docs else None
+                self._doc_meta[doc_id] = self._merge_doc_meta(existing_meta, c)
+                self._requested_docs[doc_id] = None
                 desired_route = self._doc_meta[doc_id].get("route_hint", "block_api")
                 # 记录第一个请求该文档的 sub_query（用于 Stage 4 大表 LLM）
                 if doc_id not in self._doc_query:
@@ -295,7 +335,7 @@ class FeishuDocPool:
 
         Args:
             total_timeout: 整批最大等待秒数；超过后剩余 pending docs 视为超时丢弃
-            per_doc_timeout: 单 doc 最大等待秒数（自该 doc submit 起）；超过后该 doc
+            per_doc_timeout: 单 doc 最大等待秒数（Block API 自取得读取槽开始）；超过后该 doc
                 被视为超时（empty chunks），不再阻塞其他文档收集。
                 为 None 时仅由 total_timeout 控制。注意：底层 fetch 在线程池中
                 继续运行，此参数只控制"我们何时停止等待"。
@@ -317,9 +357,10 @@ class FeishuDocPool:
                 if event is None or event.is_set():
                     newly_done.append(doc_id)
                     continue
-                # Per-doc timeout：自 submit 起超过 per_doc_timeout 即视为完成
+                # Block reads get the per-doc budget after acquiring a reader.
+                # Queued work remains bounded by the batch/source deadline.
                 if per_doc_timeout is not None:
-                    submit_t = self._doc_submit_times.get(doc_id)
+                    submit_t = self._consumer_budget_start(doc_id)
                     if submit_t is not None and (now_t - submit_t) >= per_doc_timeout:
                         newly_done.append(doc_id)
                         # 标记为 0 chunks（不动 self._doc_chunks，避免影响后续真正完成的事件）
@@ -344,6 +385,7 @@ class FeishuDocPool:
                 if event is None or not event.is_set():
                     collected_by_doc[doc_id] = []
                     continue
+                self._delivered_docs.add(doc_id)
                 chunks = self._doc_chunks.get(doc_id, [])
                 if not chunks:
                     collected_by_doc[doc_id] = []
@@ -364,6 +406,8 @@ class FeishuDocPool:
                             **dict(chunk.metadata or {}),
                             "content_type": chunk.content_type.value if hasattr(chunk.content_type, 'value') else str(chunk.content_type),
                             "doc_id": doc_id,
+                            "reader_pool": "doc",
+                            "read_query": meta.get("read_query") or self._doc_query.get(doc_id, ""),
                             "route": self._doc_route.get(doc_id, "unknown"),
                             "reader_score": 0.0,
                             "selected_focus_ids": list(meta.get("selected_focus_ids") or []),
@@ -418,7 +462,7 @@ class FeishuDocPool:
                     remaining_per_doc = [
                         max(0.0, per_doc_timeout - (time.monotonic() - submit_t))
                         for doc_id in pending
-                        if (submit_t := self._doc_submit_times.get(doc_id)) is not None
+                        if (submit_t := self._consumer_budget_start(doc_id)) is not None
                     ]
                     if remaining_per_doc:
                         wait_s = min(wait_s, min(remaining_per_doc))
@@ -427,6 +471,12 @@ class FeishuDocPool:
                     for doc_id in pending
                     if (event := self._doc_ready_events.get(doc_id)) is not None and not event.is_set()
                 ]
+                if per_doc_timeout is not None:
+                    waiters.extend(
+                        asyncio.create_task(self._block_read_start_events.setdefault(doc_id, asyncio.Event()).wait())
+                        for doc_id in pending
+                        if self._doc_route.get(doc_id) == "block_api" and doc_id not in self._block_read_started
+                    )
                 if not waiters:
                     # A missing event is considered ready on the next pass;
                     # yield once rather than spinning.
@@ -480,8 +530,10 @@ class FeishuDocPool:
 
         async def _read_one(doc: dict):
             doc_id = doc["id"]
-            doc_started = time.perf_counter()
             async with sem:
+                doc_started = time.perf_counter()
+                self._block_read_started[doc_id] = time.monotonic()
+                self._block_read_start_events.setdefault(doc_id, asyncio.Event()).set()
                 for attempt in range(3):
                     try:
                         # run_rag_pipeline 是同步的，放线程池
@@ -526,6 +578,7 @@ class FeishuDocPool:
                                 block_ids=[],
                                 token_count=cr.token_count,
                                 has_table=ct_val in ("table_md", "table_json"),
+                                metadata=dict(getattr(cr, "metadata", {}) or {}),
                             ))
                         self._doc_chunks[doc_id] = chunks
                         self._doc_read_failures[doc_id] = []
@@ -533,6 +586,10 @@ class FeishuDocPool:
                             "event": "document_read", "document_id": doc_id,
                             "route": "block_api", "outcome": "success",
                             "attempts": attempt + 1, "chunk_count": len(chunks),
+                            "embedded_sheet_chunk_count": sum(
+                                c.metadata.get("source_kind") == "docx_embedded_sheet" for c in chunks
+                            ),
+                            "embedded_sheet_failure_count": len(self._doc_skipped_embeds[doc_id]),
                             "elapsed_ms": round(_elapsed_ms(doc_started), 1),
                         })
                         self._done.add(doc_id)
