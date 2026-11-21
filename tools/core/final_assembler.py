@@ -102,9 +102,7 @@ def _bucket_by_focus(
     """按 focus_id 分桶；每桶内按 (tier_rank, -relevance) 排序。"""
     buckets: Dict[str, List[ChunkEntry]] = {f.focus_id: [] for f in focuses}
     for c in chunks:
-        # 优先从 answered_focuses 取，否则用 target_focuses
-        answered = set((c.metadata or {}).get("answered_focuses") or [])
-        focus_ids = answered or set(c.target_focuses or set())
+        focus_ids = set((c.metadata or {}).get("answered_focuses", c.target_focuses) or [])
         for fid in focus_ids:
             if fid in buckets:
                 buckets[fid].append(c)
@@ -174,9 +172,13 @@ def round_robin_fill(
         if not added_this_round:
             break                                   # 所有 focus 桶都空 → 候选耗尽
 
-    # 硬截断（防御）
-    if len(out) > final_top_k:
-        out = out[:final_top_k]
+    # Explicitly unassigned, judged background can fill spare slots without
+    # contributing to a Focus quota or inheriting its retrieval target.
+    if len(out) < final_top_k:
+        background = [chunk for chunk in chunks
+                      if chunk.id not in picked_ids and chunk.tier in {"critical", "important"}
+                      and (chunk.metadata or {}).get("answered_focuses") == []]
+        out.extend(background[:final_top_k - len(out)])
     return out
 
 
@@ -205,8 +207,7 @@ def enforce_focus_quota(
     required = {"critical": critical_min, "important": important_min}
 
     def chunk_focuses(chunk: ChunkEntry) -> set[str]:
-        answered = set((chunk.metadata or {}).get("answered_focuses") or [])
-        return (answered or set(chunk.target_focuses or set())) & set(focus_ids)
+        return set((chunk.metadata or {}).get("answered_focuses", chunk.target_focuses) or []) & set(focus_ids)
 
     def count_for(rows: List[ChunkEntry], focus_id: str, tier: str) -> int:
         return sum(1 for chunk in rows if chunk.tier == tier and focus_id in chunk_focuses(chunk))
@@ -525,8 +526,7 @@ def render_final_payload(
         if c.tier not in {"critical", "important"}:
             continue
         meta = c.metadata or {}
-        # focus_query 优先用 LLM 标注的 answered_focuses，否则 fall back 到 target_focuses
-        focus_ids = list((meta.get("answered_focuses") or [])) or sorted(c.target_focuses or set())
+        focus_ids = meta.get("answered_focuses", sorted(c.target_focuses or set())) or []
         focus_query = [fid_to_text[fid] for fid in focus_ids if fid in fid_to_text]
         chunks_out.append({
             "text": c.content,
@@ -540,3 +540,23 @@ def render_final_payload(
             "chunk_id": c.id,
         })
     return {"query": query, "chunks": chunks_out}
+
+
+def render_handoff_summary(chunks: List[Dict[str, Any]]) -> str:
+    """Summarize the serialized evidence in document order without exposing bodies."""
+    documents: Dict[tuple[str, str], tuple[str, Dict[str, None]]] = {}
+    for chunk in chunks:
+        name = " ".join(str(chunk.get("source_name") or "").split())
+        url = str(chunk.get("source_url") or "")
+        key = (str(chunk.get("source_tool") or ""), url or name)
+        title, focuses = documents.setdefault(key, (name or url or "未命名文档", {}))
+        for focus in chunk.get("focus_query") or []:
+            text = " ".join(str(focus).split())
+            if text:
+                focuses.setdefault(text, None)
+    heading = f"最终证据链入选 {len(chunks)} 条切片。"
+    if not documents:
+        return heading
+    lines = [f"- {title} · Focus：{'；'.join(focuses) or '未标注'}"
+             for title, focuses in documents.values()]
+    return heading + "\n\n" + "\n".join(lines)

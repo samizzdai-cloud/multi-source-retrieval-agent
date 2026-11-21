@@ -15,24 +15,27 @@
 """
 
 import logging
+from contextvars import ContextVar
 from typing import Any, Dict, List, Literal, Mapping, Optional, Type
 
+from google.adk.models.lite_llm import LiteLLMClient
 from google.genai import types as _genai_types
 
 logger = logging.getLogger(__name__)
 from pydantic import BaseModel, Field, create_model
+from tools.core.models import DEEPSEEK_MAX_OUTPUT_TOKENS, DEFAULT_DEEPSEEK_MODEL, THINKING_FLASH
 
 
 # ── 全局统一模型 ─────────────────────────────────────────────────────────────
 # 这一行被 source_agent 的 plan_only / eval_only / eval_layer LlmAgent 共用。
 # 由 retrieve_agent.build_retrieve_agent 在装配前调 set_model(cfg.eval_model_override)
 # 注入运行时覆盖。
-MODEL = "deepseek/deepseek-v4-flash"
+MODEL = DEFAULT_DEEPSEEK_MODEL
 _DEFAULT_MODEL = MODEL  # 不可变的原始默认；reset 时使用
 
 # ── Thinking 配置 ─────────────────────────────────────────────────────────
 # 由 retrieve_agent 在装配前调 set_thinking_config(...) 注入。
-# DeepSeek 模型通过 LiteLlm(thinking={...}) 传递；Gemini 模型自动忽略。
+# DeepSeek 的 thinking 参数通过 LiteLlm 的 extra_body 传递。
 _THINKING_CONFIG: Optional[dict] = None
 
 
@@ -56,6 +59,29 @@ def set_thinking_config(config: Optional[dict] = None) -> None:
     _THINKING_CONFIG = config
 
 
+llm_usage_sink: ContextVar = ContextVar("llm_usage_sink", default=None)
+
+
+class DeepSeekFlashClient(LiteLLMClient):
+    async def acompletion(self, model, messages, tools, **kwargs):
+        # ADK can send max_completion_tokens from its generation config.
+        # DeepSeek Chat Completions documents max_tokens.
+        kwargs.pop("max_completion_tokens", None)
+        kwargs["max_tokens"] = DEEPSEEK_MAX_OUTPUT_TOKENS
+        response = await super().acompletion(model, messages, tools, **kwargs)
+        usage = getattr(response, "usage", None)
+        sink = llm_usage_sink.get()
+        if usage is not None and sink is not None:
+            values = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+            sink({"event": "llm_usage", "model": model, **{
+                key: values[key] for key in (
+                    "prompt_tokens", "completion_tokens", "total_tokens",
+                    "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_tokens_details",
+                ) if key in values
+            }})
+        return response
+
+
 def build_llm_model() -> Any:
     """构建当前配置下的模型实例（LiteLlm 或字符串）。
 
@@ -68,6 +94,9 @@ def build_llm_model() -> Any:
             from google.adk.models.lite_llm import LiteLlm
             actual_model = MODEL.split("/", 1)[1] if "/" in MODEL else MODEL
             extra: dict = {"custom_llm_provider": "deepseek"}
+            if MODEL == DEFAULT_DEEPSEEK_MODEL:
+                extra["llm_client"] = DeepSeekFlashClient()
+                extra.update(THINKING_FLASH.to_litellm_kwargs())
             if _THINKING_CONFIG:
                 extra.update(_THINKING_CONFIG)
             return LiteLlm(model=actual_model, **extra)
@@ -361,7 +390,9 @@ def build_partial_eval_model() -> Type[BaseModel]:
     )
 
 
-def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]) -> Type[BaseModel]:
+def build_plan_eval_model(
+    source_top_k: int, sub_query_item_cls: Type[BaseModel], *, require_replan_field: bool = False,
+) -> Type[BaseModel]:
     """plan_eval 输出 schema 工厂（共享版，4 个源共用）。
 
     ``sub_query_item_cls`` 是各源自己定义的 SubQueryItem，描述 ``replan_queries``
@@ -371,8 +402,9 @@ def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]
         f"PlanEvalOutputK{source_top_k}",
         decision=(Decision, Field(..., description="continue=继续 replan，stop=终止并给 top_k")),
         replan_queries=(
-            Optional[List[sub_query_item_cls]],  # type: ignore[valid-type]
-            Field(default=None, description="decision=continue 时必填"),
+            List[sub_query_item_cls] if require_replan_field else Optional[List[sub_query_item_cls]],  # type: ignore[valid-type]
+            Field(..., description="continue 必须包含可执行查询；stop 时为空列表") if require_replan_field
+            else Field(default=None, description="decision=continue 时必填"),
         ),
         top_k_chunk_ids=(
             Optional[List[str]],
@@ -390,7 +422,7 @@ def build_plan_eval_model(source_top_k: int, sub_query_item_cls: Type[BaseModel]
 
 
 # ── 运行时校验（pydantic 已覆盖大部分，这里只兜底 decision 分支） ────────────
-def validate_plan_eval_output(payload: dict) -> dict:
+def validate_plan_eval_output(payload: dict, *, structured_coverage: bool = False) -> dict:
     """按 decision 校验互斥字段：
     - continue → 必须有 replan_queries
     - stop → 必须有 top_k_chunk_ids + tiers
@@ -423,12 +455,14 @@ def validate_plan_eval_output(payload: dict) -> dict:
         "quantitative", "sales", "conversion", "ads", "heatmap", "funnel",
         "inventory", "channel", "performance data", "impact evidence",
     )
-    for raw in payload.get("focus_decisions") or []:
+    raw_focus_decisions = payload.get("focus_decisions")
+    for raw in raw_focus_decisions if isinstance(raw_focus_decisions, list) else []:
         if not isinstance(raw, Mapping):
             continue
         item = dict(raw)
         status = str(item.get("status") or "").strip().lower()
         raw_status = status
+        item["status"] = status
         if status in {"partially_covered", "partial", "evidence_gap"}:
             item["status"] = "gap"
         elif status not in {"covered", "gap", "insufficient"}:
@@ -436,7 +470,7 @@ def validate_plan_eval_output(payload: dict) -> dict:
         gap_type = str(item.get("gap_type") or "none").strip().lower()
         raw_gap_type = gap_type
         reason = str(item.get("reason") or "").casefold()
-        explicit_upstream_gap = (
+        explicit_upstream_gap = not structured_coverage and (
             any(marker.casefold() in reason for marker in upstream_phrases)
             or (
                 any(marker.casefold() in reason for marker in missing_markers)

@@ -6,6 +6,9 @@ import os
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar, Dict, List, Literal, Optional, Set
 
+DEFAULT_DEEPSEEK_MODEL = "deepseek/deepseek-flash"
+DEEPSEEK_MAX_OUTPUT_TOKENS = 393_216
+
 
 @dataclass
 class SourceConfig:
@@ -79,8 +82,8 @@ class AgentConfig:
 
     # ── Planner / Eval 模型分离接口 ────────────────────────────
     # 两类模型可独立配置；留空都用 dataclass 默认值
-    #   planner_model:  global_planner v2.2 LLM，默认 deepseek/deepseek-v4-flash
-    #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 deepseek/deepseek-v4-flash
+    #   planner_model:  global_planner v2.2 LLM，默认 deepseek/deepseek-flash
+    #   eval_model:     eval_layer (deep_dive) + plan_only LLM，默认 deepseek/deepseek-flash
     planner_model: str = ""               # 空 → GlobalPlannerConfig.model 默认
     eval_model: str = ""                  # 空 → RetrieveConfig.MODEL 默认
     # DeepSeek thinking 模式配置；空则使用预设（planner 与 eval 均显式禁用 thinking）。
@@ -284,7 +287,7 @@ THINKING_FLASH = ThinkingConfig(enabled=False)
 class GlobalPlannerConfig:
     """Global planner（v2.2）行为配置。模型在此切换，不走 env。
 
-    - ``model``: 默认 ``deepseek/deepseek-v4-flash``（通过 ADK LiteLlm）。
+    - ``model``: 默认 ``deepseek/deepseek-flash``（通过 LiteLLM Chat Completions）。
       历史 Gemini 选项 ``gemini-3.5-flash`` / ``gemini-3-flash-preview`` /
       ``gemini-3.1-flash-lite`` 仍受支持。
     - ``thinking_config``: 结构化 planner 默认关闭 thinking。部分 DeepSeek
@@ -292,7 +295,7 @@ class GlobalPlannerConfig:
     - ``fallback_to_v1``: 整盘失败时是否回落到老 query_planner + 各源 plan_only_LLM。
     - ``force_v1``: A/B 评测期间的硬开关——置 True 时完全不调 v2。
     """
-    model: str = "deepseek/deepseek-v4-flash"
+    model: str = DEFAULT_DEEPSEEK_MODEL
     thinking_config: Optional[ThinkingConfig] = field(default_factory=lambda: THINKING_FLASH)
     timeout_s: float = 15.0
     max_focuses: int = 6
@@ -437,14 +440,13 @@ class ChunkEntry:
 class EvalShortlistConfig:
     """Batching policy for Focus-local partial tier evaluation.
 
-    This is deliberately independent from ``ContextBudget``: the latter keeps
-    one provider request within its context window, while this policy decides
-    when a complete provisional tier pass begins.  It contains no output quota:
-    partial eval classifies every Focus/chunk pair in the submitted batch.
+    The input budget includes serialized instructions, evidence and schema.
+    Only token pressure starts a provisional pass; a small remainder goes
+    directly to source evaluation. This policy has no output quota.
     """
     enabled: bool = True
-    trigger_chunk_count: int = 24
-    batch_chunk_limit: int = 80
+    input_token_budget: int = 600_000
+    trigger_ratio: float = 0.4
     max_concurrency: int = 3
 
 
@@ -555,6 +557,9 @@ class SourceAgentConfig:
     temporal_filter_enabled: bool = False
     temporal_filter_window_days: Optional[int] = None    # None = 不过滤
     temporal_filter_field: str = "modified"              # "modified" / "created" / "sent_at"
+    source_top_k_limit: Optional[int] = None
+    content_rerank_mode: Literal["all", "table_pool_only", "off"] = "all"
+    sub_queries_per_focus: Optional[int] = None
 
 
 # ── eval_layer 模式（Phase 4b）────────────────────────────────────
@@ -655,7 +660,7 @@ class RetrieveConfig:
     # All planner/evaluation stages use the configured DeepSeek path by
     # default.  Google Workspace retrieval itself remains API/mock based and
     # must not require Vertex credentials.
-    MODEL: ClassVar[str] = "deepseek/deepseek-v4-flash"
+    MODEL: ClassVar[str] = DEFAULT_DEEPSEEK_MODEL
 
     # 兼容旧调用：保留小写别名属性，但只读
     @property
@@ -713,7 +718,7 @@ class RetrieveConfig:
                       "final_top_k_per_focus": 4,
                       "source_overrides": {
                           "bailian": {"max_loops": 2, "source_timeout_s": 30.0},
-                          "feishu": {"rerank_enabled": True},
+                          "feishu": {"max_loops": 3, "rerank_enabled": True, "sub_queries_per_focus": 2},
                           # table chunks 在读取后进入独立预览评估，避免表格噪声压制文档信号。
                           "google": {"rerank_enabled": True,
                                      "google_download_timeout_s": 7.0, "google_api_timeout_s": 7.0,
@@ -767,6 +772,7 @@ class RetrieveConfig:
                           "feishu":  {"max_loops": 2, "source_timeout_s": 45.0,
                                       "allow_focusboard_early_stop": False,
                                       "rerank_enabled": True,
+                                      "sub_queries_per_focus": 2,
                                       # deep_dive 给 table chunk 更宽松的读取预算（8 vs balanced 6）。
                           },
                           "bailian": {"max_loops": 3, "source_timeout_s": 50.0},
@@ -821,7 +827,9 @@ class RetrieveConfig:
         return int(self._PRESET_DEFAULTS.get(self.preset, {}).get("final_top_k_per_focus", 4))
 
     def final_top_k(self, n_focuses: int) -> int:
-        """硬上限 = base + 1 × n_focuses。候选不足时输出实际数量，可少不可多。"""
+        """单源 balanced 固定 12 条，其余使用 base + max(1, n_focuses)。"""
+        if self.preset == "balanced" and len(set(self.enabled_sources)) == 1:
+            return 12
         return self.final_top_k_base + max(1, n_focuses)
 
     @property
@@ -861,6 +869,10 @@ class RetrieveConfig:
             diff = {k: v for k, v in preset_overrides[source].items()}
             base = replace(base, **diff)
 
+        if self.preset == "balanced" and set(self.enabled_sources) == {source}:
+            limit = self.final_top_k(1)
+            base = replace(base, source_top_k=limit, source_top_k_limit=limit)
+
         # 3) 用户显式 source_configs 覆写（最高优先级）
         override = self.source_configs.get(source)
         if override is None:
@@ -874,6 +886,8 @@ class RetrieveConfig:
             "rerank_enabled", "rerank_keep_ratio", "rerank_score_threshold",
             "rerank_timeout_s", "rerank_max_concurrency", "rerank_max_retries",
             "rerank_retry_delay_s", "rerank_trigger_chunk_count", "rerank_max_document_chars",
+            "content_rerank_mode", "eval_shortlist", "table_child_rerank_enabled",
+            "sub_queries_per_focus",
             "google_download_timeout_s", "google_api_timeout_s",
             "google_enable_gmail", "google_enable_gmail_attachments",
             "google_enable_sheet_search",

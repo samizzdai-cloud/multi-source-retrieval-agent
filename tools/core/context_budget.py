@@ -7,9 +7,9 @@ replacement for API usage accounting.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence
+from typing import Callable, Iterable, List, Sequence
 
-from tools.core.models import ChunkEntry
+from tools.core.models import ChunkEntry, DEEPSEEK_MAX_OUTPUT_TOKENS
 
 
 # These limits define the actual source-evaluation prompt surface. The batcher
@@ -39,13 +39,21 @@ def prompt_preview_text(chunk: "ChunkEntry") -> str:
 @dataclass(frozen=True)
 class ContextBudget:
     context_limit: int = 1_000_000
-    response_reserve: int = 20_000
+    response_reserve: int = DEEPSEEK_MAX_OUTPUT_TOKENS
     prompt_reserve: int = 30_000
-    flush_threshold: int = 600_000
+    trigger_ratio: float = 0.4
     hard_ceiling: int = 650_000
     # Partial eval emits only a compact evidence shortlist.  Omitted chunks are
     # observable as not_shortlisted (not mislabeled as semantic noise).
-    max_chunks_per_batch: int = 80
+    max_chunks_per_batch: int | None = None
+
+    def __post_init__(self) -> None:
+        if not 0 < self.trigger_ratio <= 1 or self.usable_tokens <= 0:
+            raise ValueError("invalid evaluation input token budget")
+
+    @property
+    def flush_threshold(self) -> int:
+        return max(1, int(self.usable_tokens * self.trigger_ratio))
 
     @property
     def usable_tokens(self) -> int:
@@ -65,16 +73,20 @@ def estimate_chunk_tokens(chunk: ChunkEntry) -> int:
     return estimate_tokens(wrapper + "\n" + prompt_preview_text(chunk)) + 24
 
 
-def split_chunks(chunks: Sequence[ChunkEntry], budget: ContextBudget) -> List[List[ChunkEntry]]:
+def split_chunks(
+    chunks: Sequence[ChunkEntry], budget: ContextBudget,
+    prompt_tokens: Callable[[Sequence[ChunkEntry]], int] | None = None,
+) -> List[List[ChunkEntry]]:
     """Stable batches; no semantic filtering and no chunk loss."""
     batches: List[List[ChunkEntry]] = []
     current: List[ChunkEntry] = []
     current_tokens = budget.prompt_reserve
     for chunk in chunks:
         cost = estimate_chunk_tokens(chunk)
+        next_tokens = prompt_tokens(current + [chunk]) if prompt_tokens else current_tokens + cost
         if current and (
-            current_tokens + cost > budget.flush_threshold
-            or len(current) >= budget.max_chunks_per_batch
+            next_tokens > budget.flush_threshold
+            or (budget.max_chunks_per_batch is not None and len(current) >= budget.max_chunks_per_batch)
         ):
             batches.append(current)
             current, current_tokens = [], budget.prompt_reserve

@@ -232,8 +232,8 @@ not a sustained-QPS guarantee.
 | Preset | Source loop | Rerank/eval behavior | Intended use |
 | --- | --- | --- | --- |
 | `lite` | One loop | No final eval layer; Feishu uses the narrow MCP/block path | Low-latency exploration |
-| `balanced` | One loop | Feishu post-I/O rerank; rule final selection | Default production trade-off |
-| `deep_dive` | Up to two loops | Feishu rerank; source plan-eval loop; LLM-tool final eval only when more than one source is active | Ambiguous or broad retrieval |
+| `balanced` | Feishu up to 3, Bailian up to 2, Google 1 | Feishu and Google post-I/O rerank; rule final selection | Default trade-off |
+| `deep_dive` | Feishu up to 2, Bailian up to 3, Google 1 | Source plan-eval loop where enabled; LLM-tool final eval only when more than one source is active | Ambiguous or broad retrieval |
 
 All presets still retain source-level planning and evidence admission. “No final
 eval layer” does not mean “no planner/eval-model call anywhere in the source
@@ -258,6 +258,27 @@ available even when semantic expansion is disabled.
 控制语义候选是否参与 planner，不是总开关。
 
 ## Release E2E check / 发布前 E2E
+
+For the Web ADK acceptance run:
+
+```powershell
+adk web adk_agents --host 127.0.0.1 --port 8788
+python scripts/verify_feishu_release_e2e.py --preset balanced --source-timeout-s 120
+```
+
+The Web workflow gives retrieval a 200-second deadline and answering a separate 120-second deadline.
+Use the chat for progress and State for the complete evidence handoff. If Feishu
+authorization is required, follow the link in the Web session and resend the
+query after the callback. The server picks up the new credential on that turn.
+
+To inspect the fixed three-round, no-result, rerank fallback, and phase-timeout
+cases without Feishu or DeepSeek, run the local fixture separately:
+
+```powershell
+adk web tests/adk_web_fixtures --host 127.0.0.1 --port 8789
+```
+
+Send `三轮`, `无结果`, `降级`, `检索超时`, or `回答超时` in the fixture app.
 
 Run the body-free Feishu-only smoke check after configuring local credentials:
 

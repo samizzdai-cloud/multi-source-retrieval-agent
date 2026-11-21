@@ -27,17 +27,24 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
-# ── 构建完整的 SequentialAgent（RetrieveAgent → AnswerAgent）──
-from google.adk.agents import SequentialAgent  # noqa: E402
+# ── 构建 Web 调试工作流（RetrieveAgent → AnswerAgent）──
 from answer_agent import answer_agent  # noqa: E402
-from root_agent_config import build_root_retrieve_agent  # noqa: E402
+from root_agent_config import _positive_float_env, build_root_retrieve_agent, load_project_env  # noqa: E402
+from web_retrieval_workflow import WebRetrievalWorkflow  # noqa: E402
 
 
-_retrieve_agent = build_root_retrieve_agent(name="retrieve_v1")
+load_project_env()
+_retrieve_timeout = _positive_float_env("RAG_WEB_RETRIEVE_TIMEOUT_S", 200.0)
+_retrieve_agent = build_root_retrieve_agent(
+    name="retrieve_v1", web_timeout_s=_retrieve_timeout, defer_feishu_oauth=True,
+)
 
 # ADK Web 要求的导出变量
-root_agent = SequentialAgent(
+root_agent = WebRetrievalWorkflow(
     name="context_rag_agent_v1",
     description="多源并行检索 + 知识问答 Agent (v1, spec_plan v1)",
     sub_agents=[_retrieve_agent, answer_agent],
+    retrieve_timeout_s=_retrieve_timeout,
+    answer_timeout_s=_positive_float_env("RAG_WEB_ANSWER_TIMEOUT_S", 120.0),
+    manage_feishu_oauth=True,
 )

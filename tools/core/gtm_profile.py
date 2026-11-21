@@ -167,8 +167,16 @@ class GTMProfileRepository:
             for eid, name, kind in db.execute(
                 "SELECT id,name,kind FROM entity WHERE scope=? AND status='active'", (self.scope,),
             ):
-                aliases = [row[0] for row in db.execute("SELECT alias FROM entity_alias WHERE entity_id=?", (eid,))]
-                if normalize(name) in q or any(normalize(alias) in q for alias in aliases):
+                aliases = [row[0] for row in db.execute(
+                    "SELECT alias FROM entity_alias WHERE entity_id=? ORDER BY id", (eid,),
+                )]
+                forms = [normalize(form) for form in (name, *aliases)]
+                if kind == "product":
+                    matched = any(re.search(r"(?<![a-z0-9])" + re.escape(form) + r"(?![a-z0-9])", q)
+                                  for form in forms if form)
+                else:
+                    matched = any(form and form in q for form in forms)
+                if matched:
                     entities.append({"id": int(eid), "name": name, "kind": kind, "aliases": aliases[:2]})
             expressions = []
             # FTS narrows candidates, then exact lexical checks prevent broad semantic expansion.
@@ -177,7 +185,9 @@ class GTMProfileRepository:
             # malformed user query must never prevent retrieval planning.
             fts_terms = [token for token in re.findall(r"[^\W_]+", q, flags=re.UNICODE) if len(token) > 1]
             fts_query = " OR ".join(f'"{token.replace(chr(34), chr(34) * 2)}"' for token in fts_terms)
-            if fts_query:
+            # unicode61 does not segment adjacent Han text. Exact lexical
+            # matching must still find terms inside natural Chinese sentences.
+            if fts_query and not re.search(r"[\u3400-\u9fff]", q):
                 try:
                     rows = db.execute(
                         "SELECT e.id,f.name,f.variants FROM expression_fts f "
@@ -197,6 +207,7 @@ class GTMProfileRepository:
                 variants = [v for v in raw_variants.split("|") if v]
                 if normalize(name) in q or any(normalize(v) in q for v in variants):
                     expressions.append({"id": int(expression_id), "name": name, "variants": variants[:2]})
+        entities.sort(key=lambda entity: entity["kind"] != "product")
         return MemoryPack(entities[:3], expressions[:3])
 
     def resolve(self, query: str, config: Any, *, resolution_id: str = "") -> ProfileResolution:
@@ -241,6 +252,10 @@ class GTMProfileRepository:
                     instruct=str(getattr(config, "instruct", base.instruct)),
                     endpoint=base.endpoint,
                 )
+                from tools.core.retrieval_progress import report_progress
+
+                if packages:
+                    report_progress("正在加载业务理解profile...")
                 results = rerank_documents(
                     query, packages, settings=settings,
                     top_n=min(int(getattr(config, "top_n", 8)), len(packages)),
@@ -352,6 +367,27 @@ class GTMProfileRepository:
         if _SKU.search(value) or norm in _GENERIC or not norm:
             return False
         return True
+
+    def add_reviewed_product_alias(self, product_name: str, alias: str) -> bool:
+        """Register an explicitly reviewed alias without widening autonomous patch policy."""
+        alias = alias.strip()
+        normalized = normalize(alias)
+        if not 2 <= len(alias) <= 80 or not normalized or normalized in _GENERIC:
+            return False
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            entity = db.execute(
+                "SELECT id FROM entity WHERE scope=? AND normalized=? AND kind='product' AND status='active'",
+                (self.scope, normalize(product_name)),
+            ).fetchone()
+            if entity is None or db.execute(
+                "SELECT 1 FROM entity WHERE normalized=? UNION ALL "
+                "SELECT 1 FROM entity_alias WHERE normalized=? LIMIT 1", (normalized, normalized),
+            ).fetchone():
+                return False
+            db.execute("INSERT INTO entity_alias(entity_id,alias,normalized) VALUES(?,?,?)",
+                       (entity[0], alias, normalized))
+            return True
 
     def apply_patch(self, patch: Mapping[str, object], *, trace_supported: bool = False) -> bool:
         if not self.validate_patch(patch, trace_supported=trace_supported):

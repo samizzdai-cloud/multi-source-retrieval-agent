@@ -141,8 +141,7 @@ class FocusBoard:
                 focus_tiers = provisional.items()
             else:
                 tier = getattr(c, "tier", None)
-                answered = list(metadata.get("answered_focuses") or [])
-                focus_ids = answered or list(getattr(c, "target_focuses", set()) or set())
+                focus_ids = metadata.get("answered_focuses", getattr(c, "target_focuses", ())) or ()
                 focus_tiers = ((fid, tier) for fid in focus_ids)
             for fid, tier in focus_tiers:
                 if fid not in self._states or tier not in ("critical", "important", "noise"):

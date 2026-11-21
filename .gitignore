@@ -67,3 +67,56 @@ tests/artifacts/release_e2e/
 docs/temp_plan.md
 spec_plan.md
 
+# Local scratch files and process logs (keep synthetic fixtures/source code).
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# Private runtime databases, including SQLite journal sidecars.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3-journal
+
+# Local agent/editor state and machine-specific launch tasks.
+/.agents/
+/.codex/
+/.qoder/
+/.zcode/
+/.vscode/tasks.json
+
+# Internal plans, implementation designs and real-business evaluation reports.
+# Adding tracked files here does NOT untrack them; see the private cleanup inventory.
+/plan.md
+/optimize_search.py
+/eval_preset_bench.py
+/docs/private/
+/docs/deepseek_migration_spec.md
+/docs/eval_requirements.md
+/docs/eval_tuning_guide.md
+/docs/feishu_tool_spec.md
+/docs/google_agent_spec.md
+/docs/p1_native_order_refactor_checklist.md
+/docs/profile_on_off_comparison.md
+/docs/profile_trace_construction_spec.md
+/google_workspace_tool/to_read/
+
+# Local evaluation inputs must stay separate from the sanitized *.example files.
+/eval/eval_queries.json
+/eval/feishu_test_cases.yaml
+/eval/google_test_cases.yaml
+/eval/private/
+/tests/fixtures/private/
+*.private.json
+*.private.yaml
+

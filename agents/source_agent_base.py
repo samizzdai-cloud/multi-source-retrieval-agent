@@ -25,6 +25,7 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Coroutine, Dict, List, Optional
@@ -45,9 +46,10 @@ from tools.core.llm_contracts import (
     tiers_list_to_map,
     validate_plan_eval_output,
 )
-from tools.core.context_budget import ContextBudget, estimate_chunk_tokens, prompt_preview_text, split_chunks
-from tools.core.models import ChunkEntry, SourceAgentConfig
+from tools.core.context_budget import ContextBudget, estimate_tokens, prompt_preview_text, split_chunks
+from tools.core.models import ChunkEntry, PlannedSubQuery, SourceAgentConfig
 from tools.core.rerank import RerankError, RerankSettings, RerankWallTimeout, rerank_items, select_ranked_ids
+from tools.core.retrieval_progress import progress_sink, report_progress, retrieval_deadline
 from tools.core.source_profiles import SourceProfile
 from tools.core.evidence_role_funnel import current as current_role_funnel
 
@@ -61,11 +63,13 @@ ExecuteFn = Callable[[str, str], Coroutine[Any, Any, List[ChunkEntry]]]
 
 @dataclass
 class Focus:
-    """全局 planner 产出的单个 focus 维度（v2 精简：只带路由，不带专业 hints）。
+    """可独立验收的研究任务，保留研究目标、对象、时间、范围和证据需求。
+
+    可按研究方向、逻辑维度、业务、品牌或产品拆分；多源共享时语义稳定。
 
     ``targets``: dispatcher 读该字段决定往哪些源派活；SourceAgent 内部忽略。
-    其余专业参数（tags / indexes / time_filter）由各 SourceAgent 的 plan_only
-    LLM 根据 focus.text 自行产出，不在 Focus 里承载。
+    源专属参数由 Global Planner 的 sub_queries 经 runner 翻译，或由
+    plan_only / source_plan_eval 规划，不在 Focus 里承载。
     """
     focus_id: str
     text: str
@@ -100,6 +104,23 @@ class SubQuery:
     variant_origin_ids: Dict[str, int] = field(default_factory=dict)
 
 
+def _report_focus_status(
+    source: str, loop_n: int, focuses: List[Focus], statuses: Dict[str, str],
+    replan: List[SubQuery] | None = None,
+) -> None:
+    if progress_sink.get() is None:
+        return
+    labels = {"covered": "已满足", "gap": "有缺口", "insufficient": "证据不足"}
+    covered_count = sum(statuses.get(f.focus_id) == "covered" for f in focuses)
+    lines = [f"{source} · 第 {loop_n} 轮评估：已满足 {covered_count}/{len(focuses)} 项 Focus", ""]
+    lines.extend(f"- {f.focus_id}：{labels.get(statuses.get(f.focus_id), '未判定')}" for f in focuses)
+    if replan:
+        scheduled_focuses = {sq.target_focus for sq in replan}
+        lines.extend(["", f"第 {loop_n + 1} 轮续查"])
+        lines.extend(f"- {f.focus_id} · {f.text}" for f in focuses if f.focus_id in scheduled_focuses)
+    report_progress("\n".join(lines))
+
+
 @dataclass(frozen=True)
 class ChunkRefRegistry:
     """Request-local LLM references; canonical IDs never enter an eval prompt."""
@@ -128,6 +149,8 @@ class ChunkRefRegistry:
         out = dict(payload or {})
         malformed = 0
         raw_top = out.get("top_k_chunk_ids") or []
+        if not isinstance(raw_top, list):
+            raw_top, malformed = [], malformed + 1
         top_ids: List[str] = []
         for value in raw_top:
             ref = value.get("chunk_id") if isinstance(value, dict) else value
@@ -282,22 +305,26 @@ async def _run_llm_agent(
     )
 
     final_text: Optional[str] = None
+    finish_reason = ""
     async for event in runner.run_async(
         user_id=user_id, session_id=session.id, new_message=content,
     ):
         if event.author != agent.name:
             continue
+        if event.finish_reason:
+            finish_reason = str(event.finish_reason)
         if not event.content or not event.content.parts:
             continue
         for part in event.content.parts:
             if part.text:
                 final_text = part.text
 
-    if not final_text:
+    if not final_text or not final_text.strip():
+        logger.warning("LlmAgent %s output=blank finish_reason=%s", agent.name, finish_reason)
         raise RuntimeError(f"LlmAgent {agent.name} returned no text output")
 
     try:
-        return json.loads(final_text)
+        payload = json.loads(final_text)
     except json.JSONDecodeError as e:
         # max_output_tokens 触顶时 LLM 输出常截断在数组中段，触发
         # "Unterminated string" / "Expecting value"。先尝试修复——尽量恢复已完整的
@@ -311,11 +338,14 @@ async def _run_llm_agent(
             return repaired
         # Model output can contain retrieved text. Operational artifacts retain
         # only typed failure metadata, never the malformed provider body.
-        logger.error(
-            "LlmAgent %s JSON parse failed: %s (response_chars=%d)",
-            agent.name, e, len(final_text),
-        )
+        category = "truncated" if finish_reason.upper().endswith(("MAX_TOKENS", "LENGTH")) else "json_syntax"
+        logger.error("LlmAgent %s output=%s finish_reason=%s response_chars=%d",
+                     agent.name, category, finish_reason, len(final_text))
         raise
+    if not isinstance(payload, dict):
+        logger.warning("LlmAgent %s output=schema_error finish_reason=%s", agent.name, finish_reason)
+        raise ValueError(f"LlmAgent {agent.name} returned a non-object JSON result")
+    return payload
 
 
 def _repair_truncated_json(raw: str) -> Optional[Dict[str, Any]]:
@@ -354,7 +384,7 @@ def _repair_truncated_json(raw: str) -> Optional[Dict[str, Any]]:
         pos = m.end()
     if not recovered_ids:
         return None
-    return {"top_k_chunk_ids": recovered_ids, "tiers": [], "decision": "stop"}
+    return {"top_k_chunk_ids": recovered_ids, "tiers": []}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -372,7 +402,7 @@ def _profile_eval_block(profile_resolution: object | None) -> str:
     expressions = getattr(profile_resolution, "exact_expression_matches", ()) or ()
     if not entities and not expressions:
         return ""
-    lines = ["Profile-known terms (treat chunks containing these with higher relevance):"]
+    lines = ["Profile vocabulary helps identify entities only; judge business evidence from the text and period:"]
     for e in entities:
         name = e.get("name", "")
         aliases = e.get("aliases", [])[:2]
@@ -486,6 +516,7 @@ def _build_plan_only_prompt(
     source_top_k: int,
     extra_rules_block: str = "",
     sq_budget_override: Optional[int] = None,
+    queries_per_focus: Optional[int] = None,
 ) -> str:
     """拼 plan_only 用户消息。``extra_rules_block`` 供子类注入源专业规则。"""
     sq_budget = (
@@ -501,6 +532,8 @@ def _build_plan_only_prompt(
         f"source_top_k: {source_top_k}",
         f"sub_query_total_cap: {sq_budget}  (sub_queries 总数不得超过该上限)",
     ]
+    if queries_per_focus is not None:
+        parts.append(f"queries_per_focus_limit: {queries_per_focus}")
     if extra_rules_block:
         parts.append(f"source_query_rules_block:\n{extra_rules_block}")
     return "\n\n".join(parts)
@@ -523,6 +556,9 @@ def _build_eval_only_prompt(
         "supply raw data; interpretive/analysis chunks supply diagnosis and conclusions. "
         "When the Focus asks for judgment or diagnosis, retain at least one interpretive "
         "chunk where one exists; it is not redundant with a data table about the same topic. "
+        "A Focus is a retrieval subtask: assess its requested information. A request for new "
+        "recommendations does not require an existing final recommendation or past experiment result; "
+        "the AnswerAgent can synthesize from verified facts, constraints and methods. "
         "(3) Refinement — among same-entity same-level chunks, prefer the one most directly "
         "focused on the Focus question.\n\n"
         f"chunks_block:\n{_chunks_block(chunks, focuses=focuses, refs=refs)}\n\n"
@@ -631,11 +667,14 @@ def _build_plan_eval_prompt(
     partial_ledgers: Optional[List[Dict[str, Any]]] = None,
     refs: Optional[ChunkRefRegistry] = None,
     profile_resolution: object | None = None,
+    attempted_queries: Optional[List[Dict[str, Any]]] = None,
+    time_available: Optional[bool] = None,
+    queries_per_focus: Optional[int] = None,
+    source_query_rules: str = "",
 ) -> str:
     """构建 plan_eval 用户消息。
 
-    focus_status 经 ``_slim_focus_status_for_prompt`` 裁剪后注入——只让 LLM
-    看到"是否已被别源覆盖"与"哪些源贡献过"，**不**暴露 quota 计数。
+    Evidence and prior queries share the current request's Focus IDs.
     """
     profile_block = _profile_eval_block(profile_resolution)
     parts = [
@@ -649,6 +688,13 @@ def _build_plan_eval_prompt(
         f"loop_info: loop_n={loop_n}, min_loops={min_loops}, max_loops={max_loops}",
         f"source_top_k: {source_top_k}",
     ]
+    if attempted_queries is not None:
+        parts.append("attempted_queries_block:\n" + json.dumps(attempted_queries, ensure_ascii=False))
+        parts.append(f"next_round_budget_available: {str(loop_n < max_loops and time_available is not False).lower()}")
+    if queries_per_focus is not None:
+        parts.append(f"replan_queries_per_focus_limit: {queries_per_focus}")
+    if source_query_rules:
+        parts.append(f"source_query_rules_block:\n{source_query_rules}")
     parts.append(
         "Evidence analysis framework — apply these three checks before selecting top-K:\n"
         "1. Entity alignment: does this chunk describe the exact entity/channel/product that "
@@ -659,17 +705,21 @@ def _build_plan_eval_prompt(
         "2. Cognitive level: does the Focus ask for facts (what happened) or for judgment "
         "(why / whether to act / what to do)? Factual/metric chunks supply raw data — they can "
         "satisfy a facts-only Focus. When the Focus requires judgment or diagnosis, factual "
-        "chunks are a necessary premise but cannot substitute for interpretive/analysis chunks "
-        "that interpret those facts and form a conclusion. They occupy different positions "
-        "in the reasoning chain and are not redundant with one another.\n"
+        "and interpretive chunks support different requested aspects. Require an existing diagnosis "
+        "only when this retrieval Focus explicitly asks to find it. For newly requested advice, "
+        "verified facts, constraints and applicable methods are inputs for AnswerAgent synthesis; "
+        "do not add a requirement for a pre-written final answer or prior experiment effects.\n"
         "3. Evidence-chain refinement: when several chunks target the same entity at the same "
         "cognitive level, prefer the one most directly focused on the Focus question — the one "
         "that has already synthesised, filtered, or interpreted toward a conclusion, rather "
         "than the broadest or most data-dense overview. A narrower, conclusion-oriented chunk "
         "often carries more evidentiary weight than a wider survey.\n"
         "Coverage rule: mark a Focus covered only when the retained chunks jointly satisfy "
-        "every distinct requirement stated in that Focus, including both factual premises and "
-        "judgment-level conclusions where the Focus demands them. A count of critical/important "
+        "every mandatory requirement stated in that Focus (labelled 【必须项】 when provided). "
+        "【可选补充】 is non-blocking: its absence must not create a gap or justify another retrieval round. "
+        "If labels are absent, follow the actual user-required information without inventing extra requirements. "
+        "Preserve the user's object "
+        "and period; only require existing judgment-level conclusions when explicitly requested. A count of critical/important "
         "chunks or a top-K limit never proves coverage."
     )
     if partial_ledgers:
@@ -769,8 +819,6 @@ class SourceAgent:
         self.partial_eval = self._build_partial_eval_agent()
         self._partial_ledgers: List[Dict[str, Any]] = []
         self._partial_pending_tasks: List[asyncio.Task[Dict[str, Any]]] = []
-        self._partial_buffer_ids: List[str] = []
-        self._partial_buffer_tokens: int = 0
         self._partial_submitted_ids: set[str] = set()
         self._partial_generation: int = 0
         self._execute_fn = execute_fn
@@ -806,6 +854,7 @@ class SourceAgent:
     async def drain_inflight(self, timeout_s: float = 10.0) -> int:
         """Bound cancellation drain for synchronous source I/O."""
         pending = [future for future in self._inflight_futures if not future.done()]
+        pending.extend(task for task in getattr(self, "_partial_pending_tasks", []) if not task.done())
         if not pending:
             return 0
         _done, remaining = await asyncio.wait(pending, timeout=max(0.0, timeout_s))
@@ -873,6 +922,8 @@ class SourceAgent:
         由 global_planner 直接决定。仅在 ``_plan_via_plan_only_llm``（v1 fallback
         与 per-focus replan 兜底）链路使用。
         """
+        if self.cfg.sub_queries_per_focus is not None:
+            return n_focuses * self.cfg.sub_queries_per_focus
         return _sub_query_budget(n_focuses, self.cfg.source_top_k)
 
     # ── 子类覆写点：注入源专业规则到 plan_only prompt ────────────
@@ -900,8 +951,30 @@ class SourceAgent:
         _ = focuses
         return sub_queries
 
+    def _limit_queries_per_focus(self, queries: List[SubQuery]) -> List[SubQuery]:
+        limit = self.cfg.sub_queries_per_focus
+        if limit is None:
+            return queries
+        counts: Dict[str, int] = {}
+        kept = []
+        for query in queries:
+            count = counts.get(query.target_focus, 0)
+            if count < limit:
+                kept.append(query)
+                counts[query.target_focus] = count + 1
+        if len(kept) != len(queries):
+            self._trace_events.append({
+                "event": "query_budget_applied", "source": self.source,
+                "input_count": len(queries), "retained_count": len(kept), "per_focus_limit": limit,
+            })
+        return kept
+
     def _assign_sub_query_ids(self, sub_queries: List[SubQuery]) -> List[SubQuery]:
         """为运行时 sub_queries 分配稳定的本地 id。"""
+        for sq in sub_queries:
+            prefix, _, sequence = sq.sub_query_id.rpartition(":sq")
+            if prefix == f"{self.source}:{sq.target_focus}" and sequence.isdecimal():
+                self._sub_query_seq = max(self._sub_query_seq, int(sequence))
         for sq in sub_queries:
             if sq.sub_query_id:
                 continue
@@ -925,7 +998,9 @@ class SourceAgent:
             focuses, self.profile, self.cfg.source_top_k,
             extra_rules_block=self._source_query_rules_block(),
             sq_budget_override=self._compute_sub_query_total_cap(len(focuses)),
+            queries_per_focus=self.cfg.sub_queries_per_focus,
         )
+        report_progress(f"{self.source} · 补充规划 {len(focuses)} 项 Focus（plan_only）")
         out = await _run_llm_agent(self.plan_only, prompt)
         return [
             SubQuery(
@@ -986,7 +1061,8 @@ class SourceAgent:
         self._trace_events.extend({
             "event": "query", "source": self.source, "focus": sq.target_focus,
             "query_id": sq.sub_query_id, "query_type": sq.query_type,
-            "api_query": sq.query,
+            "api_query": sq.query, "loop": 1,
+            "time_filter": sq.time_filter, "author_filter": sq.author_filter,
         } for sq in sub_queries)
         return sub_queries
 
@@ -1015,14 +1091,15 @@ class SourceAgent:
         self._sub_query_seq = 0
         self._partial_ledgers = []
         self._partial_pending_tasks = []
-        self._partial_buffer_ids = []
-        self._partial_buffer_tokens = 0
         self._partial_submitted_ids = set()
         self._partial_generation = 0
         self._trace_events = []
+        self._reset_run_state()
         # Multi-focus 动态 effective top_k：本源被路由到 N 个 focus 时，扩容到 base+(N-1)*2，
         # 保证 eval_only / plan_eval 有足够预算给每个 focus 留至少 1 个名额。
         self._effective_source_top_k = effective_source_top_k(self.cfg.source_top_k, len(focuses))
+        if self.cfg.source_top_k_limit is not None:
+            self._effective_source_top_k = min(self._effective_source_top_k, self.cfg.source_top_k_limit)
         if self._effective_source_top_k != self.cfg.source_top_k:
             logger.info(
                 "[%s] effective_source_top_k: base=%d n_focuses=%d → effective=%d",
@@ -1090,6 +1167,14 @@ class SourceAgent:
             observer.observe_chunks("source_retained", result.top_chunks)
         return result
 
+    def _reset_run_state(self) -> None:
+        """Reset source-specific request delivery state."""
+
+    async def _collect_late_evidence(
+        self, chunk_pool: Dict[str, ChunkEntry], *, loop_n: int, wait_for_pending: bool = False,
+    ) -> bool:
+        return False
+
     # ── 单 loop 路径：plan(pre_planned + replan / 老 LLM) → execute → eval_only ─
     async def _run_single_loop(
         self,
@@ -1108,12 +1193,13 @@ class SourceAgent:
         )
         if not sub_queries:
             logger.warning("[%s] produced 0 sub_queries", self.source)
-            return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
+            return SourceAgentResult(self.source, [], loops_used=0, elapsed_s=0.0)
 
         logger.info("[%s] plan produced %d sub_queries", self.source, len(sub_queries))
 
         # B. execute（并发跑所有 sub_query）
-        await self._execute_batch(sub_queries, chunk_pool, loop_n=1)
+        await self._execute_round(sub_queries, chunk_pool, loop_n=1)
+        await self._collect_late_evidence(chunk_pool, loop_n=1, wait_for_pending=not bool(chunk_pool))
         await self._rerank_new_chunks(focuses, chunk_pool, loop_n=1)
         await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=1)
 
@@ -1139,10 +1225,11 @@ class SourceAgent:
         """多 loop 检索路径（spec §2.4）。
 
         - loop_n=1: plan_only 产出首轮 sub_queries → execute
-        - loop_n=2..: plan_eval 判 continue/stop
+        - 每轮检索后: plan_eval 判 continue/stop
             - continue: 用 replan_queries 再跑一轮 execute
             - stop: 用 plan_eval 返回的 top_k_chunk_ids + tiers 组装结果；
               若返回为空则兜底跑 eval_only
+        - 飞书已派发但未观察到候选的 Focus 可以执行一次有界的短词续查
         - loop_n == max_loops: 强制 stop；若 plan_eval 未给 top_k → 兜底跑 eval_only
         """
         min_loops, max_loops = self.cfg.min_loops, self.cfg.max_loops
@@ -1156,20 +1243,26 @@ class SourceAgent:
         )
         if not sub_queries:
             logger.warning("[%s] loop=1 produced 0 sub_queries", self.source)
-            return SourceAgentResult(self.source, [], loops_used=1, elapsed_s=0.0)
+            return SourceAgentResult(self.source, [], loops_used=0, elapsed_s=0.0)
         logger.info("[%s] loop=1 plan produced %d sub_queries", self.source, len(sub_queries))
-        await self._execute_batch(sub_queries, chunk_pool)
+        await self._execute_round(sub_queries, chunk_pool, loop_n=1)
         await self._rerank_new_chunks(focuses, chunk_pool, loop_n=1)
         await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=1)
 
         loop_n = 1
+        is_feishu = self.source == "feishu"
+        attempted_queries = list(sub_queries)
+        recovered_focuses: set[str] = set()
 
-        # loop 2..max_loops: plan_eval（中间轮决策）
-        while loop_n < max_loops:
-            loop_n += 1
-
-            if not chunk_pool and not self._partial_ledgers:
+        # loop_n counts executed retrieval rounds, including the initial batch.
+        while loop_n <= max_loops:
+            if await self._collect_late_evidence(chunk_pool, loop_n=loop_n, wait_for_pending=not bool(chunk_pool)):
+                await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
+                await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
+            has_evidence = bool(chunk_pool or self._partial_ledgers)
+            if not has_evidence and not is_feishu:
                 logger.warning("[%s] loop=%d chunk_pool empty without partial evidence state → stop early", self.source, loop_n)
+                _report_focus_status(self.source, loop_n, focuses, {f.focus_id: "insufficient" for f in focuses})
                 break
 
             board = getattr(self, "_focus_board", None)
@@ -1180,6 +1273,8 @@ class SourceAgent:
             )
 
             registry = ChunkRefRegistry.build(list(chunk_pool.values()))
+            deadline = retrieval_deadline.get()
+            query_history = self._feishu_query_history() if is_feishu else None
             pe_prompt = _build_plan_eval_prompt(
                 focuses, list(chunk_pool.values()),
                 loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
@@ -1187,14 +1282,34 @@ class SourceAgent:
                 partial_ledgers=self._partial_ledgers,
                 refs=registry,
                 profile_resolution=getattr(self, "_profile_resolution", None),
+                attempted_queries=query_history,
+                time_available=deadline is None or asyncio.get_running_loop().time() < deadline,
+                queries_per_focus=self.cfg.sub_queries_per_focus,
+                source_query_rules=self._source_query_rules_block(),
             )
+            if self._request_token_estimate(self.plan_eval, pe_prompt) > self._context_budget().usable_tokens:
+                shortlisted = await self._eval_only_snapshot(focuses, chunk_pool)
+                registry = ChunkRefRegistry.build(shortlisted)
+                pe_prompt = _build_plan_eval_prompt(
+                    focuses, shortlisted, loop_n=loop_n, min_loops=min_loops, max_loops=max_loops,
+                    source_top_k=self._effective_source_top_k, partial_ledgers=self._partial_ledgers,
+                    refs=registry, profile_resolution=getattr(self, "_profile_resolution", None),
+                    attempted_queries=query_history,
+                    time_available=deadline is None or asyncio.get_running_loop().time() < deadline,
+                    queries_per_focus=self.cfg.sub_queries_per_focus,
+                    source_query_rules=self._source_query_rules_block(),
+                )
             plan_eval_started = time.perf_counter()
-            self._trace_events.append({
-                "event": "plan_eval_started", "source": self.source,
-                "loop": loop_n, "active_chunk_count": len(chunk_pool),
-            })
             try:
-                pe_out = await _run_llm_agent(self.plan_eval, pe_prompt)
+                if has_evidence:
+                    self._trace_events.append({
+                        "event": "plan_eval_started", "source": self.source,
+                        "loop": loop_n, "active_chunk_count": len(chunk_pool),
+                    })
+                    report_progress(f"{self.source} · 检查证据是否充分，并筛选证据链…（source_plan_eval）")
+                    pe_out = await self._invoke_eval(self.plan_eval, pe_prompt)
+                else:
+                    pe_out = {}
             except Exception as exc:
                 # A plan-eval outage must not discard already-read evidence.
                 # Final eval_only retains the active pool and leaves a compact
@@ -1206,15 +1321,67 @@ class SourceAgent:
                     "loop": loop_n, "error_type": type(exc).__name__,
                     "elapsed_ms": round((time.perf_counter() - plan_eval_started) * 1000.0, 1),
                 })
+                _report_focus_status(self.source, loop_n, focuses, {})
                 break
             pe_out, malformed_refs = registry.resolve_eval_output(pe_out)
             if malformed_refs:
                 self._trace_events.append({"event": "eval_contract_error", "source": self.source,
                                            "loop": loop_n, "malformed_chunk_refs": malformed_refs})
                 logger.warning("[%s] loop=%d rejected %d malformed LLM chunk refs", self.source, loop_n, malformed_refs)
-            pe_out = validate_plan_eval_output(pe_out)
+            raw_replans = pe_out.get("replan_queries")
+            valid_replans = []
+            rejected_replans = 0
+            if raw_replans is not None and not isinstance(raw_replans, list):
+                rejected_replans = 1
+            for item in raw_replans if isinstance(raw_replans, list) else []:
+                if not isinstance(item, dict):
+                    rejected_replans += 1
+                    continue
+                query = item.get("query")
+                focus_id = item.get("target_focus") or item.get("focus_id")
+                if not isinstance(query, str) or not query.strip() or not isinstance(focus_id, str) or focus_id not in targeted_fids:
+                    rejected_replans += 1
+                    continue
+                valid_replans.append({**item, "query": query.strip(), "target_focus": focus_id})
+            if rejected_replans:
+                self._trace_events.append({
+                    "event": "plan_eval_contract_error", "source": self.source,
+                    "loop": loop_n, "rejected_replan_queries": rejected_replans,
+                })
+            model_decision = pe_out.get("decision")
+            if model_decision == "continue" and not valid_replans:
+                self._trace_events.append({
+                    "event": "plan_eval_contract_error", "source": self.source, "loop": loop_n,
+                    "error_type": "continue_without_executable_replan", "raw_decision": model_decision,
+                })
+            pe_out["replan_queries"] = valid_replans
+            pe_out = validate_plan_eval_output(pe_out, structured_coverage=is_feishu)
+            focus_statuses = {
+                item["focus_id"]: item["status"] for item in pe_out["focus_decisions"]
+                if isinstance(item.get("focus_id"), str) and item["focus_id"] in targeted_fids
+            }
+            if is_feishu:
+                zero_candidates = self._zero_candidate_focuses(attempted_queries, chunk_pool)
+                for focus_id in zero_candidates - focus_statuses.keys():
+                    focus_statuses[focus_id] = "insufficient"
+                    pe_out["focus_decisions"].append({
+                        "focus_id": focus_id, "status": "insufficient", "gap_type": "query_refinement",
+                        "reason": "no document or evidence observed for this dispatched Focus",
+                    })
 
             judgments = tiers_list_to_map(pe_out.get("tiers"))
+            if is_feishu:
+                for chunk_id, judgment in judgments.items():
+                    chunk = chunk_pool.get(chunk_id)
+                    if chunk is None:
+                        continue
+                    self._trace_events.append({
+                        "event": "plan_eval_query_judgment", "source": self.source, "loop": loop_n,
+                        "chunk_id": chunk_id, "tier": judgment["tier"],
+                        "answered_focuses": judgment["answered_focuses"],
+                        "query_ids": (chunk.metadata or {}).get("sub_query_ids")
+                        or (chunk.metadata or {}).get("selected_sub_query_ids") or [],
+                    })
             # Explicit noise without focus coverage is trace-only.  It can be
             # pruned before a *continue* replan, but must remain addressable
             # until a same-turn stop response has consumed its top_k contract.
@@ -1227,10 +1394,9 @@ class SourceAgent:
                 and cid in chunk_pool
             ]
 
-            raw_decision = pe_out.get("decision", "stop")
-            decision = enforce_loop_bounds(raw_decision, loop_n, min_loops, max_loops)
+            decision = enforce_loop_bounds(pe_out.get("decision", "stop"), loop_n, min_loops, max_loops)
             forced_stop_by_io_gate = bool(
-                self.cfg.allow_focusboard_early_stop
+                not is_feishu and self.cfg.allow_focusboard_early_stop
                 and io_saturated
                 and decision == "continue"
             )
@@ -1239,6 +1405,96 @@ class SourceAgent:
                 # receives a semantic plan_eval; a continue cannot submit a
                 # new query and falls through to eval_only when it has no top-K.
                 decision = "stop"
+
+            replan = []
+            program_replans: set[str] = set()
+            time_available = deadline is None or asyncio.get_running_loop().time() < deadline
+            within_budget = loop_n < max_loops and time_available
+            if is_feishu and within_budget:
+                prior_windows: Dict[str, set[str]] = {}
+                for attempted in attempted_queries:
+                    if attempted.time_filter:
+                        prior_windows.setdefault(attempted.target_focus, set()).add(attempted.time_filter)
+                replan_rows = []
+                for query in valid_replans:
+                    focus_id = query["target_focus"]
+                    if focus_statuses.get(focus_id) not in {"gap", "insufficient"}:
+                        continue
+                    windows = prior_windows.get(focus_id, set())
+                    if not query.get("time_filter") and len(windows) == 1:
+                        query = {**query, "time_filter": next(iter(windows))}
+                    replan_rows.append(query)
+                replan = self._build_replan_queries(replan_rows)
+            elif not is_feishu and decision == "continue":
+                replan = self._build_replan_queries(
+                    q for q in valid_replans
+                    if focus_statuses.get(q["target_focus"]) != "covered"
+                    and (board is None or not board.is_satisfied(q["target_focus"]))
+                )
+            if is_feishu:
+                seen = {self._feishu_query_signature(
+                    row["focus"], row["query"], row["query_type"], row["time_filter"], row["author_filter"],
+                ) for row in (query_history or [])}
+                unique_replan = []
+                for query in replan:
+                    signature = self._feishu_query_signature(
+                        query.target_focus, query.query, query.query_type, query.time_filter, query.author_filter,
+                    )
+                    if signature not in seen:
+                        unique_replan.append(query)
+                        seen.add(signature)
+                replan = self._limit_queries_per_focus(unique_replan)
+                if within_budget:
+                    terminal = {item.get("focus_id") for item in pe_out["focus_decisions"]
+                                if item.get("gap_type") == "upstream_evidence_needed"
+                                and isinstance(item.get("focus_id"), str)}
+                    scheduled = {q.target_focus for q in replan}
+                    for focus in focuses:
+                        fid = focus.focus_id
+                        if (fid not in zero_candidates or fid in scheduled or fid in recovered_focuses
+                                or fid in terminal or focus_statuses.get(fid) == "covered"):
+                            continue
+                        seen_keywords = {key for target, key, *_ in seen if target == fid}
+                        query = self._zero_candidate_recovery(
+                            focus, [q for q in attempted_queries if q.target_focus == fid],
+                            seen_keywords,
+                        )
+                        if query:
+                            replan.append(query)
+                            recovered_focuses.add(fid)
+                            program_replans.add(fid)
+                            self._trace_events.append({
+                                "event": "zero_candidate_recovery", "source": self.source,
+                                "loop": loop_n, "focus": fid, "query_origin": "program",
+                            })
+            decision = "continue" if replan else "stop"
+            if replan:
+                decision_reason = "validated_replan" if model_decision == "continue" else "replan_overrides_model_decision"
+                if program_replans:
+                    decision_reason = "zero_candidate_recovery"
+            elif loop_n >= max_loops:
+                decision_reason = "round_limit"
+            elif is_feishu and not time_available:
+                decision_reason = "time_limit"
+            elif forced_stop_by_io_gate:
+                decision_reason = "focusboard"
+            elif all(focus_statuses.get(fid) == "covered" for fid in targeted_fids):
+                decision_reason = "all_focuses_covered"
+            else:
+                decision_reason = "no_executable_replan"
+
+            if decision == "stop" and await self._collect_late_evidence(
+                chunk_pool, loop_n=loop_n, wait_for_pending=True,
+            ):
+                self._trace_events.append({
+                    "event": "evaluation_snapshot_superseded", "source": self.source,
+                    "loop": loop_n, "stage": "source_plan_eval",
+                    "raw_decision": model_decision, "decision_reason": "late_evidence_arrived",
+                })
+                await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
+                await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
+                continue
+
             removed: List[str] = []
             if decision == "continue":
                 for cid in prunable_noise_ids:
@@ -1249,8 +1505,12 @@ class SourceAgent:
                                 self.source, loop_n, len(removed))
             self._trace_events.append({
                 "event": "plan_eval", "source": self.source, "loop": loop_n,
-                "decision": decision, "raw_decision": raw_decision,
+                "stage": "source_plan_eval", "decision": decision, "raw_decision": model_decision,
+                "decision_reason": decision_reason,
+                "evaluation_skipped": not has_evidence,
+                "model_replan_query_count": len(raw_replans) if isinstance(raw_replans, list) else 0,
                 "replan_query_count": len(pe_out.get("replan_queries") or []),
+                "submitted_replan_query_count": len(replan),
                 "active_chunk_count": len(chunk_pool), "removed_noise_count": len(removed),
                 "io_saturated": io_saturated,
                 "forced_stop_by_io_gate": forced_stop_by_io_gate,
@@ -1260,45 +1520,23 @@ class SourceAgent:
             })
             logger.info(
                 "[%s] loop=%d plan_eval raw=%s enforced=%s",
-                self.source, loop_n, raw_decision, decision,
+                self.source, loop_n, model_decision, decision,
             )
+            _report_focus_status(self.source, loop_n, focuses, focus_statuses, replan)
 
             if decision == "continue":
-                replan = [
-                    SubQuery(
-                        query=q["query"],
-                        target_focus=q["target_focus"],
-                        tags=list(q.get("tags") or []),
-                        indexes=list(q.get("indexes") or []),
-                        time_filter=q.get("time_filter"),
-                        query_type=q.get("query_type"),
-                        google_enable_fulltext=q.get("google_enable_fulltext"),
-                        google_order_by=q.get("google_order_by"),
-                        author_filter=q.get("author_filter"),
-                    )
-                    for q in (pe_out.get("replan_queries") or [])
-                ]
-                # P4: 过滤掉已 satisfied focus 的 replan（即便 LLM 漏读 focus_status）
-                if board is not None:
-                    before_n = len(replan)
-                    replan = [sq for sq in replan if not board.is_satisfied(sq.target_focus)]
-                    if len(replan) < before_n:
-                        logger.info(
-                            "[%s] loop=%d dropped %d replan_queries targeting satisfied focuses",
-                            self.source, loop_n, before_n - len(replan),
-                        )
                 replan = self._assign_sub_query_ids(replan)
-                if not replan:
-                    logger.warning("[%s] loop=%d continue with empty replan → stop", self.source, loop_n)
-                    break
+                loop_n += 1
                 logger.info("[%s] loop=%d replan %d sub_queries", self.source, loop_n, len(replan))
                 self._trace_events.extend({
                     "event": "query", "source": self.source, "loop": loop_n,
                     "focus": sq.target_focus, "query_id": sq.sub_query_id,
                     "query_type": sq.query_type, "api_query": sq.query,
-                    "replan": True,
+                    "time_filter": sq.time_filter, "author_filter": sq.author_filter,
+                    "replan": True, "query_origin": "program" if sq.target_focus in program_replans else "model",
                 } for sq in replan)
-                await self._execute_batch(replan, chunk_pool, loop_n=loop_n)
+                await self._execute_round(replan, chunk_pool, loop_n=loop_n)
+                attempted_queries.extend(replan)
                 await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
                 await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
                 continue
@@ -1365,6 +1603,8 @@ class SourceAgent:
                         "loop": loop_n, "missing_selected_judgments": len(missing_judgments),
                     })
                     break
+                if is_feishu:
+                    top_ids = self._retain_focus_evidence(top_ids, tiers_map, chunk_pool)
                 top_chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
                 self._log_per_focus_tier_distribution(focuses, top_chunks)
                 return SourceAgentResult(self.source, top_chunks, loops_used=loop_n, elapsed_s=0.0)
@@ -1378,8 +1618,145 @@ class SourceAgent:
         top_chunks = await self._eval_only_finalize(focuses, chunk_pool)
         return SourceAgentResult(self.source, top_chunks, loops_used=loop_n, elapsed_s=0.0)
 
+    @staticmethod
+    def _query_key(query: str) -> str:
+        return " ".join(query.casefold().split())
+
+    def _feishu_query_signature(
+        self, focus: Optional[str], query: str, query_type: Optional[str],
+        time_filter: Optional[str], author_filter: Optional[str],
+    ) -> tuple[Optional[str], str, str, str, str]:
+        return (focus, self._query_key(query), query_type or "structured", time_filter or "", author_filter or "")
+
+    def _feishu_query_history(self) -> List[Dict[str, Any]]:
+        candidates: Dict[str, set[str]] = {}
+        query_judgments: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        previous_focus_decisions: Dict[str, Dict[str, Any]] = {}
+        for event in self._trace_events:
+            if event.get("event") == "candidate" and event.get("document_id"):
+                candidates.setdefault(event.get("query_id"), set()).add(event["document_id"])
+            elif event.get("event") == "plan_eval_query_judgment":
+                for query_id in event["query_ids"]:
+                    query_judgments.setdefault(query_id, {})[event["chunk_id"]] = event
+            elif event.get("event") == "plan_eval":
+                previous_focus_decisions = {row["focus_id"]: row for row in event["focus_decisions"]
+                                            if isinstance(row.get("focus_id"), str)}
+        return [{
+            "focus": event.get("focus"), "query": event["api_query"],
+            "loop": event.get("loop"), "query_type": event.get("query_type"),
+            "time_filter": event.get("time_filter"), "author_filter": event.get("author_filter"),
+            # The connector aggregates candidates by planned query; variants can share that ID.
+            "query_group_candidate_documents": len(candidates.get(event.get("query_id"), ())),
+            "query_group_judged_chunks": len(query_judgments.get(event.get("query_id"), {})),
+            "query_group_supporting_chunks": sum(
+                row["tier"] in {"critical", "important"} and event.get("focus") in row["answered_focuses"]
+                for row in query_judgments.get(event.get("query_id"), {}).values()
+            ),
+            "previous_focus_assessment": str(previous_focus_decisions.get(event.get("focus"), {}).get("reason") or "")[:320],
+        } for event in self._trace_events
+            if event.get("event") in {"query", "source_fallback", "profile_fallback"}
+            and isinstance(event.get("api_query"), str)]
+
+    def _retain_focus_evidence(
+        self, top_ids: List[str], tiers: Dict[str, Dict], chunk_pool: Dict[str, ChunkEntry],
+    ) -> List[str]:
+        limit = self._effective_source_top_k
+        ranked = _tiered_top_ids(tiers, chunk_pool, len(chunk_pool))
+        eligible = set(ranked)
+        selected = list(dict.fromkeys(cid for cid in top_ids if cid in eligible))[:limit] or ranked[:limit]
+        selected_ids = set(selected)
+        ordered = selected + [cid for cid in ranked if cid not in selected_ids]
+        reserved: set[str] = set()
+        for focus_id in self._current_focus_lookup:
+            if any(focus_id in tiers[cid]["answered_focuses"] for cid in reserved):
+                continue
+            representative = next((cid for cid in ordered if focus_id in tiers[cid]["answered_focuses"]), None)
+            if representative is not None and len(reserved) < limit:
+                reserved.add(representative)
+        remaining = limit - len(reserved)
+        result = []
+        for cid in ordered:
+            if cid in reserved:
+                result.append(cid)
+            elif cid in selected_ids and remaining:
+                result.append(cid)
+                remaining -= 1
+        added = [cid for cid in result if cid not in selected_ids]
+        if added:
+            self._trace_events.append({"event": "source_focus_backfill", "source": self.source, "chunk_ids": added})
+        return result
+
+    def _zero_candidate_focuses(self, attempted: List[SubQuery], chunk_pool: Dict[str, ChunkEntry]) -> set[str]:
+        observed = {fid for chunk in chunk_pool.values() for fid in chunk.target_focuses}
+        for event in self._trace_events:
+            name = event.get("event")
+            if isinstance(event.get("focus"), str) and (
+                name == "candidate"
+                or (name == "source_fallback" and (event.get("fallback_doc_candidate_count") or event.get("fallback_table_candidate_count")))
+            ):
+                observed.add(event["focus"])
+            elif name == "read":
+                observed.update(event.get("focuses") or [])
+        return {q.target_focus for q in attempted} - observed
+
+    def _zero_candidate_recovery(
+        self, focus: Focus, attempted: List[SubQuery], seen: set[str],
+    ) -> SubQuery | None:
+        return None
+
+    def _build_replan_queries(self, rows: Iterable[Dict[str, Any]]) -> List[SubQuery]:
+        if self.source == "feishu":
+            # Use the same field normalization as the initial Global Planner.
+            from tools.core.planner_runner import FeishuValidator
+
+            validator = FeishuValidator()
+            queries = []
+            for row in rows:
+                fields = {
+                    key: row[key].strip()
+                    for key in ("query_type", "time_filter", "author_filter")
+                    if isinstance(row.get(key), str) and row[key].strip()
+                }
+                if fields.get("author_filter", "").casefold() == "me":
+                    fields["author_filter"] = "me"
+                else:
+                    fields.pop("author_filter", None)
+                planned = PlannedSubQuery(target_source=self.source, query=row["query"], **fields)
+                sq = validator.normalize(planned, focus_id=row["target_focus"], sub_query_id="")
+                if sq is not None and (not fields.get("time_filter") or sq.time_filter):
+                    queries.append(sq)
+            return queries
+        return [
+            SubQuery(
+                query=q["query"], target_focus=q["target_focus"],
+                tags=list(q.get("tags") or []), indexes=list(q.get("indexes") or []),
+                time_filter=q.get("time_filter"), query_type=q.get("query_type"),
+                google_enable_fulltext=q.get("google_enable_fulltext"),
+                google_order_by=q.get("google_order_by"), author_filter=q.get("author_filter"),
+            )
+            for q in rows
+        ]
+
     # ── 公用小工具：eval_only 收尾 + top_k 组装 ────────────────
     async def _eval_only_finalize(
+        self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
+    ) -> List[ChunkEntry]:
+        loop_n = getattr(self, "_current_loop_n", 1)
+        if await self._collect_late_evidence(chunk_pool, loop_n=loop_n, wait_for_pending=not bool(chunk_pool)):
+            await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
+            await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
+        selected = await self._eval_only_snapshot(focuses, chunk_pool)
+        while await self._collect_late_evidence(chunk_pool, loop_n=loop_n, wait_for_pending=True):
+            self._trace_events.append({
+                "event": "evaluation_snapshot_superseded", "source": self.source,
+                "stage": "source_eval_only", "loop": loop_n,
+            })
+            await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
+            await self._partial_eval_if_needed(focuses, chunk_pool, loop_n=loop_n)
+            selected = await self._eval_only_snapshot(focuses, chunk_pool)
+        return selected
+
+    async def _eval_only_snapshot(
         self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry],
     ) -> List[ChunkEntry]:
         started = time.perf_counter()
@@ -1388,7 +1765,33 @@ class SourceAgent:
             focuses, list(chunk_pool.values()), self._effective_source_top_k, refs=registry,
             profile_resolution=getattr(self, "_profile_resolution", None),
         )
-        eval_out = await _run_llm_agent(self.eval_only, eval_prompt)
+        budget = self._context_budget()
+        if self._request_token_estimate(self.eval_only, eval_prompt) > budget.usable_tokens and len(chunk_pool) > 1:
+            def batch_tokens(batch):
+                prompt = _build_eval_only_prompt(
+                    focuses, list(batch), self._effective_source_top_k,
+                    refs=ChunkRefRegistry.build(list(batch)),
+                    profile_resolution=getattr(self, "_profile_resolution", None),
+                )
+                return self._request_token_estimate(self.eval_only, prompt)
+
+            batches = split_chunks(list(chunk_pool.values()), budget, prompt_tokens=batch_tokens)
+            candidates = {}
+            for batch in batches:
+                retained = await self._eval_only_snapshot(focuses, {chunk.id: chunk for chunk in batch})
+                candidates.update((chunk.id, chunk) for chunk in retained)
+            self._trace_events.append({
+                "event": "source_eval_budget_reduction", "source": self.source,
+                "input_chunk_count": len(chunk_pool), "batch_count": len(batches),
+                "retained_chunk_count": len(candidates),
+            })
+            if not candidates:
+                return []
+            if len(candidates) >= len(chunk_pool):
+                raise ValueError("source_eval_input_budget_cannot_reduce")
+            return await self._eval_only_snapshot(focuses, candidates)
+        report_progress(f"{self.source} · 检查证据是否充分，并筛选证据链…（source_eval_only）")
+        eval_out = await self._invoke_eval(self.eval_only, eval_prompt)
         self._trace_events.append({
             "event": "llm_timing", "source": self.source,
             "stage": "eval_only", "input_chunk_count": len(chunk_pool),
@@ -1412,6 +1815,8 @@ class SourceAgent:
                 "plan_eval", [chunk_pool[cid] for cid in tiers_map if cid in chunk_pool],
                 tier_by_id={cid: str(item.get("tier") or "") for cid, item in tiers_map.items()},
             )
+        if self.source == "feishu":
+            top_ids = self._retain_focus_evidence(top_ids, tiers_map, chunk_pool)
         chunks = self._assemble_top_chunks(top_ids, tiers_map, chunk_pool)
         # Eval-only may deliberately put a weak focus's best noise candidate
         # in top_k as an evaluation footprint.  The footprint already exists
@@ -1449,9 +1854,10 @@ class SourceAgent:
         Scores are only compared within a focus and modality.  Retained chunks
         are marked, so a later replan loop never repeatedly thins prior evidence.
         """
-        if not self.cfg.rerank_enabled or not chunk_pool:
+        if not self.cfg.rerank_enabled or self.cfg.content_rerank_mode == "off" or not chunk_pool:
             return
-        pending = [c for c in chunk_pool.values() if not (c.metadata or {}).get("rerank_processed")]
+        pending = [c for c in chunk_pool.values() if self._should_rerank_chunk(c)
+                   and not (c.metadata or {}).get("rerank_processed")]
         focus_text = {f.focus_id: f.text for f in focuses}
         groups: Dict[tuple[str, str], List[ChunkEntry]] = {}
         for chunk in pending:
@@ -1623,11 +2029,11 @@ class SourceAgent:
         comparability local; later chunks form another generation rather than
         waiting for the slowest unrelated read.
         """
-        if not self.cfg.rerank_enabled:
+        if not self.cfg.rerank_enabled or self.cfg.content_rerank_mode == "off":
             return False
         pending_count = sum(
             1 for chunk in chunk_pool.values()
-            if not (chunk.metadata or {}).get("rerank_processed")
+            if self._should_rerank_chunk(chunk) and not (chunk.metadata or {}).get("rerank_processed")
         )
         trigger = max(1, int(self.cfg.rerank_trigger_chunk_count))
         if pending_count < trigger:
@@ -1643,9 +2049,16 @@ class SourceAgent:
         await self._rerank_new_chunks(focuses, chunk_pool, loop_n=loop_n)
         return True
 
+    def _should_rerank_chunk(self, chunk: ChunkEntry) -> bool:
+        if not self.cfg.rerank_enabled or self.cfg.content_rerank_mode == "off":
+            return False
+        return self.cfg.content_rerank_mode == "all" or self._rerank_group(chunk) == "table"
+
     @staticmethod
     def _rerank_group(chunk: ChunkEntry) -> str:
         meta = chunk.metadata or {}
+        if chunk.source == "feishu" and meta.get("reader_pool") == "doc":
+            return "document"
         explicit = str(meta.get("rerank_group") or meta.get("content_type") or meta.get("doc_type") or "").lower()
         if explicit in {"table", "sheet", "bitable", "spreadsheet", "excel", "csv"} or "table" in explicit:
             return "table"
@@ -1852,8 +2265,48 @@ class SourceAgent:
             "missing_pair_count": 0,
         }
 
+    def _context_budget(self) -> ContextBudget:
+        cfg = self.cfg.eval_shortlist
+        return ContextBudget(hard_ceiling=cfg.input_token_budget, trigger_ratio=cfg.trigger_ratio)
+
+    async def _invoke_eval(self, agent: LlmAgent, prompt: str) -> Dict[str, Any]:
+        from tools.core.llm_contracts import llm_usage_sink
+
+        estimated = self._request_token_estimate(agent, prompt)
+        budget = self._context_budget().usable_tokens
+        stage = str(getattr(agent, "name", "source_eval"))
+        self._trace_events.append({
+            "event": "eval_input_budget", "source": self.source, "stage": stage,
+            "estimated_input_tokens": estimated, "input_token_budget": budget,
+        })
+        if estimated > budget:
+            raise ValueError(f"{stage}_input_budget_exceeded")
+        token = llm_usage_sink.set(lambda event: self._trace_events.append({
+            **event, "source": self.source, "stage": stage,
+        }))
+        try:
+            return await _run_llm_agent(agent, prompt)
+        finally:
+            llm_usage_sink.reset(token)
+
+    @staticmethod
+    def _request_token_estimate(agent: LlmAgent, prompt: str) -> int:
+        instruction = str(getattr(agent, "instruction", "") or "")
+        schema = getattr(agent, "output_schema", None)
+        schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False) if schema is not None else ""
+        # Include message framing and the ADK structured-response wrapper.
+        return estimate_tokens(instruction + "\n" + schema_text + "\n" + prompt) + 256
+
+    def _partial_prompt_tokens(self, focuses: List[Focus], chunks: List[ChunkEntry]) -> int:
+        prompt = _build_partial_eval_prompt(
+            focuses, chunks, "budget-estimate",
+            profile_resolution=getattr(self, "_profile_resolution", None),
+        )
+        return self._request_token_estimate(self.partial_eval, prompt)
+
     async def _partial_eval_if_needed(
         self, focuses: List[Focus], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int,
+        streaming: bool = False,
     ) -> None:
         """Evaluate oversized pools in stable batches before global eval/plan_eval.
 
@@ -1862,19 +2315,24 @@ class SourceAgent:
         Source-specific I/O can later call the same method while reads are still
         in flight; the current base hook guarantees correct semantics first.
         """
-        await self._drain_partial_evals(chunk_pool)
+        if not streaming:
+            await self._drain_partial_evals(chunk_pool)
         # Chunks submitted during I/O are already represented by their pending
         # judgments.  Only unsent chunks need a synchronous safeguard here.
-        unsent = [c for cid, c in chunk_pool.items() if cid not in self._partial_submitted_ids]
+        unsent = [c for cid, c in chunk_pool.items()
+                  if cid not in self._partial_submitted_ids
+                  and (not self._should_rerank_chunk(c) or c.metadata.get("rerank_processed"))]
         shortlist_cfg = self.cfg.eval_shortlist
         if not shortlist_cfg.enabled:
             return
-        # Admission is a pool-level decision, not a side effect of provider
-        # batch size.  A 59-chunk pool must not silently skip shortlist merely
-        # because it fits into one 80-chunk request.
-        if len(unsent) < shortlist_cfg.trigger_chunk_count and not self._partial_submitted_ids:
-            return
+        # Trigger on the actual rendered input budget, independent of row count.
         if not unsent:
+            return
+        budget = self._context_budget()
+        estimated_tokens = self._partial_prompt_tokens(focuses, unsent)
+        if estimated_tokens < budget.flush_threshold:
+            return
+        if streaming and len(self._partial_pending_tasks) >= shortlist_cfg.max_concurrency:
             return
         # A generation freezes a previously unseen post-rerank pool exactly
         # once.  This is the durable boundary between I/O/rerank and admission:
@@ -1884,23 +2342,29 @@ class SourceAgent:
         generation = self._partial_generation
         batches = split_chunks(
             unsent,
-            ContextBudget(max_chunks_per_batch=shortlist_cfg.batch_chunk_limit),
+            budget, prompt_tokens=lambda batch: self._partial_prompt_tokens(focuses, list(batch)),
         )
+        # Leave a below-threshold tail for source evaluation directly.
+        if len(batches) > 1 and self._partial_prompt_tokens(focuses, batches[-1]) < budget.flush_threshold:
+            batches.pop()
         logger.info("[%s] loop=%d partial-eval batches=%d chunks=%d", self.source, loop_n,
                     len(batches), len(unsent))
 
         partial_semaphore = asyncio.Semaphore(max(1, int(shortlist_cfg.max_concurrency)))
 
-        async def _one(label: str, batch: List[ChunkEntry], depth: int = 0) -> Dict[str, Any]:
+        async def _one(label: str, batch: List[ChunkEntry]) -> Dict[str, Any]:
             registry = ChunkRefRegistry.build(batch)
             prompt = _build_partial_eval_prompt(
                 focuses, batch, f"{self.source}:loop{loop_n}:batch{label}", refs=registry,
                 profile_resolution=getattr(self, "_profile_resolution", None),
             )
             started = time.perf_counter()
+            request_tokens = self._request_token_estimate(self.partial_eval, prompt)
+            if request_tokens > budget.usable_tokens:
+                raise ValueError("partial_eval_input_budget_exceeded")
             async with partial_semaphore:
                 try:
-                    output = await _run_llm_agent(self.partial_eval, prompt)
+                    output = await self._invoke_eval(self.partial_eval, prompt)
                 except Exception as exc:
                     # Partial tiering is a lossy optimization layer. A provider
                     # prose/JSON failure must become a body-free contract
@@ -1953,12 +2417,10 @@ class SourceAgent:
                 for chunk in batch
             }
             resolved["_admission_generation"] = generation
+            resolved["_loop_n"] = loop_n
             return resolved
 
-        outputs = await asyncio.gather(*[
-            _one(str(i), batch) for i, batch in enumerate(batches, 1)
-        ])
-        submitted = {cid for output in outputs for cid in (output.get("_submitted_chunk_ids") or [])}
+        submitted = {chunk.id for batch in batches for chunk in batch}
         self._partial_submitted_ids.update(submitted)
         for cid in submitted:
             chunk = chunk_pool.get(cid)
@@ -1968,7 +2430,18 @@ class SourceAgent:
             "event": "partial_eval_generation", "source": self.source,
             "loop": loop_n, "generation": generation,
             "submitted_count": len(submitted),
+            "trigger": "input_token_ratio", "estimated_input_tokens": estimated_tokens,
+            "input_token_budget": budget.usable_tokens, "trigger_tokens": budget.flush_threshold,
         })
+        if streaming:
+            self._partial_pending_tasks.extend(
+                asyncio.create_task(_one(str(i), batch), name=f"{self.source}:partial:{generation}:{i}")
+                for i, batch in enumerate(batches, 1)
+            )
+            return
+        outputs = await asyncio.gather(*[
+            _one(str(i), batch) for i, batch in enumerate(batches, 1)
+        ])
         result = self._apply_partial_tier_outputs(
             outputs, chunk_pool, loop_n=loop_n, generation=generation,
         )
@@ -1990,6 +2463,8 @@ class SourceAgent:
         """Non-blocking I/O hook.  Freeze a batch once its prompt budget fills."""
         self._trace_events.append({
             "event": "read", "source": self.source, "chunk_id": entry.id,
+            "document_id": str((entry.metadata or {}).get("doc_id") or
+                               (entry.metadata or {}).get("file_id") or ""),
             "focuses": sorted(entry.target_focuses),
             "query_ids": list((entry.metadata or {}).get("sub_query_ids") or
                               (entry.metadata or {}).get("selected_sub_query_ids") or []),
@@ -1998,6 +2473,8 @@ class SourceAgent:
             "document": str(entry.metadata.get("source_name", entry.metadata.get("title", ""))),
             "heading": str(entry.metadata.get("heading_path", "")),
             "range": str(entry.metadata.get("range", "")),
+            **{key: entry.metadata[key] for key in ("source_kind", "embedded_sheet_id", "embedded_block_id")
+               if key in entry.metadata},
             "content_sha256": hashlib.sha256(entry.content.encode("utf-8")).hexdigest(),
             "content_chars": len(entry.content),
             "preview_chars": len(entry.preview_content or ""),
@@ -2008,95 +2485,11 @@ class SourceAgent:
             # Gold anchors intentionally inspect full content; preview is only
             # an LLM-eval budget surface and must never decide this match.
             observer.observe_chunks("read", [entry])
-        # Streaming partial-eval would otherwise see the pre-rerank pool.
-        if self.cfg.rerank_enabled:
+        if not self.cfg.eval_shortlist.enabled or self._should_rerank_chunk(entry):
             return
-        if entry.id in self._partial_submitted_ids or entry.id in self._partial_buffer_ids:
-            return
-        self._partial_buffer_ids.append(entry.id)
-        self._partial_buffer_tokens += estimate_chunk_tokens(entry)
-        shortlist_cfg = self.cfg.eval_shortlist
-        # A streaming source should freeze one bounded admission generation as
-        # soon as it has a meaningful evidence pool.  Context pressure remains
-        # a safety trigger, but must not be the only trigger (600k tokens made
-        # partial eval effectively wait until batch-end for normal documents).
-        if (
-            len(self._partial_buffer_ids) < shortlist_cfg.trigger_chunk_count
-            and self._partial_buffer_tokens < ContextBudget().flush_threshold
-        ):
-            return
-        ids = list(self._partial_buffer_ids)
-        batch = [chunk_pool[cid] for cid in ids if cid in chunk_pool]
-        self._partial_buffer_ids, self._partial_buffer_tokens = [], 0
-        self._partial_submitted_ids.update(c.id for c in batch)
-        self._partial_generation += 1
-        generation = self._partial_generation
-        batch_id = f"{self.source}:loop{loop_n}:stream:g{generation}"
-        self._trace_events.append({
-            "event": "partial_eval_generation", "source": self.source,
-            "loop": loop_n, "generation": generation,
-            "submitted_count": len(batch), "trigger": "chunk_count"
-            if len(batch) >= shortlist_cfg.trigger_chunk_count else "context_pressure",
-        })
-
-        async def _evaluate() -> Dict[str, Any]:
-            registry = ChunkRefRegistry.build(batch)
-            llm_started = time.perf_counter()
-            try:
-                output = await _run_llm_agent(
-                    self.partial_eval,
-                    _build_partial_eval_prompt(
-                        focuses=list(self._current_focus_lookup.values()),
-                        chunks=batch,
-                        batch_id=batch_id,
-                        refs=registry,
-                        profile_resolution=getattr(self, "_profile_resolution", None),
-                    ),
-                )
-            except Exception as exc:
-                self._trace_events.append({
-                    "event": "partial_eval_provider_error", "source": self.source,
-                    "batch_id": batch_id, "generation": generation,
-                    "error_type": type(exc).__name__, "fail_open": True,
-                })
-                output = {"focus_groups": []}
-            raw_shape = _partial_payload_shape(output)
-            resolved, malformed = registry.resolve_eval_output(output)
-            focus_groups = list(resolved.get("focus_groups") or [])
-            partial_tiers = list(resolved.get("partial_tiers") or [])
-            self._trace_events.append({
-                "event": "partial_eval_response_shape", "source": self.source,
-                "batch_id": batch_id,
-                "loop": loop_n, "generation": generation,
-                "elapsed_ms": round((time.perf_counter() - llm_started) * 1000.0, 1),
-                "focus_group_count": len(focus_groups),
-                "tier_count": len(partial_tiers),
-                "non_noise_tier_count": sum(1 for item in partial_tiers if item.get("tier") != "noise"),
-                "no_qualifying_group_count": sum(
-                    1 for item in focus_groups if item.get("reason") == "no_qualifying_chunks"
-                ),
-                "partial_contract_normalizations": list(
-                    resolved.get("partial_contract_normalizations") or []
-                ),
-                **raw_shape,
-            })
-            if malformed:
-                self._trace_events.append({
-                    "event": "partial_eval_contract_error", "source": self.source,
-                    "batch_id": batch_id, "malformed_chunk_refs": malformed,
-                })
-            resolved["_partial_malformed"] = malformed
-            resolved["_submitted_chunk_ids"] = [chunk.id for chunk in batch]
-            valid_focuses = set(self._current_focus_lookup)
-            resolved["_expected_focuses_by_chunk"] = {
-                chunk.id: sorted(set(chunk.target_focuses or set()) & valid_focuses)
-                for chunk in batch
-            }
-            resolved["_admission_generation"] = generation
-            return resolved
-
-        self._partial_pending_tasks.append(asyncio.create_task(_evaluate(), name=batch_id))
-        logger.info("[%s] scheduled partial-eval %s chunks=%d", self.source, batch_id, len(batch))
+        await self._partial_eval_if_needed(
+            list(self._current_focus_lookup.values()), chunk_pool, loop_n=loop_n, streaming=True,
+        )
 
     async def _drain_partial_evals(self, chunk_pool: Dict[str, ChunkEntry]) -> None:
         if not self._partial_pending_tasks:
@@ -2113,7 +2506,7 @@ class SourceAgent:
             generations.append(int(output.get("_admission_generation") or 0))
         if valid_outputs:
             self._apply_partial_tier_outputs(
-                valid_outputs, chunk_pool, loop_n=1,
+                valid_outputs, chunk_pool, loop_n=int(valid_outputs[-1].get("_loop_n", 1)),
                 generation=max(generations, default=0),
             )
 
@@ -2224,6 +2617,8 @@ class SourceAgent:
             new_meta = dict(entry.metadata or {})
             if valid_ans:
                 new_meta["answered_focuses"] = list(valid_ans)
+            elif self.source == "feishu":
+                new_meta["answered_focuses"] = []
             # P2: angle_tag —— 同角度去重的唯一依据
             angle_tag = (info.get("angle_tag") or "").strip().lower()
             if angle_tag:
@@ -2243,6 +2638,38 @@ class SourceAgent:
         return out
 
     # ── 并发执行 sub_queries ──────────────────────────────────
+    async def _execute_round(
+        self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int,
+    ) -> None:
+        self._current_loop_n = loop_n
+        progress = progress_sink.get() is not None
+        if progress:
+            report_progress(f"{self.source} · 开始第 {loop_n} 轮检索")
+            start = len(self._trace_events)
+        await self._execute_batch(sub_queries, chunk_pool, loop_n=loop_n)
+        if not progress:
+            return
+        events = self._trace_events[start:]
+        candidates = set()
+        documents = set()
+        for event in events:
+            key = event.get("document_id") or event.get("document")
+            if event.get("event") == "candidate" and key:
+                candidates.add(key)
+            if key and (event.get("event") == "read" or (
+                event.get("event") == "document_read" and event.get("outcome") == "success"
+            ) or (
+                event.get("event") == "table_read" and event.get("chunk_count", 0) > 0
+            )):
+                documents.add(key)
+        if candidates or not documents:
+            report_progress(
+                f"{self.source} · 第 {loop_n} 轮：检索到 {len(candidates)} 份候选文档，"
+                f"筛选后读取 {len(documents)} 份。"
+            )
+        else:
+            report_progress(f"{self.source} · 第 {loop_n} 轮：检索并筛选后读取 {len(documents)} 份文档。")
+
     async def _execute_batch(
         self, sub_queries: List[SubQuery], chunk_pool: Dict[str, ChunkEntry], *, loop_n: int = 1,
     ) -> None:

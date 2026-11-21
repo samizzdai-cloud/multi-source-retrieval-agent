@@ -381,6 +381,8 @@ def normalize_plan(
     plan: GlobalPlan,
     validators: Dict[str, SourceSubQueryValidator],
     enabled_sources: List[str],
+    *,
+    max_focuses_per_source: Optional[int] = None,
 ) -> NormalizedPlan:
     """把 ``GlobalPlan`` 翻译为可投递给各 SourceAgent 的 runtime 形态。
 
@@ -389,6 +391,8 @@ def normalize_plan(
         validators: 源名 → Validator，未启用源不会被处理
         enabled_sources: 仅在此列表内的源会被翻译（planner 偶尔会越权产
             未启用源的 sub_query；runner 一并丢弃 + 记日志）
+        max_focuses_per_source: 每源承接上限，共享 Focus 在各源分别计数；
+            包括校验失败后的局部补规划，不允许空查询兜底绕过预算。
 
     Returns:
         NormalizedPlan（见类 docstring）
@@ -400,6 +404,7 @@ def normalize_plan(
     )
     enabled_set = set(enabled_sources)
     sq_seq = 0
+    assigned_counts: Dict[str, int] = {}
 
     for pf in plan.focuses:
         focus_id = (pf.focus_id or "").strip() or f"focus_{len(out.focuses)}"
@@ -423,8 +428,14 @@ def normalize_plan(
 
         # 2) 每桶过 validator
         focus_target_sources: List[str] = []
+        source_budget_blocked = False
         for src, psqs in bucket.items():
             if not psqs:
+                continue
+            if max_focuses_per_source is not None and assigned_counts.get(src, 0) >= max_focuses_per_source:
+                source_budget_blocked = True
+                out.validation_warnings.append(f"source_focus_limit:{src}:{focus_id}")
+                out.rejected_count += len(psqs)
                 continue
             validator = validators.get(src)
             if validator is None:
@@ -463,15 +474,24 @@ def normalize_plan(
 
         # 3) 该 focus 没产任何 target_source？兜底为全部 enabled（保留与老路径行为一致）
         if not focus_target_sources:
-            focus_target_sources = list(enabled_sources)
+            if source_budget_blocked:
+                continue
+            focus_target_sources = [src for src in enabled_sources
+                                    if max_focuses_per_source is None
+                                    or assigned_counts.get(src, 0) < max_focuses_per_source]
+            if not focus_target_sources:
+                out.validation_warnings.append(f"source_focus_limit:all:{focus_id}")
+                continue
             logger.info(
                 "[planner_runner] focus=%s no target_source from sub_queries → broadcast %s",
-                focus_id, enabled_sources,
+                focus_id, focus_target_sources,
             )
             # 全广播 → 全部源都需要 replan（plan_only_LLM 兜底）
-            for src in enabled_sources:
+            for src in focus_target_sources:
                 out.replan_needed[src].append(Focus(focus_id=focus_id, text=focus_text, targets=[src]))
 
+        for src in set(focus_target_sources):
+            assigned_counts[src] = assigned_counts.get(src, 0) + 1
         out.focuses.append(
             Focus(focus_id=focus_id, text=focus_text, targets=sorted(set(focus_target_sources)))
         )

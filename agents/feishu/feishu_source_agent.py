@@ -243,7 +243,7 @@ def _sanitize_feishu_sub_queries(
 
 
 def _candidate_doc_key(c: dict) -> str:
-    return c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("url") or ""
+    return c.get("id") or c.get("document_id") or c.get("doc_id") or c.get("doc_token") or c.get("token") or c.get("url") or ""
 
 
 def _original_surface_fallback_query(
@@ -630,6 +630,64 @@ class FeishuSourceAgent(SourceAgent):
             table_remaining = await self._table_pool.drain_inflight(timeout_s=timeout_s)
         return own_remaining + pool_remaining + table_remaining
 
+    def _reset_run_state(self) -> None:
+        if self._doc_pool is not None and hasattr(self._doc_pool, "begin_collection"):
+            self._doc_pool.begin_collection()
+
+    async def _collect_late_evidence(
+        self, chunk_pool: Dict[str, ChunkEntry], *, loop_n: int, wait_for_pending: bool = False,
+    ) -> bool:
+        from tools.core.retrieval_progress import retrieval_deadline, report_progress
+
+        pool = self._doc_pool
+        if pool is None or not hasattr(pool, "collect_undelivered"):
+            return False
+        timeout_s = 0.0
+        deadline = retrieval_deadline.get()
+        remaining = deadline - asyncio.get_running_loop().time() if deadline is not None else self.cfg.source_timeout_s
+        if remaining <= 0:
+            return False
+        if wait_for_pending:
+            # Leave half the remaining source budget for the new evaluation.
+            timeout_s = remaining / 2
+        wait_deadline = asyncio.get_running_loop().time() + timeout_s
+        chunks = await pool.collect_undelivered(timeout_s=timeout_s)
+        # An empty/failed reader must not hide another pending document.
+        while not chunks and wait_for_pending and pool.pending_delivery_ids():
+            wait_remaining = wait_deadline - asyncio.get_running_loop().time()
+            if wait_remaining <= 0:
+                break
+            chunks = await pool.collect_undelivered(timeout_s=wait_remaining)
+        added = []
+        documents = set()
+        for uc in chunks:
+            focuses = sorted(set(uc.metadata.get("selected_focus_ids") or []) & self._current_focus_lookup.keys())
+            if not focuses:
+                continue
+            entry = _unified_to_chunk_entry(uc, str(uc.metadata.get("read_query") or ""), focuses[0])
+            entry.target_focuses.update(focuses)
+            if entry.id in chunk_pool or entry.id in self._partial_submitted_ids:
+                continue
+            chunk_pool[entry.id] = entry
+            added.append(entry.id)
+            documents.add(str(uc.metadata.get("doc_id") or uc.source_url))
+            await self._offer_chunk_for_context_eval(entry, chunk_pool, loop_n=loop_n)
+        self._trace_events.extend({**event, "source": self.source} for event in pool.consume_observability_events())
+        pending = pool.pending_delivery_ids()
+        if added or (wait_for_pending and pending):
+            self._trace_events.append({
+                "event": "late_document_delivery", "source": self.source, "loop": loop_n,
+                "document_ids": sorted(documents), "chunk_ids": added,
+                "pending_document_ids": pending, "wait_for_pending": wait_for_pending,
+                "transport_inconclusive": bool(pending),
+            })
+        if added:
+            for event in self._trace_events:
+                if event.get("event") == "consumer_deadline" and event.get("document_id") in documents:
+                    event.update({"resolved": True, "transport_inconclusive": False, "disposition": "late_delivery_recovered"})
+            report_progress(f"feishu · 第 {loop_n} 轮：补充读取完成 {len(documents)} 份文档。")
+        return bool(added)
+
     def _build_plan_only_agent(self) -> Optional[LlmAgent]:
         from .feishu_retrieve_llm_build import build_feishu_plan_only_agent
         return build_feishu_plan_only_agent()
@@ -650,13 +708,11 @@ class FeishuSourceAgent(SourceAgent):
         base_rules = get_source_query_rules("feishu")
         return (
             base_rules
-            + "\n\n提醒：time_filter 仅相对时间用 "
-            + "\"last_N_days\"，季度/月份等具体时间点请并入 query 本身或留 null。"
-            + "\n"
+            + "\n\n"
             + "额外规划约束：\n"
-            + "  · 默认每个 focus 只生成 1 条 sub_query；只有同一 focus 明确包含两个不同证据面时才允许第 2 条。\n"
+            + "  · 每个 Focus 默认 1 条 API query；第 2 条应有明确的正文锚点、字段写法或检索路径优化价值，可定位同一类所需证据。\n"
             + "  · 不要为了'保险'补一个泛泛的陪跑 query。\n"
-            + "  · concept query 必须保留 focus 中最核心的主题锚点词。"
+            + "  · concept query 同样按目标材料的表达方式转译，不机械复制 Focus 原词。"
         )
 
     def _post_process_sub_queries(self, focuses: List[Focus], sub_queries: List[SubQuery]) -> List[SubQuery]:
@@ -684,13 +740,52 @@ class FeishuSourceAgent(SourceAgent):
                 **existing_ids,
                 **{variant: item_id for variant, _kind, item_id in specs if item_id > 0},
             }
-        return sanitized
+        return self._limit_queries_per_focus(sanitized)
 
-    def _enrich_sub_queries_with_variants(
-        self, focuses: List[Focus], sub_queries: List[SubQuery],
-    ) -> List[SubQuery]:
-        """Legacy compatibility no-op; generic expansion is forbidden in v5."""
-        return sub_queries
+    def _zero_candidate_recovery(
+        self, focus: Focus, attempted: List[SubQuery], seen: set[str],
+    ) -> SubQuery | None:
+        """Reuse a Focus's entity and one searched evidence term for a shorter probe."""
+        resolution = getattr(self, "_profile_resolution", None)
+        focus_text = focus.text.casefold()
+        entities = [
+            str(row.get("name") or "").strip()
+            for row in getattr(resolution, "exact_entity_matches", ())
+        ]
+        anchors = [name for name in entities if name and name.casefold() in focus_text]
+        anchor = max(anchors, key=len, default="")
+        if any(name.casefold() not in anchor.casefold() for name in anchors):
+            # A single probe must not silently reduce a comparison to one entity.
+            return None
+        expressions = [
+            str(row.get("name") or "").strip()
+            for row in getattr(resolution, "exact_expression_matches", ())
+        ]
+        for base in sorted(attempted, key=lambda q: q.query_type != "structured"):
+            # Keep explicit dates written into the query when there is no
+            # separate time filter to carry forward.
+            words = base.query.split()
+            dates = [term for term in words if re.search(r"\d{4}(?:[-/]\d{1,2}|年)|\d{1,2}月", term)]
+            terms = [term for term in words if term not in dates]
+            if anchor:
+                candidates = []
+                for term in terms:
+                    if term.casefold() in anchor.casefold():
+                        continue
+                    canonical = next((name for name in expressions
+                                      if name and name.casefold() in term.casefold()), term)
+                    candidates.append([anchor, canonical])
+            else:
+                candidates = [terms[:2]] if len(terms) > 2 and all(term.casefold() in focus_text for term in terms[:2]) else []
+            for words in candidates:
+                query = " ".join(dict.fromkeys([*words, *dates]))
+                if self._query_key(query) in seen:
+                    continue
+                return SubQuery(
+                    query=query, target_focus=focus.focus_id, query_type=base.query_type,
+                    time_filter=base.time_filter, author_filter=base.author_filter,
+                )
+        return None
 
     # ── table ROI 日志 ────────────────────────────────────────
     def _final_selected_table_tokens(self, chunks: List[ChunkEntry]) -> Set[str]:
@@ -791,6 +886,9 @@ class FeishuSourceAgent(SourceAgent):
         from tools.feishu.feishu_retrieve import IO_FUTURE_REGISTRY
         IO_FUTURE_REGISTRY.set(self._inflight_futures)
         batch_started = time.perf_counter()
+        # A later round already passed source_plan_eval's per-Focus I/O decision.
+        # A provisional quota from an earlier round cannot veto it again.
+        board = getattr(self, "_focus_board", None) if loop_n == 1 else None
         await self._ensure_user_identity(sub_queries)
         if self._doc_pool is None:
             raise RuntimeError("FeishuSourceAgent requires doc_pool; ensure FEISHU_UAT is configured")
@@ -899,6 +997,7 @@ class FeishuSourceAgent(SourceAgent):
                                 "event": "profile_fallback", "source": self.source,
                                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                                 "query_type": qt, "fallback_origin": "profile",
+                                "loop": loop_n, "time_filter": sq.time_filter, "author_filter": sq.author_filter,
                                 "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
                                 "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
                                 "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
@@ -970,6 +1069,7 @@ class FeishuSourceAgent(SourceAgent):
                             "event": "profile_fallback", "source": self.source,
                             "focus": sq.target_focus, "query_id": sq.sub_query_id,
                             "query_type": qt, "fallback_origin": "profile",
+                            "loop": loop_n,
                             "fallback_kind": sq.variant_origins.get(fallback_query, "profile"),
                             "profile_item_id": sq.variant_origin_ids.get(fallback_query, 0),
                             "profile_item_type": sq.variant_origins.get(fallback_query, "profile"),
@@ -996,7 +1096,7 @@ class FeishuSourceAgent(SourceAgent):
                         "focus": sq.target_focus, "query_id": sq.sub_query_id,
                         "query_type": sq.query_type, "api_rank": int(candidate.get("best_api_rank") or rank),
                         "route": "mcp_doc",
-                        "document_id": str(candidate.get("document_id") or candidate.get("doc_token") or candidate.get("token") or candidate.get("id") or ""),
+                        "document_id": str(_candidate_doc_key(candidate)),
                         "document": str(candidate.get("title") or candidate.get("name") or ""),
                         "document_type": str(candidate.get("doc_type") or candidate.get("type") or ""),
                     })
@@ -1139,6 +1239,7 @@ class FeishuSourceAgent(SourceAgent):
                 "event": "source_fallback", "source": self.source,
                 "focus": sq.target_focus, "query_id": sq.sub_query_id,
                 "query_type": sq.query_type, "api_query": fallback_query,
+                "loop": loop_n, "time_filter": sq.time_filter, "author_filter": sq.author_filter,
                 "fallback": True, "fallback_origin": "original_surface",
                 "fallback_reason": "primary_doc_and_table_zero_candidates",
                 "primary_doc_candidate_count": doc_primary_count,
@@ -1146,6 +1247,15 @@ class FeishuSourceAgent(SourceAgent):
                 "fallback_doc_candidate_count": len(fallback_docs),
                 "fallback_table_candidate_count": len(fallback_tables),
             })
+            for route, candidates in (("mcp_doc", fallback_docs), ("direct_table", fallback_tables)):
+                self._trace_events.extend({
+                    "event": "candidate", "source": self.source, "focus": sq.target_focus,
+                    "query_id": sq.sub_query_id, "query_type": sq.query_type,
+                    "route": "wiki_table" if route == "direct_table" and candidate.get("_source") == "wiki" else route,
+                    "document_id": str(_candidate_doc_key(candidate)),
+                    "document": str(candidate.get("title") or candidate.get("name") or ""),
+                    "fallback_origin": "original_surface",
+                } for candidate in candidates)
         if surface_doc_prepared:
             surface_docs, surface_doc_ids = _merge_doc_demands(surface_doc_prepared)
             for sq_id, ids in surface_doc_ids.items():
@@ -1329,7 +1439,6 @@ class FeishuSourceAgent(SourceAgent):
 
             # FocusBoard 早停门：cand 服务的 focus 已被别源全部满足 → 跳过本次 table 读取，
             # 直接 set event 让 _wait_table 立刻返回空。修补关键路径上的 10-17s 浪费。
-            board = getattr(self, "_focus_board", None)
             for cand in table_list:
                 token = _candidate_doc_key(cand)
                 focus_ids = list(cand.get("selected_focus_ids") or [])
@@ -1384,7 +1493,6 @@ class FeishuSourceAgent(SourceAgent):
                 # 注意：**不** 取消底层 read task —— 多 sq 可能共享同一 token（cross-sq
                 # dedup），cancel 会让 evt.set() 前的赋值跳过，坑共享 sq；而且 to_thread
                 # 底层是阻塞线程，cancel 也救不回真正的 I/O。只断本 sq 的等待是最稳妥的。
-                board = getattr(self, "_focus_board", None)
                 sat_evt = board.satisfied_event(sq.target_focus) if board is not None else None
 
                 collected: List[UnifiedChunk] = []

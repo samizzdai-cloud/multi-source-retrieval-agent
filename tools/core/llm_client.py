@@ -1,6 +1,6 @@
 """Shared LLM client — litellm wrapper for DeepSeek models.
 
-Used by: global_planner.py, query_planner.py, answer_agent.py
+Used by the global planner, legacy query planner and cross-source LLM evaluator.
 """
 
 from __future__ import annotations
@@ -13,12 +13,13 @@ import time as _time
 from typing import Any, Callable, Mapping, Optional
 
 from dotenv import load_dotenv
+from tools.core.models import DEEPSEEK_MAX_OUTPUT_TOKENS, DEFAULT_DEEPSEEK_MODEL, THINKING_FLASH
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ── LLM constants ────────────────────────────────────────────────
-LLM_MODEL       = os.getenv("LLM_MODEL", "deepseek/deepseek-v4-flash")
+LLM_MODEL       = os.getenv("LLM_MODEL", DEFAULT_DEEPSEEK_MODEL)
 LLM_MAX_TOKENS  = 8192
 LLM_TEMPERATURE = 0.0
 
@@ -69,6 +70,7 @@ def call_llm(
     response_mime_type: str | None = None,     # 兼容旧签名，DeepSeek 忽略
     response_schema: dict | None = None,
     trace_callback: Callable[[Mapping[str, Any]], None] | None = None,
+    use_provider_output_limit: bool = False,
 ) -> str:
     """LLM call via litellm (DeepSeek). Returns response text.
 
@@ -76,12 +78,17 @@ def call_llm(
 
     Args:
         thinking_config: DeepSeek thinking 配置，
-          如 {"thinking": {"type": "enabled"}, "output_config": {"effort": "high"}}。
+          如 {"extra_body": {"thinking": {"type": "enabled"}}, "reasoning_effort": "high"}。
         response_schema: 如需结构化输出，转为 prompt 内嵌 JSON 指令 + json_object。
     """
     import litellm
 
     use_model = model or LLM_MODEL
+    if use_model == DEFAULT_DEEPSEEK_MODEL:
+        if use_provider_output_limit:
+            max_tokens = DEEPSEEK_MAX_OUTPUT_TOKENS
+        if thinking_config is None:
+            thinking_config = THINKING_FLASH.to_litellm_kwargs()
     # 保持 provider 前缀 (如 "deepseek/xxx") — litellm 需要它来识别 provider
 
     # response_schema → prompt 内嵌 + json_object
@@ -128,12 +135,19 @@ def call_llm(
                 "has_reasoning_content": bool(getattr(message, "reasoning_content", None)),
                 "has_tool_calls": bool(getattr(message, "tool_calls", None)),
             }
+            usage = getattr(response, "usage", None)
+            if usage is not None:
+                usage_values = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage)
+                response_meta["usage"] = {key: usage_values[key] for key in (
+                    "prompt_tokens", "completion_tokens", "total_tokens",
+                    "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "prompt_tokens_details",
+                ) if key in usage_values}
             # Per DeepSeek's JSON-mode contract, only ``content`` is the final
             # answer. ``reasoning_content`` is a thinking trace, never a JSON
             # fallback. Empty content is retried because the API documents it
             # as an intermittent JSON-mode condition.
             text = message.content or ""
-            if not text:
+            if not text.strip():
                 raise RuntimeError("empty response from model")
             _emit_trace({
                 "event": "llm_call_attempt", "caller_tag": _caller_tag,

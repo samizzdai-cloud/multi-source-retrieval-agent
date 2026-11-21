@@ -12,7 +12,7 @@ from tools.core.source_query_config import get_source_query_rules
 
 
 class GlobalPlannerContractTests(unittest.TestCase):
-    def test_focus_is_answer_subtask_and_can_have_multiple_evidence_queries(self):
+    def test_research_focus_can_have_multiple_executable_queries(self):
         query = "结合新品的销售情况，判断6月整体销售GMV会到多少"
         raw = {"focuses": [{
             "focus_id": "focus_0",
@@ -61,11 +61,8 @@ class GlobalPlannerContractTests(unittest.TestCase):
         self.assertNotIn("hypershell", prompt.casefold())
         self.assertNotIn("tags", get_source_query_rules("feishu", include_common=False).casefold())
         self.assertNotIn("indexes", get_source_query_rules("feishu", include_common=False).casefold())
-        self.assertIn("paid efficiency", prompt)
-        self.assertIn("on-site funnel", prompt)
-        self.assertIn("not a rewrite of the final decision, an answer contract", prompt)
-        self.assertIn("create the minimum number of non-overlapping Focuses", prompt)
-        self.assertIn("not entity lists, generic companion queries", prompt)
+        self.assertNotIn("paid efficiency", prompt)
+        self.assertNotIn("on-site funnel", prompt)
 
     def test_bailian_prompt_retains_its_own_filter_contract(self):
         prompt = _build_prompt(
@@ -76,6 +73,7 @@ class GlobalPlannerContractTests(unittest.TestCase):
         )
         self.assertIn('"tags"', prompt)
         self.assertIn('"indexes"', prompt)
+        self.assertNotIn("feishu 禁用英文缩写", prompt)
 
     def test_same_focus_source_keeps_distinct_queries_and_drops_exact_duplicates(self):
         raw = {"focuses": [{
@@ -88,7 +86,7 @@ class GlobalPlannerContractTests(unittest.TestCase):
             ],
         }]}
         plan = _parse_global_plan(raw, "判断6月GMV", ["feishu"], 6)
-        self.assertEqual(len(plan.focuses[0].sub_queries), 3)
+        self.assertEqual(len(plan.focuses[0].sub_queries), 2)
 
     def test_broad_cvr_diagnostic_does_not_mutate_planner_query(self):
         raw = {"focuses": [{
@@ -146,10 +144,14 @@ class GlobalPlannerContractTests(unittest.TestCase):
 
 
     def test_focus_limit_respects_source_budget_formula(self):
-        self.assertEqual(_focus_limit_for_sources(["feishu"], 6), 2)
-        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian"], 6), 3)
-        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian", "google"], 6), 4)
-        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian", "google", "notion"], 6), 4)
+        self.assertEqual(_focus_limit_for_sources(["feishu"], 6), 4)
+        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian"], 6), 6)
+        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian", "google"], 6), 6)
+        self.assertEqual(_focus_limit_for_sources(["feishu", "bailian", "google", "notion"], 6), 6)
+        self.assertEqual(_focus_limit_for_sources(["feishu", "feishu"], 6), 4)
+        self.assertEqual(_focus_limit_for_sources(["feishu"], 6, "deep_dive"), 4)
+        self.assertEqual(_focus_limit_for_sources(["feishu"], 6, "lite"), 2)
+        self.assertEqual(_focus_limit_for_sources(["feishu"], 2, "balanced"), 2)
 
     def test_prompt_includes_focus_limit_not_raw_max_focuses(self):
         prompt = _build_prompt(
@@ -158,7 +160,7 @@ class GlobalPlannerContractTests(unittest.TestCase):
             GlobalPlannerConfig(),
             None,
         )
-        self.assertIn("focuses 总数 ≤ 2", prompt)
+        self.assertIn("focuses 总数 ≤ 4", prompt)
         self.assertNotIn("focuses 总数 ≤ 6", prompt)
 
     def test_parser_enforces_per_focus_sub_query_cap(self):
@@ -174,7 +176,60 @@ class GlobalPlannerContractTests(unittest.TestCase):
         }]}
         plan = _parse_global_plan(raw, "判断6月GMV", ["feishu"], 6)
         self.assertEqual(len(plan.focuses), 1)
-        self.assertEqual(len(plan.focuses[0].sub_queries), 3)
+        self.assertEqual(len(plan.focuses[0].sub_queries), 2)
+
+    def test_query_cap_is_independent_for_each_source(self):
+        raw = {"focuses": [{"focus_id": "F1", "focus_content": "current state", "sub_queries": [
+            {"target_source": src, "query": f"query {i}"}
+            for src in ("feishu", "bailian") for i in range(3)
+        ]}]}
+        plan = _parse_global_plan(raw, "current state", ["feishu", "bailian"], 4)
+        self.assertEqual([q.target_source for q in plan.focuses[0].sub_queries], ["feishu", "feishu", "bailian", "bailian"])
+
+    def test_shared_focus_stays_stable_with_source_specific_requests(self):
+        text = "核实品牌当前产品销售状态，支撑增长诊断"
+        raw = {"focuses": [{"focus_id": "focus_0", "focus_content": text, "sub_queries": [
+            {"target_source": "feishu", "query": "品牌 销售实绩", "query_type": "structured"},
+            {"target_source": "bailian", "query": "品牌当前产品的实际销售状态及其业务背景"},
+        ]}]}
+        plan = _parse_global_plan(raw, text, ["feishu", "bailian"], 6)
+        normalized = normalize_plan(plan, build_default_validators(enabled_sources=["feishu", "bailian"]),
+                                    ["feishu", "bailian"], max_focuses_per_source=4)
+        self.assertEqual([(f.focus_id, f.text, f.targets) for f in normalized.focuses],
+                         [("focus_0", text, ["bailian", "feishu"])])
+        for source in ("feishu", "bailian"):
+            query = normalized.pre_planned_by_source[source][0]
+            self.assertEqual(query.target_focus, "focus_0")
+            self.assertTrue(query.sub_query_id.startswith(f"{source}:focus_0:"))
+        self.assertNotEqual(normalized.pre_planned_by_source["feishu"][0].query,
+                            normalized.pre_planned_by_source["bailian"][0].query)
+
+    def test_source_focus_budget_does_not_reduce_other_source_capacity(self):
+        raw = {"focuses": [{"focus_id": f"focus_{i}", "focus_content": f"独立研究任务{i}",
+                            "sub_queries": [{"target_source": src, "query": f"对象 材料{i}"}
+                                            for src in (["feishu", "bailian"] if i < 2 else
+                                                        ["feishu"] if i < 4 else ["bailian"])]}
+                           for i in range(6)]}
+        plan = _parse_global_plan(raw, "多业务研究", ["feishu", "bailian"], 6)
+        normalized = normalize_plan(plan, build_default_validators(enabled_sources=["feishu", "bailian"]),
+                                    ["feishu", "bailian"], max_focuses_per_source=4)
+        self.assertEqual(len(normalized.focuses), 6)
+        self.assertEqual({src: len({q.target_focus for q in queries})
+                          for src, queries in normalized.pre_planned_by_source.items()},
+                         {"feishu": 4, "bailian": 4})
+
+    def test_empty_query_fallback_cannot_bypass_source_focus_budget(self):
+        raw = {"focuses": [{"focus_id": f"focus_{i}", "focus_content": f"独立任务{i}",
+                            "sub_queries": [] if i == 4 else
+                            [{"target_source": "feishu", "query": f"对象 材料{i}"}]}
+                           for i in range(6)]}
+        plan = _parse_global_plan(raw, "研究", ["feishu", "bailian"], 6)
+        normalized = normalize_plan(plan, build_default_validators(enabled_sources=["feishu", "bailian"]),
+                                    ["feishu", "bailian"], max_focuses_per_source=4)
+        self.assertEqual(len(normalized.pre_planned_by_source["feishu"]), 4)
+        self.assertEqual([f.focus_id for f in normalized.replan_needed["bailian"]], ["focus_4"])
+        self.assertEqual(normalized.focuses[-1].targets, ["bailian"])
+        self.assertIn("source_focus_limit:feishu:focus_5", normalized.validation_warnings)
 
 
 if __name__ == "__main__":

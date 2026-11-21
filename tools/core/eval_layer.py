@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Callable, Dict, List, Optional, Protocol
 
-from tools.core.models import ChunkEntry
+from tools.core.models import DEFAULT_DEEPSEEK_MODEL, ChunkEntry
 
 
 logger = logging.getLogger(__name__)
@@ -450,7 +450,7 @@ class LlmEvalLayer:
     """
     # Keep deep-dive global evaluation on the same configured DeepSeek path as
     # source eval_only/plan_eval.  It must not implicitly require Vertex ADC.
-    model: str = "deepseek/deepseek-v4-flash"
+    model: str = DEFAULT_DEEPSEEK_MODEL
     timeout_s: float = 30.0
     # This layer improves final ordering only. After one transient retry,
     # deterministic RuleEvalLayer preserves already judged evidence instead of
@@ -536,6 +536,7 @@ class LlmEvalLayer:
         raw = call_llm(
             prompt,
             max_tokens=2048,
+            use_provider_output_limit=True,
             timeout=self.timeout_s,
             _caller_tag="eval_layer.llm_tool",
             model=self.model,

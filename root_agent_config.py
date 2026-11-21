@@ -2,7 +2,7 @@
 
 Environment knobs:
     RAG_PRESET=lite|balanced|deep_dive
-    RAG_ENABLED_SOURCES=google,feishu,bailian
+    RAG_ENABLED_SOURCES=feishu
     GOOGLE_CREDENTIALS_PATH=/abs/path/to/credentials.json
     GOOGLE_TOKEN_PATH=/abs/path/to/token.json
 """
@@ -46,17 +46,24 @@ def _positive_float_env(name: str, default: float) -> float:
         return default
 
 
-def build_root_retrieve_agent(name: str = "retrieve_v1"):
-    """Build RetrieveAgent with the local three-source default."""
+def build_root_retrieve_agent(
+    name: str = "retrieve_v1", *, web_timeout_s: float | None = None, defer_feishu_oauth: bool = False,
+):
+    """Build RetrieveAgent with the local Feishu-only test default."""
     load_project_env()
 
     preset = (os.getenv("RAG_PRESET", "balanced") or "balanced").strip()
-    enabled_sources = _csv_env("RAG_ENABLED_SOURCES", ["google", "feishu", "bailian"])
+    enabled_sources = _csv_env("RAG_ENABLED_SOURCES", ["feishu"])
+
+    content_rerank_mode = os.getenv("RAG_FEISHU_CONTENT_RERANK", "all").strip().lower()
+    if content_rerank_mode not in {"all", "table_pool_only", "off"}:
+        raise ValueError("RAG_FEISHU_CONTENT_RERANK must be all, table_pool_only, or off")
 
     # Feishu document reads are often slower than the base balanced timeout.
     source_overrides = {
         "feishu": SourceAgentConfig(
-            source_timeout_s=_positive_float_env("RAG_FEISHU_SOURCE_TIMEOUT_S", 45.0),
+            source_timeout_s=_positive_float_env("RAG_FEISHU_SOURCE_TIMEOUT_S", web_timeout_s or 45.0),
+            content_rerank_mode=content_rerank_mode,
         ),
     }
     planner_config = GlobalPlannerConfig(
@@ -76,4 +83,5 @@ def build_root_retrieve_agent(name: str = "retrieve_v1"):
             load_from_env=True,
         ),
         name=name,
+        defer_feishu_oauth=defer_feishu_oauth,
     )

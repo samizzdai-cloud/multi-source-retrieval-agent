@@ -3,13 +3,20 @@
 session.state['retrieval_result'] : RetrievalResult JSON
 session.state['retrieval_meta']   : 性能统计 JSON
 """
+import logging
 import time
 
 from google.adk.agents.llm_agent import Agent
+from google.adk.models.lite_llm import LiteLlm
 from google.genai import types as genai_types
+
+from tools.core.llm_contracts import DeepSeekFlashClient
+from tools.core.models import DEFAULT_DEEPSEEK_MODEL, THINKING_FLASH
+from tools.core.retrieval_progress import progress_sink
 
 
 _ANSWER_STARTED_AT_KEY = "_answer_started_at"
+logger = logging.getLogger(__name__)
 
 
 def _mark_answer_started(callback_context):
@@ -22,6 +29,9 @@ def _emit_answer_timing(callback_context):
     if not started_at:
         return None
     elapsed_ms = int((time.monotonic() - float(started_at)) * 1000)
+    if progress_sink.get() is not None:
+        logger.info("TIMING answer elapsed_ms=%d", elapsed_ms)
+        return None
     return genai_types.Content(
         role="model",
         parts=[genai_types.Part(text=f"[answer] done elapsed_ms={elapsed_ms}")],
@@ -43,6 +53,7 @@ _INSTRUCTION = """你是一个企业咨询专家，根据已检索到的知识�
    - 禁止猜测或编造缺失方的数据
 6. 若知识片段与问题无关，直接说明无法回答
 7. 关注每个 chunk 的 focus_query 字段：若用户问题中的某个 focus 在所有 chunks 的 focus_query 中均未出现，说明该维度未检索到数据，回答中应明确标注该维度数据缺失
+   若有证据的 Focus 仍缺少部分必需项，分别给出已支持的结论和具体缺口。用户要求各对象的最新情况时，分别标明可核实的业务数据周期；文档修改日期不能证明业务数据属于该周期。其他品牌的材料只能在明确适用时作为旁证。
 8. 末尾固定输出以下区块：
 
 [来源]
@@ -50,7 +61,11 @@ _INSTRUCTION = """你是一个企业咨询专家，根据已检索到的知识�
 """
 
 answer_agent = Agent(
-    model="gemini-3-flash-preview",
+    model=LiteLlm(
+        model=DEFAULT_DEEPSEEK_MODEL,
+        llm_client=DeepSeekFlashClient(),
+        **THINKING_FLASH.to_litellm_kwargs(),
+    ),
     name="answer",
     description="基于已检索 chunks 生成中文自然语言回答",
     instruction=_INSTRUCTION,
