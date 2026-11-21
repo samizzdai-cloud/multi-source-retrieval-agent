@@ -22,13 +22,13 @@ env/
 
 # Testing & output
 .pytest_cache/
-tests/artifacts/
+/tests/
+/docs/
 .eval_output/
 .test_output/
 .spec_organized/
 /test_*/
 /test_*
-docs/session_logs/
 google_workspace_tool/test_results/
 
 # ADK runtime
@@ -60,14 +60,10 @@ optimize_results/
 eval/cache_*/
 eval/live_*/
 
-# Private release checks (body-free summaries only; never commit live evidence)
-tests/artifacts/release_e2e/
-
 # Temp docs
-docs/temp_plan.md
 spec_plan.md
 
-# Local scratch files and process logs (keep synthetic fixtures/source code).
+# Local scratch files and process logs.
 *.log
 *.tmp
 *.bak
@@ -95,20 +91,10 @@ spec_plan.md
 /.zcode/
 /.vscode/tasks.json
 
-# Internal plans, implementation designs and real-business evaluation reports.
-# Adding tracked files here does NOT untrack them; see the private cleanup inventory.
+# Internal plans and live business experiment scripts.
 /plan.md
 /optimize_search.py
 /eval_preset_bench.py
-/docs/private/
-/docs/deepseek_migration_spec.md
-/docs/eval_requirements.md
-/docs/eval_tuning_guide.md
-/docs/feishu_tool_spec.md
-/docs/google_agent_spec.md
-/docs/p1_native_order_refactor_checklist.md
-/docs/profile_on_off_comparison.md
-/docs/profile_trace_construction_spec.md
 /google_workspace_tool/to_read/
 
 # Local evaluation inputs must stay separate from the sanitized *.example files.
@@ -116,7 +102,6 @@ spec_plan.md
 /eval/feishu_test_cases.yaml
 /eval/google_test_cases.yaml
 /eval/private/
-/tests/fixtures/private/
 *.private.json
 *.private.yaml
 

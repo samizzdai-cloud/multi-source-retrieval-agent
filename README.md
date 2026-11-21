@@ -115,9 +115,10 @@ python -m feishu_read_tool.oauth_tokens status
 ```
 
 The runtime refreshes a project-env access token five minutes before expiry. An
-explicit `AgentConfig.feishu_uat` is caller-owned and is not refreshed. See
-[the OAuth lifecycle guide](docs/feishu_oauth_token_lifecycle.md) for required
-scopes and failure handling.
+explicit `AgentConfig.feishu_uat` is caller-owned and is not refreshed. Use
+`python -m feishu_read_tool.oauth_tokens status` to inspect expiry and scope
+flags without printing credentials. Authorize the document/table scopes needed
+by your enabled features in addition to the minimal search scopes shown above.
 
 中文：复制 `.env.example` 后只在本地填写密钥；OAuth 命令会写入被忽略的 `.env`，
 运行时会在即将过期时自动刷新 UAT。
@@ -271,14 +272,8 @@ Use the chat for progress and State for the complete evidence handoff. If Feishu
 authorization is required, follow the link in the Web session and resend the
 query after the callback. The server picks up the new credential on that turn.
 
-To inspect the fixed three-round, no-result, rerank fallback, and phase-timeout
-cases without Feishu or DeepSeek, run the local fixture separately:
-
-```powershell
-adk web tests/adk_web_fixtures --host 127.0.0.1 --port 8789
-```
-
-Send `三轮`, `无结果`, `降级`, `检索超时`, or `回答超时` in the fixture app.
+Local tests and internal documentation are intentionally excluded from the
+published repository.
 
 Run the body-free Feishu-only smoke check after configuring local credentials:
 
